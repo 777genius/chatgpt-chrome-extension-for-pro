@@ -41,7 +41,11 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         entry.turn?.status==='in_progress' && typeof entry.errorMessage==='string' &&
         entry.errorMessage.replace(/\s+/g,' ').trim()===visibleError && visibleError) inputDeliveryError=true;
   }
-  const action = messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
+  // The server's untranslated fallback can offer Start new chat even though
+  // no length limit was reported. That CTA must not turn Unknown error into
+  // a handoff. Require the native React error surface, then retry in place.
+  const unknownServerError=Boolean(fiberKey) && /^unknown error[.!]?$/i.test(visibleError);
+  const action = unknownServerError ? 'retry' : messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
     : messageIds.has('chatgptConversations.responseError.retry') ||
       (alert.querySelector('.text-chatgpt-recovery') && messageIds.has('errors.network.reconnecting_fallback')) || inputDeliveryError ? 'retry' : 'unknown';
   if (recoveryAction === 'stop-recovery') {

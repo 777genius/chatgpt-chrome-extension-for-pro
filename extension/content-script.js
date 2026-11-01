@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.2.7';
+  const SCRIPT_VERSION = '1.2.8';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -505,9 +505,9 @@
     const now = Date.now();
     state.failures = state.failures.filter((at) => now - at <= RETRY_WINDOW_MS);
     state.failures.push(now);
-    if (state.blocked || state.failures.length >= 4 || state.remainingRetries===0) {
+    if (state.blocked || state.failures.length >= 5 || state.remainingRetries===0) {
       state.blocked = true;
-      state.reason ||= state.remainingRetries===0?'Дополнительные автоповторы исчерпаны':'Автопродолжение остановлено: 3 автоповтора за 2 минуты';
+      state.reason ||= state.remainingRetries===0?'Дополнительные автоповторы исчерпаны':'Автопродолжение остановлено: 4 автоповтора за 2 минуты';
       void audit('retry.blocked',{reason:state.reason,failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,error:error.response});
       notifyError(error, state.reason);
       return;
@@ -630,10 +630,11 @@
       await waitHandoff(() => {
         const current = composer();
         const dispatched = (globalThis.__chatgptNotifierAttemptId || '') !== beforeAttempt;
-        const newConversation = location.pathname !== initialPath && /\/c\/[^/]+/.test(location.pathname);
+        const canonicalUrl=ChatGPTHandoffTitle.chatUrl(location.href);
+        const newConversation = location.pathname !== initialPath && Boolean(canonicalUrl);
         // ChatGPT can hide the first user message entirely. A newly allocated
         // conversation plus the observed POST and cleared editor confirm send.
-        return dispatched && current && !editorText(current) && /\/c\/[^/]+/.test(location.pathname) &&
+        return dispatched && current && !editorText(current) && canonicalUrl && canonicalUrl!==ChatGPTHandoffTitle.chatUrl(record.sourceUrl) &&
           (turnNodes().some((node) => roleOf(node) === 'user') || newConversation);
       },60000);
       await updateHandoff('sent', { targetUrl: location.href });
@@ -729,7 +730,8 @@
 
   async function renameHandoff() {
     const record=handoffRecord;
-    if (!record?.naming || record.stage!=='sent' || record.targetUrl!==location.href) return;
+    if (!record?.naming || record.stage!=='sent' || !ChatGPTHandoffTitle.chatUrl(record.targetUrl) ||
+        ChatGPTHandoffTitle.chatUrl(record.targetUrl)!==ChatGPTHandoffTitle.chatUrl(location.href)) return;
     const result=await runtimeMessage({type:'CHATGPT_HANDOFF_RENAME',id:record.id});
     if(result?.ok===false) notifyError({sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`});
   }

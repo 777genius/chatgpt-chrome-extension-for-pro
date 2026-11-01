@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import { parseHTML } from 'linkedom';
-const content = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' +
+const content = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' + readFileSync('extension/handoff-title.js', 'utf8') + '\n' +
   readFileSync('extension/content-script.js', 'utf8');
 const worker = readFileSync('extension/service-worker.js', 'utf8');
 const pause = () => new Promise(resolve => setTimeout(resolve, 220));
@@ -78,11 +78,15 @@ async function domCheck() {
   assert.equal(run.messages.length,0);
   run.advance(30000);
   await run.fail('Четвёртая ошибка');
-  assert.equal(run.sends.length, 3, 'fourth error must not send');
+  assert.equal(run.sends.length,4,'fourth error gets the fourth automatic retry');
+  assert.equal(run.messages.length,0);
+  run.advance(30000);
+  await run.fail('Пятая ошибка');
+  assert.equal(run.sends.length, 4, 'fifth error must not send');
   assert.equal(run.messages.length, 1, 'only threshold error notifies');
-  assert.equal(run.messages[0].response, 'Четвёртая ошибка');
+  assert.equal(run.messages[0].response, 'Пятая ошибка');
   assert.equal(run.messages[0].durationMs, 30000);
-  assert.match(run.messages[0].retryReason, /3 автоповтора за 2 минуты/);
+  assert.match(run.messages[0].retryReason, /4 автоповтора за 2 минуты/);
   run.document.querySelector('aside div:not([aria-hidden])')!.textContent = 'Updated wording';
   await pause();
   assert.equal(run.messages.length, 1, 'one failed attempt is counted once even when error text changes');
@@ -91,10 +95,10 @@ async function domCheck() {
   run.document.querySelector('aside')!.remove();
   await pause();
   await run.fail('Still stopped');
-  assert.equal(run.sends.length, 3, 'limit remains stopped rather than restarting on a timer');
+  assert.equal(run.sends.length, 4, 'limit remains stopped rather than restarting on a timer');
 
-  assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed').length,3);
-  assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,3);
+  assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed').length,4);
+  assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].operationId,run.logs.find(e=>e.kind==='retry.planned').operationId);
   const noLog=setup('Draft');noLog.breakJournal();await noLog.fail('error');
   assert.equal(noLog.sends.length,0,'journal failure must prevent automatic send');
@@ -174,7 +178,7 @@ async function domCheck() {
   runInContext(content, historical.context);
   await pause();
   assert.equal(historical.sends.length, 0);
-  console.log('PASS: three retries silent, fourth stops/notifies, explicit extra budget, stale recovery across attempts, rolling window, sticky stop, changed error text dedupe, timing, draft protection, missing composer, historical/quoted errors, reinjection');
+  console.log('PASS: four retries silent, fifth stops/notifies, explicit extra budget, stale recovery across attempts, rolling window, sticky stop, changed error text dedupe, timing, draft protection, missing composer, historical/quoted errors, reinjection');
 }
 async function workerCheck() {
   const callbacks: Record<string, any> = {};
@@ -234,6 +238,9 @@ async function workerCheck() {
   await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'preparing'},7)",workerContext);
   await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sending'},7)",workerContext);
   await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'preparing'},7)",workerContext));
+  await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sent',targetUrl:'https://chatgpt.com/c/local-chatgpt%3Afixture-id'},7)",workerContext));
+  await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sent',targetUrl:record.sourceUrl},7)",workerContext));
+  await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sent',targetUrl:'https://chatgpt.com/c/target'},7)",workerContext);
   assert.equal(storage['chatgpt-handoff:7'].text,'complete history');
   const sendGuard=(options:any)=>new Promise<any>(resolve=>callbacks.message({type:'CHATGPT_COMPOSER_CONTROL',options},sender,resolve));
   const injectBefore=injections.length;

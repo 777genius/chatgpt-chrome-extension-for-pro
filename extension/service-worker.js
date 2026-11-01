@@ -171,7 +171,7 @@ async function signalConversationRequestCompleted(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['memory-maintenance.js', 'content-script.js']
+      files: ['memory-maintenance.js', 'handoff-title.js', 'content-script.js']
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
@@ -184,7 +184,7 @@ async function installErrorWatchers() {
   const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
   await Promise.allSettled(tabs.map(async (tab) => {
     journalInBackground({kind:'tab.snapshot',discarded:tab.discarded,frozen:tab.frozen,status:tab.status},tab);
-    try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','content-script.js']}); }
+    try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','content-script.js']}); }
     catch (error) { journalInBackground({kind:'watcher.unavailable',reason:String(error.message || error)},tab); }
   }));
 }
@@ -198,7 +198,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
     func: (startedAt) => { globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`; },
     args: [details.timeStamp]
   }).then(() => chrome.scripting.executeScript({
-    target: { tabId: details.tabId }, files: ['memory-maintenance.js', 'content-script.js']
+    target: { tabId: details.tabId }, files: ['memory-maintenance.js', 'handoff-title.js', 'content-script.js']
   })).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
 
@@ -243,6 +243,8 @@ async function handleHandoffMessage(message, tabId) {
       sending: ['sent', 'failed'], sent: [], failed: []
     };
     if (!allowed[current.stage]?.includes(message.stage)) throw new Error('Handoff transition refused');
+    if(message.stage==='sent'&&(!ChatGPTHandoffTitle.chatUrl(message.targetUrl)||
+        ChatGPTHandoffTitle.chatUrl(message.targetUrl)===ChatGPTHandoffTitle.chatUrl(current.sourceUrl)))throw new Error('Handoff destination is not a new permanent chat');
     const record = { ...current, stage: message.stage, targetUrl: message.targetUrl || current.targetUrl, reason: message.reason || '',
       ...(message.stage==='sent'?{sentAt:Date.now()}: {}) };
     await appendJournal({kind:`handoff.${message.stage}`,operationId:record.id,sourceUrl:record.sourceUrl,

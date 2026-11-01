@@ -35,38 +35,72 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{
   if (pending) pending.failure=details.error||'request-failed';
 },TITLE_REQUEST_FILTER);
 
-function renameSavedHandoff(tabId,id) {
+function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
   if (titleJobs.has(tabId)) return titleJobs.get(tabId);
   const job=(async()=>{
     const key=handoffKey(tabId);
     let record=(await chrome.storage.local.get(key))[key];
-    if (!record || record.id!==id || record.stage!=='sent' || !record.naming || record.titleStatus==='confirmed' || record.titleStatus==='failed') return {ok:true,skipped:true};
+    if (!record || record.id!==id || record.stage!=='sent' || !record.naming || record.titleStatus==='confirmed') return {ok:true,skipped:true};
     if (record.titleStatus==='saving') return {ok:false,reason:'Предыдущая попытка переименования не подтверждена; повторная запись отключена'};
-    const url=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
-    if (!url || url===record.sourceUrl) return {ok:false,reason:'Не сохранён адрес нового чата'};
+    let url=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
+    // Old versions could persist a temporary route. Never infer its server
+    // destination from a title or the currently open tab alone.
+    let targetAlias='';
+    if(!url) {
+      try {
+        const target=new URL(record.targetUrl);
+        const path=target.pathname.match(/^\/c\/([^/]+)\/?$/);
+        const alias=path&&decodeURIComponent(path[1]);
+        if(target.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(alias||''))targetAlias=alias;
+      } catch {}
+    }
+    const noSaveIntent=!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt');
+    const recoverFailed=record.titleStatus==='failed'&&recoverTemporaryTarget&&targetAlias&&noSaveIntent&&
+      record.titleReason==='Открыт другой чат; переименование отменено';
+    if(record.titleStatus==='failed'&&!recoverFailed)return {ok:true,skipped:true};
+    if ((!url&&!targetAlias) || url===ChatGPTHandoffTitle.chatUrl(record.sourceUrl)) return {ok:false,reason:'Не сохранён адрес нового чата'};
+    if(targetAlias&&!noSaveIntent)return {ok:false,reason:'Предыдущая попытка переименования не подтверждена; повторная запись отключена'};
     const pending={id,url,title:record.naming.title,ack:false,failure:''};
     let deadline=0;
     const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-    async function update(titleStatus,extra={}) {
+    async function update(titleStatus,extra={},additionalRecords={}) {
       const current=(await chrome.storage.local.get(key))[key];
       if (current?.id!==id) throw new Error('Передача изменилась');
+      if (current.targetUrl!==record.targetUrl) throw new Error('Адрес передачи изменился');
       record={...current,titleStatus,...extra};
-      await appendJournal({kind:`handoff.title_${titleStatus}`,operationId:id,sourceUrl:record.sourceUrl,targetUrl:url,title:pending.title,...extra},{id:tabId});
-      await chrome.storage.local.set({[key]:record});
+      await appendJournal({kind:`handoff.title_${titleStatus}`,operationId:id,sourceUrl:record.sourceUrl,targetUrl:url||record.targetUrl,title:pending.title,...extra},{id:tabId});
+      await chrome.storage.local.set({...additionalRecords,[key]:record});
     }
     async function probe(action,extra={}) {
       const tab=await chrome.tabs.get(tabId);
-      if (tab.url!==url) throw new Error('Открыт другой чат; переименование отменено');
+      if (ChatGPTHandoffTitle.chatUrl(tab.url)!==url) throw new Error('Открыт другой чат; переименование отменено');
       const result=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
         args:[{action,url,operationId:id,title:pending.title,expiresAt:deadline,...extra}]});
       return result[0]?.result||{ok:false,reason:'Страница не ответила'};
     }
     try {
-      await update('waiting');
+      if(!targetAlias)await update('waiting');
       // A conversation URL may be allocated before the server exposes actions.
       const notBefore=(record.sentAt||Date.now())+10000;
       while(Date.now()<notBefore) await wait(Math.min(1000,notBefore-Date.now()));
       deadline=Date.now()+60000;
+      if(targetAlias) {
+        const tab=await chrome.tabs.get(tabId);
+        const candidate=ChatGPTHandoffTitle.chatUrl(tab.url);
+        if(!candidate||candidate===ChatGPTHandoffTitle.chatUrl(record.sourceUrl))throw new Error('Не подтверждён адрес нового чата');
+        const results=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
+          args:[{action:'inspect',url:candidate,operationId:id,title:pending.title,expiresAt:deadline}]});
+        const state=results[0]?.result;
+        if(!state?.ok||!state.ready||state.conversationId!==targetAlias||ChatGPTHandoffTitle.chatUrl(state.url)!==candidate) {
+          throw new Error('Временный адрес не подтверждён текущим чатом');
+        }
+        url=candidate;pending.url=url;
+        // Transfer lineage follows the destination even if its later title
+        // save fails. Persist both bindings together and retain the old key.
+        const lineage={...record.naming,targetUrl:url,transferred:true,confirmed:false};
+        await update('waiting',{targetUrl:url,titlePreviousTargetUrl:record.targetUrl,titleTargetAlias:targetAlias,titleTargetBoundAt:Date.now()},
+          {[`chatgpt-handoff-title:${url}`]:lineage});
+      }
       let snapshot;
       while(Date.now()<deadline) {
         snapshot=await probe('inspect');
@@ -86,7 +120,7 @@ function renameSavedHandoff(tabId,id) {
       }
       // Durable intent before one click. A lost reply never causes a second save.
       if(Date.now()>=deadline)throw new Error('Истекло время переименования');
-      await update('saving',{previousTitle});
+      await update('saving',{previousTitle,titleSaveStartedAt:Date.now()});
       pendingTitles.set(tabId,pending);
       let saved;
       do {if(Date.now()>=deadline)throw new Error('Истекло время переименования');saved=await probe('save',{previousTitle});if(!saved.ok&&saved.retryable)await wait(250);} while(!saved.ok&&saved.retryable&&Date.now()<deadline);

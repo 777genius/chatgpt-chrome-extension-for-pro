@@ -102,7 +102,7 @@ function lifecycleSetup(runtimeId: string | null = 'test-extension') {
     setTimeout(callback: () => void) { const id = ++timerId; timeouts.set(id, callback); return id; },
     clearTimeout(id: number) {timeouts.delete(id);}
   });
-  const source = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' +
+  const source = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' + readFileSync('extension/handoff-title.js', 'utf8') + '\n' +
     readFileSync('extension/content-script.js', 'utf8');
   runInContext(source, world);
   const lifecycle = world as unknown as LifecycleContext;
