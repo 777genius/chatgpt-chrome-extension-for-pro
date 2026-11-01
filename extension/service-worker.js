@@ -222,6 +222,7 @@ async function handleHandoffMessage(message, tabId) {
   const write = previous.catch(() => {}).then(async () => {
     const current = (await chrome.storage.local.get(key))[key];
     if (message.type === 'CHATGPT_HANDOFF_BEGIN') {
+      if(['sending','awaiting-confirmation'].includes(current?.stage))throw new Error('Предыдущая передача ещё ожидает подтверждения');
       let record = message.record;
       if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string') throw new Error('Invalid handoff');
       const marker = `${key}:source:${record.sourceUrl}`;
@@ -238,27 +239,95 @@ async function handleHandoffMessage(message, tabId) {
       return { ok: true, record: { ...record, stage: 'navigating' } };
     }
     if (!current || current.id !== message.id) throw new Error('Handoff changed');
+    if(message.type==='HANDOFF_CLICK_RECEIPT') {
+      if(!['sending','awaiting-confirmation'].includes(current.stage)||current.sendReceipt)throw new Error('Handoff click receipt refused');
+      const record={...current,sendReceipt:message.receipt};
+      await chrome.storage.local.set({[key]:record});
+      return {ok:true,record};
+    }
+    if(message.type==='CHATGPT_HANDOFF_DRAFT_CLAIM') {
+      if(current.stage!=='sent'||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==ChatGPTHandoffTitle.chatUrl(current.targetUrl))throw new Error('Handoff draft destination changed');
+      if(current.draftRestoreClaimedAt)return {ok:true,claimed:false,record:current};
+      const record={...current,draftRestoreClaimedAt:Date.now()};
+      await appendJournal({kind:'handoff.draft_restore_intent',operationId:record.id,targetUrl:record.targetUrl,draftChars:record.draft?.length||0},{id:tabId});
+      await chrome.storage.local.set({[key]:record});
+      return {ok:true,claimed:true,record};
+    }
+    let acceptance=null;
+    if(message.type==='CHATGPT_HANDOFF_RECONCILE'||message.stage==='sent') {
+      if(current.stage==='sent')return {ok:true,record:current,confirmed:true};
+      if(!['sending','awaiting-confirmation'].includes(current.stage))return {ok:true,record:current,confirmed:false};
+      const receipt=current.sendReceipt;
+      if(receipt?.operationId===current.id&&typeof receipt.submittedText==='string'&&receipt.submittedText&&Number.isFinite(receipt.clickedAt)) {
+        const results=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectHandoffAcceptance,args:[{
+          sourceUrl:current.sourceUrl,targetUrl:current.targetUrl,submittedText:receipt.submittedText,conversationAlias:receipt.conversationAlias||''}]});
+        const proof=results[0]?.result;
+        if(proof?.accepted&&ChatGPTHandoffTitle.chatUrl(proof.targetUrl)&&ChatGPTHandoffTitle.chatUrl(proof.targetUrl)!==ChatGPTHandoffTitle.chatUrl(current.sourceUrl)&&proof.messageId&&
+            ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)===ChatGPTHandoffTitle.chatUrl(proof.targetUrl))acceptance=proof;
+      }
+      if(!acceptance) {
+        if(message.type==='CHATGPT_HANDOFF_RECONCILE')return {ok:true,record:current,confirmed:false};
+        throw new Error('Handoff native payload acceptance is not confirmed');
+      }
+      message={...message,stage:'sent',targetUrl:acceptance.targetUrl};
+    }
     const allowed = {
       navigating: ['preparing', 'failed'], preparing: ['preparing', 'sending', 'failed'],
-      sending: ['sent', 'failed'], sent: [], failed: []
+      sending: ['sent', 'awaiting-confirmation', 'failed'], 'awaiting-confirmation':['sent','awaiting-confirmation'], sent: [], failed: []
     };
     if (!allowed[current.stage]?.includes(message.stage)) throw new Error('Handoff transition refused');
     if(message.stage==='sent'&&(!ChatGPTHandoffTitle.chatUrl(message.targetUrl)||
         ChatGPTHandoffTitle.chatUrl(message.targetUrl)===ChatGPTHandoffTitle.chatUrl(current.sourceUrl)))throw new Error('Handoff destination is not a new permanent chat');
     const record = { ...current, stage: message.stage, targetUrl: message.targetUrl || current.targetUrl, reason: message.reason || '',
+      ...(message.stage==='awaiting-confirmation'?{awaitingNotifiedAt:current.awaitingNotifiedAt||Date.now()}:{}),
+      ...(acceptance?{acceptance:{messageId:acceptance.messageId,entryId:acceptance.entryId,targetUrl:acceptance.targetUrl,confirmedAt:Date.now()}}:{}),
       ...(message.stage==='sent'?{sentAt:Date.now()}: {}) };
     await appendJournal({kind:`handoff.${message.stage}`,operationId:record.id,sourceUrl:record.sourceUrl,
       targetUrl:record.targetUrl,reason:record.reason}, {id:tabId});
     const lineageUrl=message.stage==='sent'&&record.naming?ChatGPTHandoffTitle.chatUrl(record.targetUrl):'';
     await chrome.storage.local.set({ [key]: record,
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
-    return { ok: true, record };
+    return { ok: true, record, notifyAwaiting:message.stage==='awaiting-confirmation'&&!current.awaitingNotifiedAt };
   });
   handoffWrites.set(tabId, write);
   try { return await write; } finally { if (handoffWrites.get(tabId) === write) handoffWrites.delete(tabId); }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (['CHATGPT_HANDOFF_TITLE_INFO','CHATGPT_HANDOFF_RENAME_RECOVER'].includes(message?.type)) {
+    if (sender.id!==chrome.runtime.id || sender.url!==chrome.runtime.getURL('popup.html')) {
+      sendResponse({ok:false,reason:'Восстановление доступно только из меню расширения'});
+      return false;
+    }
+    (async()=>{
+      const unavailable=()=>message.type==='CHATGPT_HANDOFF_TITLE_INFO'?{ok:true,available:false}:
+        {ok:false,reason:'Восстановление больше недоступно; откройте меню расширения заново'};
+      const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+      const targetUrl=ChatGPTHandoffTitle.chatUrl(tab?.url);
+      if(typeof tab?.id!=='number'||!targetUrl)return unavailable();
+      const record=(await chrome.storage.local.get(handoffKey(tab.id)))[handoffKey(tab.id)];
+      let alias='';
+      try {
+        const oldTarget=new URL(record?.targetUrl);
+        const match=oldTarget.pathname.match(/^\/c\/([^/]+)\/?$/);
+        const value=match&&decodeURIComponent(match[1]);
+        if(oldTarget.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(value||''))alias=value;
+      } catch {}
+      if(typeof record?.id!=='string'||!record.id||record.stage!=='sent'||record.titleStatus!=='failed'||!alias||
+          record.titleReason!=='Открыт другой чат; переименование отменено'||
+          Object.hasOwn(record,'previousTitle')||Object.hasOwn(record,'titleSaveStartedAt'))return unavailable();
+      try {ChatGPTHandoffTitle.confirm(record.naming,targetUrl);} catch {return unavailable();}
+      const info={ok:true,available:true,operationId:record.id,tabId:tab.id,targetUrl,desiredTitle:record.naming.title};
+      if(message.type==='CHATGPT_HANDOFF_TITLE_INFO')return info;
+      // Bind the explicit click to the title and destination shown by this
+      // popup. A switched tab or replaced handoff needs a fresh user action.
+      if(message.operationId!==info.operationId||message.tabId!==info.tabId||message.targetUrl!==info.targetUrl||message.desiredTitle!==info.desiredTitle) {
+        return {ok:false,reason:'Чат или название изменились; откройте меню расширения заново'};
+      }
+      return renameSavedHandoff(tab.id,record.id,{recoverTemporaryTarget:true});
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message||error)}));
+    return true;
+  }
   if (message?.type==='CHATGPT_RETRY_STATE') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId>0 || !message.url?.startsWith('https://chatgpt.com/')) return;
     readRetryState(message.url).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:String(error.message||error)}));
@@ -289,6 +358,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'CHATGPT_COMPOSER_CONTROL') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
+    let pageDispatchStarted=false;
     (async () => {
       const options = message.options;
       if (!['inspect','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
@@ -306,18 +376,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } else throw new Error('Отправка пользовательского черновика запрещена');
         await appendJournal({kind:'send.authorized',operationId:options.operationId,text:options.text,sourceUrl:options.url},sender.tab);
       }
+      pageDispatchStarted=options.action==='send';
       return chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:controlChatComposer,args:[options]});
     })()
       .then(async results=>{
-        const result=results[0]?.result || {ok:false,reason:'Редактор недоступен'};
+        const result=results[0]?.result || {ok:false,unknown:pageDispatchStarted,reason:'Редактор недоступен'};
         if(result.clicked) {
+          // Preserve the actual native serialization, independently of the
+          // content-script lifetime. A missing reply never authorizes a resend.
+          try {
+            const stored=(await chrome.storage.local.get(handoffKey(sender.tab.id)))[handoffKey(sender.tab.id)];
+            if(stored?.id===message.options.operationId&&['sending','awaiting-confirmation'].includes(stored.stage)) {
+              await handleHandoffMessage({type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,
+                submittedText:result.submittedText,clickedAt:result.clickedAt,sendUrl:message.options.url,conversationAlias:result.conversationAlias||''}},sender.tab.id);
+            }
+          } catch {result.receiptError=true;}
           try {await appendJournal({kind:'send.dispatched',operationId:message.options.operationId,sourceUrl:message.options.url,
             text:result.submittedText,requestedText:message.options.text,promptChars:result.promptChars},sender.tab);}
           catch {result.auditError=true;}
         }
         sendResponse(result);
       })
-      .catch(error=>sendResponse({ok:false,reason:String(error.message || error)}));
+      .catch(error=>sendResponse({ok:false,unknown:pageDispatchStarted,reason:String(error.message || error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_JOURNAL_READ') {
@@ -351,7 +431,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(() => sendResponse({ ok: false, action: 'unknown' }));
     return true;
   }
-  if (['CHATGPT_HANDOFF_GET', 'CHATGPT_HANDOFF_BEGIN', 'CHATGPT_HANDOFF_UPDATE'].includes(message?.type)) {
+  if (['CHATGPT_HANDOFF_GET', 'CHATGPT_HANDOFF_BEGIN', 'CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(message?.type)) {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     handleHandoffMessage(message, sender.tab.id).then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
@@ -429,6 +509,7 @@ chrome.tabs.onUpdated?.addListener((tabId, change, tab) => {
   if (change.url || change.discarded !== undefined || change.frozen !== undefined) {
     journalInBackground({kind:'tab.updated',changes:change},tab);
   }
+  if(change.url)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_ROUTE_CHANGED'}).catch(()=>{});
 });
 
 chrome.notifications.onClicked.addListener(async (notificationId) => {

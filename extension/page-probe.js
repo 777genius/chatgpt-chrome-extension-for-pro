@@ -107,6 +107,51 @@ function inspectChatAttachment(fileName) {
   return { status: 'unknown' };
 }
 
+// Read-only acknowledgement of an already clicked handoff. The composer being
+// empty or a route changing is insufficient: require the exact native payload
+// in the active conversation's React entries and a permanent destination.
+function inspectHandoffAcceptance(options) {
+  function canonical(value) {
+    try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)
+      ? `${url.origin}${url.pathname.replace(/\/$/,'')}`:'';} catch {return '';}
+  }
+  const targetUrl=canonical(location.href);
+  if(!targetUrl||targetUrl===canonical(options.sourceUrl)||typeof options.submittedText!=='string'||!options.submittedText) return {ok:true,accepted:false};
+  const previousTarget=canonical(options.targetUrl);
+  if(previousTarget&&previousTarget!==targetUrl)return {ok:true,accepted:false};
+  const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
+  const visible=node=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert], [aria-hidden="true"], [data-app-shell-active-page="false"]'));
+  const aliases=new Set();
+  const chatId=new URL(targetUrl).pathname.split('/').at(-1);
+  let nativeMismatch=false;
+  for(const node of root.querySelectorAll('header button')) {
+    if(!visible(node))continue;
+    const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
+    for(let fiber=key&&node[key],i=0;fiber&&i<20;i++,fiber=fiber.return) {
+      const id=fiber.memoizedProps?.conversationId;
+      if(typeof id==='string'&&id.startsWith('local-chatgpt:'))aliases.add(id);
+      else if(typeof id==='string'&&id&&id!==chatId)nativeMismatch=true;
+    }
+  }
+  if(nativeMismatch||(options.conversationAlias&&aliases.size&&(!aliases.has(options.conversationAlias)||aliases.size!==1)))return {ok:true,accepted:false};
+  const anchors=Array.from(root.querySelectorAll('[data-composer-body], [data-turn-key], [data-testid^="conversation-turn-"], [data-message-author-role], [data-chatgpt-search-unit-key]')).filter(visible).slice(0,24);
+  const inspected=new Set();
+  for(const node of anchors) {
+    const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
+    for(let fiber=key&&node[key],i=0;fiber&&i<50;i++,fiber=fiber.return) {
+      if(inspected.has(fiber))continue;inspected.add(fiber);
+      const entries=fiber.memoizedProps?.entries;
+      if(!Array.isArray(entries))continue;
+      for(const entry of entries)for(const item of entry.turn?.items||[]) {
+        if(item.type==='user-message'&&item.message===options.submittedText&&typeof item.messageId==='string'&&item.messageId) {
+          return {ok:true,accepted:true,targetUrl,messageId:item.messageId,entryId:entry.id||null};
+        }
+      }
+    }
+  }
+  return {ok:true,accepted:false};
+}
+
 // Atomic validation + one click in the page's world. DOM text alone can be
 // ahead of React/ProseMirror and must never authorize sending a user's draft.
 function controlChatComposer(options) {
@@ -190,6 +235,9 @@ function controlChatComposer(options) {
   const button = Array.from(root.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.
+  const clickedAt=Date.now();
   button.click();
-  return {ok:true,clicked:true,effort,promptChars:prompt.length,submittedText:prompt};
+  let conversationAlias='';
+  try {const id=decodeURIComponent(new URL(location.href).pathname.split('/').at(-1)||'');if(/^local-chatgpt:[a-z0-9-]+$/.test(id))conversationAlias=id;}catch{}
+  return {ok:true,clicked:true,effort,promptChars:prompt.length,submittedText:prompt,clickedAt,conversationAlias};
 }
