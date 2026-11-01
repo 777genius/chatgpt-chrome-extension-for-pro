@@ -4,13 +4,22 @@
 // composer. Every effect is bound to the saved destination and one operation.
 function controlChatTitle(options) {
   const visible = node => Boolean(node?.isConnected && node.getClientRects().length && !node.closest('[inert], [aria-hidden="true"], [data-app-shell-active-page="false"]'));
+  // executeScript serializes this function into MAIN, so its route guard must
+  // be self-contained. Query strings and fragments do not change a chat ID.
+  const chatUrl = value => {
+    try {
+      const url=new URL(value);
+      return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)
+        ? `${url.origin}${url.pathname.replace(/\/$/,'')}` : '';
+    } catch { return ''; }
+  };
   if (options.action==='cancel') {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
       const candidates=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
       const input=state.input||(state.selected&&candidates.length===1?candidates[0]:null);
-      if(location.href===state.url && input && [state.title,state.previousTitle].includes(input.value)) input.closest('form')?.querySelector('button[type="button"]')?.click();
-      if(location.href===state.url && !state.selected) {
+      if(chatUrl(location.href)===state.url && input && [state.title,state.previousTitle].includes(input.value)) input.closest('form')?.querySelector('button[type="button"]')?.click();
+      if(chatUrl(location.href)===state.url && !state.selected) {
         const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
       }
@@ -18,18 +27,23 @@ function controlChatTitle(options) {
     }
     return {ok:true};
   }
-  if (location.href !== options.url || !/^https:\/\/chatgpt\.com\/c\/[^/?#]+$/.test(options.url)) return {ok:false,reason:'chat-changed'};
+  if (!chatUrl(options.url) || chatUrl(location.href)!==chatUrl(options.url)) return {ok:false,reason:'chat-changed'};
+  options={...options,url:chatUrl(options.url)};
   const chatId = new URL(options.url).pathname.split('/').at(-1);
   const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
   const actions = Array.from(document.querySelectorAll('header button[aria-haspopup="menu"]')).find(node=>visible(node) && node.querySelector('use[href*="ellipsis-horizontal"]'));
   let ready = false;
+  const nativeConversationIds=new Set();
   // Native share control exposes server readiness for this conversation.
   for (const node of document.querySelectorAll('header button')) {
     if (!visible(node)) continue;
     const key = Object.keys(node).find(key=>key.startsWith('__reactFiber$'));
     for (let fiber=key&&node[key],i=0;fiber&&i<18;i++,fiber=fiber.return) {
       const props=fiber.memoizedProps;
-      if (props?.isReady===true && (props.conversationId===chatId || /^local-chatgpt:/.test(props.conversationId||''))) ready=true;
+      if (props?.isReady===true && typeof props.conversationId==='string') {
+        nativeConversationIds.add(props.conversationId);
+        if(props.conversationId===chatId || /^local-chatgpt:/.test(props.conversationId))ready=true;
+      }
     }
   }
   // Newly-created chats can have a failed/unfetched GET query even after the
@@ -51,7 +65,8 @@ function controlChatTitle(options) {
     if(query?.state?.data?.conversation_id && query.state.data.conversation_id!==chatId)canonicalMismatch=true;
   }
   ready=ready&&!canonicalMismatch;
-  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),title:document.title,url:location.href};
+  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),title:document.title,url:location.href,
+    conversationId:nativeConversationIds.size===1?Array.from(nativeConversationIds)[0]:null};
   if (Number.isFinite(options.expiresAt)&&Date.now()>=options.expiresAt) return {ok:false,reason:'title-deadline-exceeded'};
   let state=globalThis.__chatgptNotifierTitleOperation;
   if (options.action==='open') {

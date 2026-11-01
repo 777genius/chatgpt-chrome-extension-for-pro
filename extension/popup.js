@@ -33,3 +33,27 @@ document.getElementById('handoff').addEventListener('click', async () => {
 document.getElementById('journal').addEventListener('click', () => {
   chrome.tabs.create({url:chrome.runtime.getURL('journal.html')});
 });
+
+const titleRecovery=document.getElementById('title-recovery');
+const recoverTitle=document.getElementById('recover-title');
+let recoveryInfo=null;
+chrome.runtime.sendMessage({type:'CHATGPT_HANDOFF_TITLE_INFO'}).then(info=>{
+  if(!info?.ok||!info.available)return;
+  recoveryInfo=info;
+  document.getElementById('desired-title').textContent=info.desiredTitle;
+  titleRecovery.hidden=false;
+}).catch(()=>{});
+recoverTitle.addEventListener('click',async()=>{
+  if(!recoveryInfo||recoverTitle.disabled)return;
+  recoverTitle.disabled=true;
+  status.textContent='Восстанавливаем название...';
+  try {
+    const result=await chrome.runtime.sendMessage({type:'CHATGPT_HANDOFF_RENAME_RECOVER',
+      operationId:recoveryInfo.operationId,tabId:recoveryInfo.tabId,targetUrl:recoveryInfo.targetUrl,desiredTitle:recoveryInfo.desiredTitle});
+    if(!result?.ok||result.skipped||result.available===false)throw new Error(result?.reason||'Восстановление больше недоступно');
+    status.textContent='Название чата восстановлено.';
+    titleRecovery.hidden=true;
+  } catch(error) {
+    status.textContent=`Название не восстановлено: ${error.message}`;
+  }
+});

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import { parseHTML } from 'linkedom';
-const content = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' +
+const content = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' + readFileSync('extension/handoff-title.js', 'utf8') + '\n' +
   readFileSync('extension/content-script.js', 'utf8');
 const worker = readFileSync('extension/service-worker.js', 'utf8');
 const pause = () => new Promise(resolve => setTimeout(resolve, 220));
@@ -78,11 +78,15 @@ async function domCheck() {
   assert.equal(run.messages.length,0);
   run.advance(30000);
   await run.fail('Четвёртая ошибка');
-  assert.equal(run.sends.length, 3, 'fourth error must not send');
+  assert.equal(run.sends.length,4,'fourth error gets the fourth automatic retry');
+  assert.equal(run.messages.length,0);
+  run.advance(30000);
+  await run.fail('Пятая ошибка');
+  assert.equal(run.sends.length, 4, 'fifth error must not send');
   assert.equal(run.messages.length, 1, 'only threshold error notifies');
-  assert.equal(run.messages[0].response, 'Четвёртая ошибка');
+  assert.equal(run.messages[0].response, 'Пятая ошибка');
   assert.equal(run.messages[0].durationMs, 30000);
-  assert.match(run.messages[0].retryReason, /3 автоповтора за 2 минуты/);
+  assert.match(run.messages[0].retryReason, /4 автоповтора за 2 минуты/);
   run.document.querySelector('aside div:not([aria-hidden])')!.textContent = 'Updated wording';
   await pause();
   assert.equal(run.messages.length, 1, 'one failed attempt is counted once even when error text changes');
@@ -91,10 +95,10 @@ async function domCheck() {
   run.document.querySelector('aside')!.remove();
   await pause();
   await run.fail('Still stopped');
-  assert.equal(run.sends.length, 3, 'limit remains stopped rather than restarting on a timer');
+  assert.equal(run.sends.length, 4, 'limit remains stopped rather than restarting on a timer');
 
-  assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed').length,3);
-  assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,3);
+  assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed').length,4);
+  assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].operationId,run.logs.find(e=>e.kind==='retry.planned').operationId);
   const noLog=setup('Draft');noLog.breakJournal();await noLog.fail('error');
   assert.equal(noLog.sends.length,0,'journal failure must prevent automatic send');
@@ -174,21 +178,23 @@ async function domCheck() {
   runInContext(content, historical.context);
   await pause();
   assert.equal(historical.sends.length, 0);
-  console.log('PASS: three retries silent, fourth stops/notifies, explicit extra budget, stale recovery across attempts, rolling window, sticky stop, changed error text dedupe, timing, draft protection, missing composer, historical/quoted errors, reinjection');
+  console.log('PASS: four retries silent, fifth stops/notifies, explicit extra budget, stale recovery across attempts, rolling window, sticky stop, changed error text dedupe, timing, draft protection, missing composer, historical/quoted errors, reinjection');
 }
 async function workerCheck() {
   const callbacks: Record<string, any> = {};
   const event = (name: string) => ({ addListener: (fn: any) => { callbacks[name] = fn; } });
   const notifications: any[] = [], injections: any[] = [];
   let soundCalls = 0;
+  let activeTab={id:7,url:'https://chatgpt.com/c/example'};
+  let handoffProof:any=null;
   const storage: Record<string, any> = {};
   const chrome = {
     storage: { local: { get: async (key: string | null) => key === null ? {...storage} : ({ [key]: storage[key] }), set: async (entries: any) => {Object.assign(storage, entries);} } },
-    runtime: { onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
-      getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => url, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
+    runtime: { id:'test-extension',onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
+      getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
-    tabs: { query: async () => [{id: 7}], onRemoved: event('removed'), sendMessage: async () => {} },
-    scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:{ok:true,clicked:true}}]; } },
+    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async () => {} },
+    scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
   const workerContext = createContext({ chrome, console, URL, setTimeout, clearTimeout });
@@ -234,6 +240,13 @@ async function workerCheck() {
   await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'preparing'},7)",workerContext);
   await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sending'},7)",workerContext);
   await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'preparing'},7)",workerContext));
+  await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sent',targetUrl:'https://chatgpt.com/c/local-chatgpt%3Afixture-id'},7)",workerContext));
+  await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sent',targetUrl:record.sourceUrl},7)",workerContext));
+  await assert.rejects(runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_UPDATE',id:record.id,stage:'sent',targetUrl:'https://chatgpt.com/c/target'},7)",workerContext));
+  await runInContext("handleHandoffMessage({type:'HANDOFF_CLICK_RECEIPT',id:record.id,receipt:{operationId:record.id,submittedText:'complete history',clickedAt:123}},7)",workerContext);
+  handoffProof={accepted:true,targetUrl:'https://chatgpt.com/c/target',messageId:'accepted-message'};
+  activeTab={id:7,url:'https://chatgpt.com/c/target'};
+  await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_RECONCILE',id:record.id},7)",workerContext);
   assert.equal(storage['chatgpt-handoff:7'].text,'complete history');
   const sendGuard=(options:any)=>new Promise<any>(resolve=>callbacks.message({type:'CHATGPT_COMPOSER_CONTROL',options},sender,resolve));
   const injectBefore=injections.length;
@@ -249,6 +262,71 @@ async function workerCheck() {
   console.log('PASS: worker forbids user drafts, enforces persisted exact command and one-use send');
   console.log('PASS: durable handoff state, source deduplication, no resend after sending');
   console.log('PASS: error title/body, repeat attempts, success deduplication, existing-tab activation, request-start activation');
+
+  const recoveries:any[]=[];
+  Object.assign(workerContext,{recoveries});
+  runInContext('renameSavedHandoff=async(tabId,id,options)=>{recoveries.push({tabId,id,options});return {ok:true,title:"Original name (1)"}}',workerContext);
+  const popupSender={id:chrome.runtime.id,url:chrome.runtime.getURL('popup.html')};
+  const titleMessage=(message:any,origin:any=popupSender)=>new Promise<any>(resolve=>callbacks.message(message,origin,resolve));
+  const legacy={...storage['chatgpt-handoff:7'],targetUrl:'https://chatgpt.com/c/local-chatgpt%3Alegacy-alias',
+    titleStatus:'failed',titleReason:'Открыт другой чат; переименование отменено'};
+  activeTab={id:7,url:'https://chatgpt.com/c/target'};
+  storage['chatgpt-handoff:7']=legacy;
+  const info=await titleMessage({type:'CHATGPT_HANDOFF_TITLE_INFO'});
+  assert.equal(info.available,true);assert.equal(info.desiredTitle,'Original name (1)');
+  assert.equal(recoveries.length,0,'showing the saved title never starts recovery');
+  const request={...info,type:'CHATGPT_HANDOFF_RENAME_RECOVER'};
+  for(const origin of [sender,{...popupSender,id:'other-extension'},{...popupSender,url:chrome.runtime.getURL('journal.html')}]) {
+    assert.equal((await titleMessage({type:'CHATGPT_HANDOFF_TITLE_INFO'},origin)).ok,false);
+    assert.equal((await titleMessage(request,origin)).ok,false,'only the exact own popup may authorize legacy recovery');
+  }
+  assert.equal(recoveries.length,0);
+  assert.equal((await titleMessage({...request,desiredTitle:'Substituted title'})).ok,false);
+  activeTab={id:8,url:'https://chatgpt.com/c/other'};
+  assert.equal((await titleMessage(request)).ok,false);assert.equal(recoveries.length,0,'changing active tab invalidates the shown destination');
+  activeTab={id:7,url:'https://chatgpt.com/c/target'};
+  assert.equal((await titleMessage(request)).ok,true);
+  assert.deepEqual(JSON.parse(JSON.stringify(recoveries)),[{tabId:7,id:'handoff-test',options:{recoverTemporaryTarget:true}}]);
+  for(const changed of [
+    {...legacy,previousTitle:undefined},{...legacy,titleSaveStartedAt:undefined},
+    {...legacy,stage:'sending'},{...legacy,titleStatus:'saving'},{...legacy,titleStatus:'confirmed'},
+    {...legacy,titleReason:'Server timeout'},{...legacy,targetUrl:'https://chatgpt.com/c/permanent'},
+    {...legacy,naming:{...legacy.naming,title:'Forged title'}}
+  ]) {
+    storage['chatgpt-handoff:7']=changed;
+    assert.equal((await titleMessage({type:'CHATGPT_HANDOFF_TITLE_INFO'})).available,false);
+    assert.equal((await titleMessage(request)).ok,false);
+  }
+  assert.equal(recoveries.length,1,'unknown save outcomes and nonlegacy records never enter recovery');
+  console.log('PASS: explicit own-popup-only legacy title recovery, current-tab/title binding and unknown-save refusal');
+}
+async function popupRecoveryCheck() {
+  const {document,window}=parseHTML(readFileSync('extension/popup.html','utf8'));
+  const messages:any[]=[];
+  let finishRecovery:(result:any)=>void=()=>{};
+  const info={ok:true,available:true,operationId:'legacy-op',tabId:7,targetUrl:'https://chatgpt.com/c/target',desiredTitle:'Saved title (2)'};
+  const ctx=createContext({document,chrome:{runtime:{sendMessage:async(message:any)=>{
+    messages.push(message);
+    if(message.type==='CHATGPT_HANDOFF_TITLE_INFO')return info;
+    if(message.type==='CHATGPT_HANDOFF_RENAME_RECOVER')return new Promise(resolve=>{finishRecovery=resolve;});
+    return {ok:true};
+  }},tabs:{create(){}}}});
+  runInContext(readFileSync('extension/popup.js','utf8'),ctx);
+  await Promise.resolve();await Promise.resolve();
+  assert.equal(document.getElementById('title-recovery')!.hidden,false);
+  assert.equal(document.getElementById('desired-title')!.textContent,'Saved title (2)');
+  assert.equal(messages.length,1,'opening the popup only reads recovery information');
+  const button=document.getElementById('recover-title')!;
+  button.dispatchEvent(new window.Event('click'));
+  button.dispatchEvent(new window.Event('click'));
+  assert.equal(messages.length,2,'explicit duplicate clicks issue one recovery request');
+  assert.equal(messages[1].desiredTitle,'Saved title (2)');
+  assert.equal(messages[1].targetUrl,info.targetUrl);
+  finishRecovery({ok:true});await pause();
+  assert.equal(document.getElementById('title-recovery')!.hidden,true);
+  assert.equal(document.getElementById('status')!.textContent,'Название чата восстановлено.');
+  console.log('PASS: popup previews exact saved title and waits for an explicit one-use recovery click');
 }
 if(process.argv[2]!=='worker') await domCheck();
 await workerCheck();
+await popupRecoveryCheck();

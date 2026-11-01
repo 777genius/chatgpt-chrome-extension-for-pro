@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.2.7';
+  const SCRIPT_VERSION = '1.2.10';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -379,6 +379,12 @@
     let replaced = false;
     let recoveryStopped = false;
     let recoveryDraft = null;
+    let readinessPhase = 'planned';
+    const readiness = async (phase,details={}) => {
+      if(readinessPhase===phase)return;
+      readinessPhase=phase;
+      await logRetry('retry.readiness',{phase,...details});
+    };
     const stillCurrent = () => runtimeAvailable() && watchToken === expectedToken && location.pathname === path && retryState() === state && !state.blocked &&
       (globalThis.__chatgptNotifierAttemptId || '') === attempt &&
       (!error.recovery || recoveryStopped || currentErrors().some(node=>node.querySelector('.text-chatgpt-recovery'))) &&
@@ -403,7 +409,12 @@
         if (!result?.ok) throw new Error(result?.reason || 'Не удалось остановить зависшее ожидание');
         recoveryStopped = Boolean(result.stopped);
       }
-      const deadline = Date.now() + 10000;
+      // The native stop can clear its banner before the composer becomes
+      // writable. Share one bounded budget across stop settling, button and
+      // actual editor readiness; never extend it after another failed check.
+      const readinessMs=recoveryStopped?60000:10000;
+      const deadline = Date.now() + readinessMs;
+      await readiness('generation-idle',{timeoutMs:readinessMs,deadlineAt:deadline,recoveryStopped});
       while (isGenerating()) {
         if (!stillCurrent()) return;
         if (Date.now() >= deadline) throw new Error('Чат всё ещё занят');
@@ -428,23 +439,43 @@
       replaced = true;
       replacingDraft = true;
       replaceEditorText(editor, RETRY_TEXT);
-      let button = sendButton();
-      while (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
+      let stableSince=0;
+      while(Date.now()<deadline) {
         if (!stillCurrent()) return;
-        if (editorText(editor) !== RETRY_TEXT) throw new Error('Содержимое поля изменилось');
-        if (Date.now() >= deadline) throw new Error('Кнопка отправки недоступна');
+        if(composer()!==editor||rawEditorText(editor)!==RETRY_TEXT||isGenerating()) {
+          await logRetry('retry.readiness_cancelled',{phase:readinessPhase,reason:isGenerating()?'generation-resumed':'editor-changed'});
+          return;
+        }
+        const button=sendButton();
+        const buttonReady=button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true';
+        const native=buttonReady?await inspectComposer(RETRY_TEXT):null;
+        if(!stillCurrent())return;
+        if(Date.now()>=deadline)break;
+        if(composer()!==editor||rawEditorText(editor)!==RETRY_TEXT||isGenerating()) {
+          await logRetry('retry.readiness_cancelled',{phase:readinessPhase,reason:isGenerating()?'generation-resumed':'editor-changed'});
+          return;
+        }
+        if(buttonReady&&native?.ok&&native.matches&&native.ready) {
+          if(!stableSince)stableSince=performance.now();
+          await readiness('settling');
+          if(performance.now()-stableSince>=500) {await readiness('ready');break;}
+        } else {
+          stableSince=0;
+          await readiness(!buttonReady?'send-button':native?.ok&&native.matches?'native-ready':'native-text',
+            {matches:native?.matches,ready:native?.ready,reason:native?.reason});
+        }
         await sleepUntilNextCheck();
-        button = sendButton();
       }
-      if (!stillCurrent() || editorText(editor) !== RETRY_TEXT) return;
-      await waitForExactComposer(RETRY_TEXT, () => stillCurrent() && rawEditorText(composer() || editor) === RETRY_TEXT);
+      if(readinessPhase!=='ready')throw new Error(readinessPhase==='send-button'?'Кнопка отправки недоступна':'Редактор ChatGPT не подтвердил готовность точного текста для отправки');
+      if(Date.now()>=deadline)throw new Error('Истекло время подготовки автопродолжения');
+      if (!stillCurrent() || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
       // Exactly one click. An uncertain send is never automatically repeated.
       await logRetry('retry.send_intent',{operationId,text:RETRY_TEXT,promptKey},true);
-      if (!stillCurrent() || editorText(editor) !== RETRY_TEXT) return;
+      if (!stillCurrent() || Date.now()>=deadline || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
       if (!runtimeAvailable()) return;
       clicked = true; // A lost reply may still mean the page received the click.
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
-      if (sent?.ok === false) clicked = false;
+      if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка не подтверждена');
       void logRetry('retry.clicked',{operationId,text:RETRY_TEXT});
       const confirmationDeadline = Date.now() + 10000;
@@ -464,7 +495,7 @@
       }
       throw new Error('Не удалось подтвердить отправку');
     } catch (cause) {
-      await logRetry('retry.failed',{operationId,clicked,confirmed,error:String(cause.message || cause)});
+      await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:String(cause.message || cause)});
       state.blocked = true;
       state.reason = `Автопродолжение остановлено: ${cause.message}`;
       notifyError(error, state.reason);
@@ -505,9 +536,9 @@
     const now = Date.now();
     state.failures = state.failures.filter((at) => now - at <= RETRY_WINDOW_MS);
     state.failures.push(now);
-    if (state.blocked || state.failures.length >= 4 || state.remainingRetries===0) {
+    if (state.blocked || state.failures.length >= 5 || state.remainingRetries===0) {
       state.blocked = true;
-      state.reason ||= state.remainingRetries===0?'Дополнительные автоповторы исчерпаны':'Автопродолжение остановлено: 3 автоповтора за 2 минуты';
+      state.reason ||= state.remainingRetries===0?'Дополнительные автоповторы исчерпаны':'Автопродолжение остановлено: 4 автоповтора за 2 минуты';
       void audit('retry.blocked',{reason:state.reason,failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,error:error.response});
       notifyError(error, state.reason);
       return;
@@ -535,6 +566,10 @@
 
   let handoffRecord = null;
   let handoffBusy = false;
+  let handoffReconcileBusy = false;
+  let handoffLastCheckAt = -Infinity;
+  let handoffCheckScheduled = false;
+  let handoffFinishBusy = false;
 
   function handoffText(messages, errorText, sourceUrl) {
     const history = messages.map((item, index) =>
@@ -547,7 +582,63 @@
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_UPDATE', id: handoffRecord.id, stage, ...extra });
     if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить этап передачи');
     handoffRecord = result.record;
+    return result;
   }
+
+  async function finishSentHandoff() {
+    const record=handoffRecord;
+    if(handoffFinishBusy||record?.stage!=='sent'||ChatGPTHandoffTitle.chatUrl(location.href)!==ChatGPTHandoffTitle.chatUrl(record.targetUrl))return;
+    handoffFinishBusy=true;
+    try {
+      const editor=composer();
+      if(record.draft&&!record.draftRestoreClaimedAt&&editor&&isElementVisible(editor)) {
+        // Claim the restoration before its effect. A restart cannot insert an
+        // old draft a second time after the owner has already used it.
+        const claim=await runtimeMessage({type:'CHATGPT_HANDOFF_DRAFT_CLAIM',id:record.id});
+        if(claim?.ok)handoffRecord=claim.record;
+        if(claim?.claimed&&ChatGPTHandoffTitle.chatUrl(location.href)===ChatGPTHandoffTitle.chatUrl(record.targetUrl)&&
+            composer()===editor&&rawEditorText(editor)==='') {
+          replaceEditorText(editor,record.draft);
+          void audit('draft.restored',{operationId:record.id,draftChars:record.draft.length,restoredChars:record.draft.length});
+        }
+      }
+      void renameHandoff();
+    } finally {handoffFinishBusy=false;}
+  }
+
+  async function reconcileHandoff() {
+    if(handoffReconcileBusy||!['sending','awaiting-confirmation'].includes(handoffRecord?.stage))return handoffRecord?.stage==='sent';
+    if(performance.now()-handoffLastCheckAt<2000)return false;
+    handoffLastCheckAt=performance.now();
+    handoffReconcileBusy=true;
+    try {
+      const result=await runtimeMessage({type:'CHATGPT_HANDOFF_RECONCILE',id:handoffRecord.id});
+      if(result?.ok&&result.record?.id===handoffRecord?.id)handoffRecord=result.record;
+      if(handoffRecord?.stage==='sent') {await finishSentHandoff();return true;}
+      return false;
+    } finally {handoffReconcileBusy=false;}
+  }
+
+  function scheduleHandoffCheck() {
+    if(handoffCheckScheduled||!['sending','awaiting-confirmation'].includes(handoffRecord?.stage))return;
+    handoffCheckScheduled=true;
+    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,2000-(performance.now()-handoffLastCheckAt))}).then(async result=>{
+      handoffCheckScheduled=false;
+      if(result?.ok&&runtimeAvailable()) {
+        try {await reconcileHandoff();}catch{}
+      }
+    });
+  }
+
+  async function awaitHandoffConfirmation(reason) {
+    if(handoffRecord?.stage==='awaiting-confirmation'&&handoffRecord.awaitingNotifiedAt)return;
+    const result=await updateHandoff('awaiting-confirmation',{reason});
+    if(result.notifyAwaiting)notifyError({sessionTitle:document.title,response:'Передача ожидает подтверждения нового чата. Повторная отправка отключена; история и черновик сохранены в расширении.'},'Ожидание подтверждения отправки');
+  }
+
+  window.addEventListener('focus',scheduleHandoffCheck,{signal:listeners.signal});
+  window.addEventListener('popstate',scheduleHandoffCheck,{signal:listeners.signal});
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')scheduleHandoffCheck();},{signal:listeners.signal});
 
   async function waitHandoff(check, timeoutMs = 20000) {
     const deadline = Date.now() + timeoutMs;
@@ -618,34 +709,23 @@
       });
       await waitForExactComposer(record.prompt, () => location.pathname === initialPath && rawEditorText(composer() || editor) === record.prompt);
       // Journal first: a reload/crash after this point must never resend.
-      const beforeAttempt = globalThis.__chatgptNotifierAttemptId || '';
       await updateHandoff('sending', { targetUrl: location.href });
       if (location.pathname !== initialPath || rawEditorText(editor) !== record.prompt) throw new Error('Содержимое нового чата изменилось перед отправкой');
       if (!runtimeAvailable()) return;
       clicked = true;
       const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,requireMax:true,fileName:record.asFile?record.fileName:null});
-      if (sent?.ok === false) clicked = false;
+      if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка истории не подтверждена');
       void audit('handoff.clicked',{operationId:record.id,sourceUrl:record.sourceUrl,targetUrl:location.href});
-      await waitHandoff(() => {
-        const current = composer();
-        const dispatched = (globalThis.__chatgptNotifierAttemptId || '') !== beforeAttempt;
-        const newConversation = location.pathname !== initialPath && /\/c\/[^/]+/.test(location.pathname);
-        // ChatGPT can hide the first user message entirely. A newly allocated
-        // conversation plus the observed POST and cleared editor confirm send.
-        return dispatched && current && !editorText(current) && /\/c\/[^/]+/.test(location.pathname) &&
-          (turnNodes().some((node) => roleOf(node) === 'user') || newConversation);
-      },60000);
-      await updateHandoff('sent', { targetUrl: location.href });
-      if (record.draft) {
-        pendingDrafts.set(location.pathname, record.draft);
-        restoreDraft(record.id);
-      }
-      void renameHandoff();
+      await waitHandoff(reconcileHandoff,60000);
     } catch (cause) {
-      try { await updateHandoff('failed', { reason: String(cause.message || cause) }); } catch {}
-      notifyError({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },
-        clicked ? 'Отправка не повторяется автоматически' : 'Историю можно скачать из меню расширения');
+      if(handoffRecord?.stage==='sent')return;
+      if(clicked) {
+        try {await awaitHandoffConfirmation(String(cause.message||cause));}catch{}
+      } else {
+        try { await updateHandoff('failed', { reason: String(cause.message || cause) }); } catch {}
+        notifyError({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
+      }
     } finally {
       handoffBusy = false;
     }
@@ -716,11 +796,11 @@
   async function resumeSavedHandoff() {
     try {
       const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_GET' });
-      if (!handoffRecord) handoffRecord = result?.record || null;
-      if (handoffRecord?.stage === 'sending') {
-        notifyError({ sessionTitle: document.title, response: 'Передача прервалась после начала отправки. Повторная отправка отключена; копия сохранена в расширении.' });
+      if (result?.ok)handoffRecord = result.record || handoffRecord;
+      if (['sending','awaiting-confirmation'].includes(handoffRecord?.stage)) {
+        if(!await reconcileHandoff())await awaitHandoffConfirmation('Восстановление после начала отправки');
       } else if (handoffRecord?.stage==='sent') {
-        void renameHandoff();
+        await finishSentHandoff();
       } else {
         await submitHandoff();
       }
@@ -729,7 +809,8 @@
 
   async function renameHandoff() {
     const record=handoffRecord;
-    if (!record?.naming || record.stage!=='sent' || record.targetUrl!==location.href) return;
+    if (!record?.naming || record.stage!=='sent' || !ChatGPTHandoffTitle.chatUrl(record.targetUrl) ||
+        ChatGPTHandoffTitle.chatUrl(record.targetUrl)!==ChatGPTHandoffTitle.chatUrl(location.href)) return;
     const result=await runtimeMessage({type:'CHATGPT_HANDOFF_RENAME',id:record.id});
     if(result?.ok===false) notifyError({sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`});
   }
@@ -811,6 +892,7 @@
   }
 
   errorObserver = new MutationObserver((records) => {
+    if(['sending','awaiting-confirmation'].includes(handoffRecord?.stage))scheduleHandoffCheck();
     // Ignore unrelated streaming mutations unless an error is already visible
     // or an error component was inserted/changed.
     if (pendingDrafts.has(location.pathname) || visibleErrors.size || records.some((record) => {
@@ -1037,6 +1119,7 @@
 
   function onRuntimeMessage(message) {
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED') armForCurrentPrompt();
+    if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
 })();

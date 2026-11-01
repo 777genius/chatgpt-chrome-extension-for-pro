@@ -5,7 +5,9 @@ globalThis.ChatGPTHandoffTitle = (() => {
   function chatUrl(value) {
     try {
       const url = new URL(value);
-      return url.origin === 'https://chatgpt.com' && /^\/c\/[^/]+\/?$/.test(url.pathname)
+      // A local-chatgpt: alias can occupy the route before its server ID is
+      // allocated. It must never become the durable destination of a handoff.
+      return url.origin === 'https://chatgpt.com' && /^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)
         ? `${url.origin}${url.pathname.replace(/\/$/, '')}` : '';
     } catch { return ''; }
   }

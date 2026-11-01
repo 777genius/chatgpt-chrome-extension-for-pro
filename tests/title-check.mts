@@ -39,5 +39,12 @@ assert.throws(() => policy.planNext({ sourceUrl, sourceTitle: '  ' }));
 assert.throws(() => policy.confirm(plan, sourceUrl), /binding/);
 assert.throws(() => policy.confirm(plan, 'https://elsewhere.test/c/target'), /binding/);
 assert.equal(policy.chatUrl(`${targetUrl}?view=chat#message`), targetUrl);
+assert.equal(policy.chatUrl(`${targetUrl}/?view=chat#message`), targetUrl);
+for(const suffix of ['local-chatgpt:temporary-id','local-chatgpt%3Atemporary-id','local-chatgpt%253Atemporary-id','target%2Fother','target_extra']) {
+  assert.equal(policy.chatUrl(`https://chatgpt.com/c/${suffix}`),'','a temporary alias or encoded ID cannot bind a handoff');
+  assert.throws(()=>policy.confirm(plan,`https://chatgpt.com/c/${suffix}`),/binding/);
+}
+assert.equal(policy.chatUrl('https://chatgpt.com/c/11111111-2222-3333-4444-555555555555'),
+  'https://chatgpt.com/c/11111111-2222-3333-4444-555555555555');
 
 console.log('PASS: persisted exact-chat lineage, continuation counts after rename, literal parentheses/collisions, invalid lineage refusal');

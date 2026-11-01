@@ -6,11 +6,12 @@ import { parseHTML } from 'linkedom';
 type Request = { tabId: number; method: string; url: string; requestId: string; requestBody: {raw: {bytes: ArrayBuffer}[]} };
 type Completion = { tabId: number; url: string; requestId: string; statusCode: number };
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
-type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; title?: string};
-type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic';
+type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; title?: string; conversationId?: string};
+type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string};
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
+const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
 const expectedTitle = 'Original (1)';
 const evidence = JSON.parse(readFileSync('tests/fixtures/title-header.json','utf8')) as {title:string;header:string};
 const menuEvidence = JSON.parse(readFileSync('tests/fixtures/title-menu.json','utf8')) as {html:string}[];
@@ -21,16 +22,17 @@ function harness(mode: Mode = 'success') {
   const {document,window} = parseHTML(`<html><head><title>${evidence.title}</title></head><body>${evidence.header}<main><form data-composer-body><div contenteditable="true">Owner draft\nKeep this exact</div><button type="submit">Send</button></form></main></body></html>`);
   Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return this.hidden ? [] : [{}];},configurable:true});
   let time = 100;
-  const location = {href:targetUrl};
+  const location = {href:mode==='temporary-to-server'?temporaryUrl:mode==='query-normalization'?`${targetUrl}/?model=pro#latest`:targetUrl};
   const events: Record<string,unknown>[] = [];
   const storage: Record<string,unknown> = {};
+  const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0;
   let clickAt = 0;
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
   const failure: ((value: unknown)=>void)[] = [];
   const share = Array.from(document.querySelectorAll('header button')).find(n=>n.textContent?.includes('Поделиться')) as unknown as Record<string,unknown>;
-  const readiness = {conversationId:'local-chatgpt:local-target-id',isReady:mode!=='unsaved'};
+  const readiness = {conversationId:mode==='wrong-alias'?'local-chatgpt:other-local-id':'local-chatgpt:local-target-id',isReady:mode!=='unsaved'};
   share.__reactFiber$test = {memoizedProps:readiness,return:null};
   const cachedQuery={queryKey:['chatgpt-conversation','target'],state:{status:mode==='error-cache'?'error':'success',data:mode==='error-cache'?undefined:{conversation_id:mode==='wrong-cache'?'other-chat':'target'}}};
   (document.querySelector('[data-composer-body]')! as unknown as Record<string,unknown>).__reactFiber$test={
@@ -77,13 +79,13 @@ function harness(mode: Mode = 'success') {
   });
   document.querySelector('main button')!.addEventListener('click',()=>sent++);
   const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,HTMLInputElement:window.HTMLInputElement,
-    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;queueMicrotask(fn);},
+    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
     handoffKey:(id:number)=>`handoff:${id}`,
     journalChatId:(url:string)=>new URL(url).pathname.split('/').at(-1),
     appendJournal:async(event:Record<string,unknown>)=>events.push(structuredClone(event)),
     journalInBackground:(event:Record<string,unknown>)=>events.push(structuredClone(event)),
     chrome:{
-      storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>Object.assign(storage,structuredClone(value))}},
+      storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>{storageWrites.push(structuredClone(value));Object.assign(storage,structuredClone(value));}}},
       tabs:{get:async()=>({id:7,url:location.href})},
       webRequest:{onBeforeRequest:{addListener:(fn:(r:Request)=>void)=>before.push(fn)},onCompleted:{addListener:(fn:(r:Completion)=>void)=>complete.push(fn)},onErrorOccurred:{addListener:(fn:(r:unknown)=>void)=>failure.push(fn)}},
       scripting:{executeScript:async({func,args}:{func:(o:ProbeOptions)=>Result;args:[ProbeOptions]})=>{
@@ -97,10 +99,10 @@ function harness(mode: Mode = 'success') {
   scripts.forEach(source=>runInContext(source,ctx));
   ctx.sourceTitle=sourceTitle;
   const naming=runInContext('ChatGPTHandoffTitle.planNext({sourceUrl:"https://chatgpt.com/c/source",sourceTitle})',ctx) as unknown;
-  storage['handoff:7']={id:'handoff',stage:'sent',sourceUrl,targetUrl,sentAt:100,naming} satisfies Stored;
-  const rename = ()=>runInContext('renameSavedHandoff(7,"handoff")',ctx) as Promise<Result>;
+  storage['handoff:7']={id:'handoff',stage:'sent',sourceUrl,targetUrl:mode==='temporary-to-server'?temporaryUrl:targetUrl,sentAt:100,naming} satisfies Stored;
+  const rename = (options?:{recoverTemporaryTarget?:boolean})=>{ctx.renameOptions=options;return runInContext('renameSavedHandoff(7,"handoff",renameOptions)',ctx) as Promise<Result>;};
   const probe = (options:ProbeOptions)=>{ctx.options=options;return runInContext('controlChatTitle(options)',ctx) as Result;};
-  return {rename,probe,events,storage,document,location,
+  return {rename,probe,events,storage,storageWrites,document,location,
     get record(){return storage['handoff:7'] as Stored;},get time(){return time;},get opened(){return opened;},get selected(){return selected;},get saved(){return saved;},get sent(){return sent;},get clickAt(){return clickAt;}};
 }
 
@@ -159,10 +161,90 @@ for(const mode of ['missing-cache','error-cache'] as const) {
   assert.equal((await h.rename()).ok,false);assert.equal(h.selected,0);assert.equal(h.saved,0);
 }
 {
+  const h=harness('temporary-to-server');
+  const result=await h.rename();
+  assert.equal(result.ok,true,result.reason||'temporary alias must bind to its canonical destination');
+  assert.equal(h.record.targetUrl,targetUrl,'legacy temporary destination binds only to the server route');
+  assert.equal(h.record.titlePreviousTargetUrl,temporaryUrl,'the original temporary destination remains in durable evidence');
+  assert.equal(h.record.titleTargetAlias,'local-chatgpt:local-target-id');
+  assert.equal(h.saved,1);
+  assert.ok(h.events.some(event=>event.kind==='handoff.title_waiting'&&event.titlePreviousTargetUrl===temporaryUrl&&event.targetUrl===targetUrl));
+  assert.equal((h.storage[`chatgpt-handoff-title:${targetUrl}`] as {targetUrl:string}).targetUrl,targetUrl);
+}
+{
+  const h=harness('wrong-alias');
+  h.record.targetUrl=temporaryUrl;
+  const snapshot=h.probe({action:'inspect',url:targetUrl,operationId:'handoff',title:expectedTitle});
+  assert.equal(snapshot.conversationId,'local-chatgpt:other-local-id','inspect exposes the exact native alias');
+  assert.equal((await h.rename()).ok,false);
+  assert.equal(h.record.targetUrl,temporaryUrl);assert.equal(h.opened,0);assert.equal(h.saved,0);
+}
+{
+  const h=harness('navigate');h.record.targetUrl=temporaryUrl;
+  const oldLineage={baseTitle:'Original',part:1,targetUrl:temporaryUrl,transferred:true,confirmed:false};
+  h.storage[`chatgpt-handoff-title:${temporaryUrl}`]=oldLineage;
+  assert.equal((await h.rename()).ok,false);
+  assert.equal(h.saved,0);assert.equal(h.record.targetUrl,targetUrl);
+  const lineage=h.storage[`chatgpt-handoff-title:${targetUrl}`] as {part:number;title:string;targetUrl:string;transferred:boolean;confirmed:boolean};
+  assert.equal(lineage.part,1);assert.equal(lineage.title,expectedTitle);
+  assert.equal(lineage.targetUrl,targetUrl);assert.equal(lineage.transferred,true);assert.equal(lineage.confirmed,false);
+  assert.deepEqual(h.storage[`chatgpt-handoff-title:${temporaryUrl}`],oldLineage,'rebinding retains the old lineage recovery copy');
+  assert.ok(h.storageWrites.some(write=>(write['handoff:7'] as Stored)?.targetUrl===targetUrl&&
+    (write[`chatgpt-handoff-title:${targetUrl}`] as {transferred?:boolean})?.transferred===true),
+    'canonical handoff and transfer lineage must persist in one storage write before rename effects');
+}
+{
+  const h=harness();h.location.href='https://chatgpt.com/c/unrelated';
+  assert.equal((await h.rename()).ok,false);
+  assert.equal(h.opened,0);assert.equal(h.saved,0,'a genuinely different chat is never renamed');
+}
+{
+  const h=harness('query-normalization');
+  h.record.targetUrl=`${targetUrl}/?model=pro#earlier`;
+  const result=await h.rename();
+  assert.equal(result.ok,true,result.reason||'normalized destination must keep the same chat binding');
+  assert.equal(h.saved,1,'query, trailing slash and hash changes preserve the exact chat binding');
+}
+{
+  const h=harness();
+  h.record.targetUrl=temporaryUrl;h.record.titleStatus='failed';
+  h.record.titleReason='Открыт другой чат; переименование отменено';
+  h.document.title='Owner renamed this chat';
+  assert.equal((await h.rename()).ok,true);
+  assert.equal(h.record.titleStatus,'failed');assert.equal(h.saved,0,'historical failed jobs require explicitly selected recovery');
+}
+{
+  const h=harness();
+  h.record.targetUrl=temporaryUrl;h.record.titleStatus='failed';
+  h.record.titleReason='Открыт другой чат; переименование отменено';
+  assert.equal((await h.rename({recoverTemporaryTarget:true})).ok,true);
+  assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.record.targetUrl,targetUrl);assert.equal(h.saved,1);
+}
+for(const status of ['saving','failed']) {
+  const h=harness();
+  h.record.targetUrl=temporaryUrl;h.record.titleStatus=status;
+  h.record.titleReason='Открыт другой чат; переименование отменено';
+  h.record.previousTitle=evidence.title;
+  const original=JSON.stringify(h.record);
+  await h.rename({recoverTemporaryTarget:true});
+  assert.equal(JSON.stringify(h.record),original,'a prior durable save intent preserves its unknown outcome');
+  assert.equal(h.opened,0);assert.equal(h.saved,0);
+}
+{
+  const h=harness();h.record.targetUrl=temporaryUrl;h.document.title=expectedTitle;
+  assert.equal((await h.rename()).ok,false);
+  assert.equal(h.saved,0,'an already assigned title without a server acknowledgement is never saved again');
+}
+{
   const h=harness();
   h.location.href='https://chatgpt.com/c/unrelated';
   const result=h.probe({action:'save',url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title});
   assert.equal(result.ok,false);assert.equal(result.reason,'chat-changed');assert.equal(h.saved,0);
+}
+{
+  const h=harness();h.location.href=temporaryUrl;
+  const result=h.probe({action:'open',url:temporaryUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title});
+  assert.equal(result.ok,false);assert.equal(result.reason,'chat-changed');assert.equal(h.opened,0,'MAIN cannot authorize rename on a temporary route');
 }
 {
   const h=harness();h.record.titleStatus='saving';
