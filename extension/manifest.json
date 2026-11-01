@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Prompt-Bound Completion Alert",
+  "version": "1.2.7",
+  "description": "Sound + desktop notification for completed ChatGPT answers. Preview is structurally bound to the latest user prompt so the previous answer cannot be selected.",
+  "permissions": [
+    "notifications",
+    "storage",
+    "offscreen",
+    "scripting",
+    "tabs",
+    "webRequest",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "ChatGPT Prompt-Bound Alert",
+    "default_popup": "popup.html"
+  },
+  "minimum_chrome_version": "116",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "memory-maintenance.js",
+        "content-script.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

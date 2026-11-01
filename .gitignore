@@ -1,0 +1,40 @@
+# Dependencies, caches and generated output
+node_modules/
+.npm/
+coverage/
+dist/
+build/
+*.tsbuildinfo
+*.log
+*.crx
+*.zip
+
+# Machine/editor state
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.pi/
+.local/
+
+# Secrets and browser sessions
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+cookies*.txt
+auth.json
+storage-state*.json
+playwright/.auth/
+browser-profile*/
+
+# Operator artifacts contain conversation history, drafts or local access tokens.
+/work/
+/outputs/
+/diagnostics/
+/backups/
+/runtime-data/
+bridge.json
+chatgpt-journal-*.json
+chat-handoff-*.txt

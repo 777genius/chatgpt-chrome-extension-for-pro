@@ -1,0 +1,4 @@
+{
+  "title": "Fixture conversation",
+  "header": "<header><button id=\"fixture-actions\" type=\"button\" aria-haspopup=\"menu\" data-state=\"closed\"><svg><use href=\"/icons.svg#codex-icon-ellipsis-horizontal-light-16\"></use></svg></button><button type=\"button\">Поделиться</button></header>"
+}

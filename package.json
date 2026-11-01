@@ -1,0 +1,21 @@
+{
+  "name": "chatgpt-chrome-extension-for-pro",
+  "version": "1.2.7",
+  "private": true,
+  "description": "Chrome extension for ChatGPT completion alerts, guarded retries and conversation handoffs.",
+  "license": "AGPL-3.0-only",
+  "engines": { "node": ">=26.0.0" },
+  "scripts": {
+    "test": "node scripts/test.mts",
+    "test:retry": "node tests/check.mts",
+    "test:handoff": "node tests/handoff-check.mts",
+    "typecheck": "tsc --noEmit",
+    "check:syntax": "node scripts/syntax.mts",
+    "check": "npm run check:syntax && npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "linkedom": "0.18.15",
+    "typescript": "7.0.2"
+  }
+}

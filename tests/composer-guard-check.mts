@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {createContext,runInContext} from 'node:vm';
+import {parseHTML} from 'linkedom';
+const {document,window}=parseHTML('<html><body><div data-app-shell-active-page="true"><div data-composer-body><div id="editor-wrap"><div data-composer-markdown contenteditable="true">доделай е2е</div></div><button type="submit">Send</button><button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium">Medium</button></div></div></body></html>');
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return [{}];}});
+const editor=document.querySelector('[contenteditable]')!,button=document.querySelector('[type=submit]')!;
+let prompt='USER DRAFT',pending:any=null,ready=true,clicks=0;
+button.addEventListener('click',()=>clicks++);
+const controller={view:{dom:editor},getChatGptPrompt:()=>({prompt}),getPlainText:()=>prompt,
+ get pendingSubmit(){return pending;},get submitReady(){return ready;},cancelPendingSubmit(){pending=null;}};
+(document.querySelector('#editor-wrap') as any).__reactFiber$test={memoizedProps:{composerController:controller}};
+const ctx=createContext({document,location:{href:'https://chatgpt.com/c/test'}});
+runInContext(readFileSync('extension/page-probe.js','utf8'),ctx);
+function control(extra:Record<string,any>={}){ctx.options={action:'send',url:'https://chatgpt.com/c/test',text:'доделай е2е',...extra};return runInContext('controlChatComposer(options)',ctx);}
+assert.equal(control().ok,false,'matching DOM must never authorize stale model text');assert.equal(clicks,0);
+prompt='доделай е2е';editor.textContent='New user draft';assert.equal(control().ok,false,'fresh DOM draft must block a stale matching model');assert.equal(clicks,0);editor.textContent='доделай е2е';pending={queued:true};assert.equal(control().ok,false,'queued submit must block automation');assert.equal(clicks,0);
+pending=null;ready=false;assert.equal(control().ok,false,'not ready must block automation');
+ready=true;assert.equal(control({requireMax:true}).ok,false,'handoff must not send with medium reasoning');
+document.querySelector('[data-selected-reasoning-effort]')!.setAttribute('data-selected-reasoning-effort','max');
+assert.equal(control({requireMax:true}).clicked,true);assert.equal(clicks,1);
+prompt='USER DRAFT';assert.equal(control().ok,false);assert.equal(clicks,1,'draft must never get an automatic click');
+prompt='доделай е2е';assert.equal(control({url:'https://chatgpt.com/c/other'}).ok,false);
+const attachment=document.createElement('div');attachment.setAttribute('data-composer-attachments','');attachment.innerHTML='<span>User attachment</span>';document.querySelector('[data-composer-body]')!.append(attachment);
+assert.equal(control().ok,false,'user attachments must never be sent');assert.equal(clicks,1);
+console.log('PASS: actual-model vs DOM race, user draft never clicked, queued sends, readiness, max-only handoff, URL binding and user attachments');
+
+// Regression: native Markdown serialization changes only representation of
+// literal history. Draft/model divergence and hidden rich content still stop.
+attachment.remove();
+const literal='--- History ---\nhttps://example.com/path';
+editor.innerHTML='<p>--- History ---</p><p><span text-link-href="https://example.com/path" data-rich-text-generated-autolink>https://example.com/path</span></p>';
+let doc:any={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'--- History ---'}]},
+ {type:'paragraph',content:[{type:'text',text:'https://example.com/path',marks:[{type:'link',attrs:{href:'https://example.com/path',isAutolink:true,isGeneratedAutolink:true}}]}]}]};
+let serialized='\\--- History ---\n[https://example.com/path](https://example.com/path)';
+const richController=controller as any;
+richController.view.state={doc:{toJSON:()=>doc}};
+richController.markdownEditor={serialize:()=>serialized};
+richController.getChatGptPrompt=()=>({prompt:serialized,systemHints:[]});
+richController.getPlainText=()=>literal;
+assert.equal(control({text:literal}).clicked,true,'literal Markdown/autolinks may use native serialization');
+const before=clicks;
+doc.content[1].content[0].marks[0].attrs.href='https://different.example';
+assert.equal(control({text:literal}).ok,false,'hidden link target must stop');
+doc.content[1].content[0].marks[0].attrs.href='https://example.com/path';
+doc.content.push({type:'mention',attrs:{prompt:'Hidden draft'}});
+assert.equal(control({text:literal}).ok,false,'unrecognized rich nodes must stop');doc.content.pop();
+richController.getChatGptPrompt=()=>({prompt:serialized,systemHints:['hidden hint']});
+assert.equal(control({text:literal}).ok,false,'hidden hints must stop');
+richController.getChatGptPrompt=()=>({prompt:serialized+'stale',systemHints:[]});
+assert.equal(control({text:literal}).ok,false,'native serializer and actual prompt must agree');
+richController.getChatGptPrompt=()=>({prompt:serialized,systemHints:[]});
+editor.textContent='USER DRAFT';
+assert.equal(control({text:literal}).ok,false);assert.equal(clicks,before,'draft never clicked after serialization fix');
+console.log('PASS: literal native Markdown regression, altered URL targets, rich nodes, hints, stale serialization and draft race');

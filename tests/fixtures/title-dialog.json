@@ -1,0 +1,3 @@
+{
+  "html": "<form><h2>Rename conversation</h2><input value=\"Fixture conversation\"><button type=\"button\">Cancel</button><button type=\"submit\">Save</button></form>"
+}

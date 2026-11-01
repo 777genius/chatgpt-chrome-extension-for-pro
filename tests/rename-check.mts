@@ -1,0 +1,196 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createContext, runInContext } from 'node:vm';
+import { parseHTML } from 'linkedom';
+
+type Request = { tabId: number; method: string; url: string; requestId: string; requestBody: {raw: {bytes: ArrayBuffer}[]} };
+type Completion = { tabId: number; url: string; requestId: string; statusCode: number };
+type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
+type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; title?: string};
+type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string};
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic';
+const sourceUrl = 'https://chatgpt.com/c/source';
+const targetUrl = 'https://chatgpt.com/c/target';
+const expectedTitle = 'Original (1)';
+const evidence = JSON.parse(readFileSync('tests/fixtures/title-header.json','utf8')) as {title:string;header:string};
+const menuEvidence = JSON.parse(readFileSync('tests/fixtures/title-menu.json','utf8')) as {html:string}[];
+const dialogEvidence = JSON.parse(readFileSync('tests/fixtures/title-dialog.json','utf8')) as {html:string};
+const scripts = ['handoff-title.js','chat-title-probe.js','handoff-renamer.js'].map(name => readFileSync(`extension/${name}`,'utf8'));
+
+function harness(mode: Mode = 'success') {
+  const {document,window} = parseHTML(`<html><head><title>${evidence.title}</title></head><body>${evidence.header}<main><form data-composer-body><div contenteditable="true">Owner draft\nKeep this exact</div><button type="submit">Send</button></form></main></body></html>`);
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return this.hidden ? [] : [{}];},configurable:true});
+  let time = 100;
+  const location = {href:targetUrl};
+  const events: Record<string,unknown>[] = [];
+  const storage: Record<string,unknown> = {};
+  let opened = 0, selected = 0, saved = 0, sent = 0;
+  let clickAt = 0;
+  const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
+  const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
+  const failure: ((value: unknown)=>void)[] = [];
+  const share = Array.from(document.querySelectorAll('header button')).find(n=>n.textContent?.includes('Поделиться')) as unknown as Record<string,unknown>;
+  const readiness = {conversationId:'local-chatgpt:local-target-id',isReady:mode!=='unsaved'};
+  share.__reactFiber$test = {memoizedProps:readiness,return:null};
+  const cachedQuery={queryKey:['chatgpt-conversation','target'],state:{status:mode==='error-cache'?'error':'success',data:mode==='error-cache'?undefined:{conversation_id:mode==='wrong-cache'?'other-chat':'target'}}};
+  (document.querySelector('[data-composer-body]')! as unknown as Record<string,unknown>).__reactFiber$test={
+    memoizedProps:{queryClient:{getQueryCache:()=>({getAll:()=>mode==='missing-cache'?[]:[cachedQuery]})}},return:null
+  };
+  const actions = Array.from(document.querySelectorAll('header button[aria-haspopup="menu"]')).find(n=>n.querySelector('use[href*="ellipsis-horizontal"]'))!;
+  actions.addEventListener('click',()=>{
+    opened++;
+    actions.setAttribute('data-state','open');
+    if (mode==='navigate') location.href='https://chatgpt.com/c/other';
+    const menu=document.createElement('div');menu.setAttribute('role','menu');menu.setAttribute('aria-labelledby',actions.id);
+    menu.innerHTML=menuEvidence[0].html;
+    // Linkedom splits semicolons inside a quoted SVG data URL; browsers expose
+    // the complete maskImage string from this captured style attribute.
+    for(const icon of menu.querySelectorAll('[style]')) {
+      const mask=icon.getAttribute('style')!.match(/mask-image:\s*(.*?);\s*mask-position/s)?.[1]||'';
+      Object.defineProperty(icon,'style',{value:{maskImage:mask},configurable:true});
+    }
+    menu.querySelector('[role="menuitem"]')!.addEventListener('click',()=>{
+      selected++;
+      const dialog=document.createElement('section');dialog.setAttribute('role','dialog');dialog.setAttribute('aria-modal','true');dialog.innerHTML=dialogEvidence.html;document.body.append(dialog);
+      // Native modal temporarily makes the header inert; the stored operation
+      // must still permit fill/save without reauthorizing through that header.
+      document.querySelector('header')!.setAttribute('inert','');
+      const input=dialog.querySelector('input')!;
+      input.value=evidence.title;
+      (input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};
+      input.addEventListener('input',()=>{(input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};});
+      dialog.querySelector('button[type="button"]')!.addEventListener('click',()=>{dialog.remove();document.querySelector('header')!.removeAttribute('inert');});
+      dialog.querySelector('button[type="submit"]')!.addEventListener('click',()=>{
+        saved++;clickAt=time;
+        if(mode!=='optimistic') document.title=input.value;
+        document.querySelector('header')!.removeAttribute('inert');
+        if(mode==='no-ack')return;
+        const payload=new TextEncoder().encode(JSON.stringify({title:mode==='wrong-request'?'Other':input.value}));
+        const split=mode==='split-utf8'?payload.findIndex(byte=>byte>=128)+1:0;
+        const raw=split?[{bytes:payload.slice(0,split).buffer as ArrayBuffer},{bytes:payload.slice(split).buffer as ArrayBuffer}]:[{bytes:payload.buffer as ArrayBuffer}];
+        const request:Request={tabId:7,method:'PATCH',url:`https://chatgpt.com/backend-api/${mode==='wrong-path'?'share':'conversation'}/target`,requestId:'rename-1',requestBody:{raw}};
+        before.forEach(fn=>fn(request));
+        complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'?503:200}));
+      });
+    });
+    document.body.append(menu);
+  });
+  document.querySelector('main button')!.addEventListener('click',()=>sent++);
+  const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,HTMLInputElement:window.HTMLInputElement,
+    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;queueMicrotask(fn);},
+    handoffKey:(id:number)=>`handoff:${id}`,
+    journalChatId:(url:string)=>new URL(url).pathname.split('/').at(-1),
+    appendJournal:async(event:Record<string,unknown>)=>events.push(structuredClone(event)),
+    journalInBackground:(event:Record<string,unknown>)=>events.push(structuredClone(event)),
+    chrome:{
+      storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>Object.assign(storage,structuredClone(value))}},
+      tabs:{get:async()=>({id:7,url:location.href})},
+      webRequest:{onBeforeRequest:{addListener:(fn:(r:Request)=>void)=>before.push(fn)},onCompleted:{addListener:(fn:(r:Completion)=>void)=>complete.push(fn)},onErrorOccurred:{addListener:(fn:(r:unknown)=>void)=>failure.push(fn)}},
+      scripting:{executeScript:async({func,args}:{func:(o:ProbeOptions)=>Result;args:[ProbeOptions]})=>{
+        if(mode==='deadline') {
+          readiness.isReady=time>=69100;
+          if(args[0].action!=='inspect')time+=250;
+        }
+        return [{result:func(args[0])}];
+      }}
+    }});
+  scripts.forEach(source=>runInContext(source,ctx));
+  ctx.sourceTitle=sourceTitle;
+  const naming=runInContext('ChatGPTHandoffTitle.planNext({sourceUrl:"https://chatgpt.com/c/source",sourceTitle})',ctx) as unknown;
+  storage['handoff:7']={id:'handoff',stage:'sent',sourceUrl,targetUrl,sentAt:100,naming} satisfies Stored;
+  const rename = ()=>runInContext('renameSavedHandoff(7,"handoff")',ctx) as Promise<Result>;
+  const probe = (options:ProbeOptions)=>{ctx.options=options;return runInContext('controlChatTitle(options)',ctx) as Result;};
+  return {rename,probe,events,storage,document,location,
+    get record(){return storage['handoff:7'] as Stored;},get time(){return time;},get opened(){return opened;},get selected(){return selected;},get saved(){return saved;},get sent(){return sent;},get clickAt(){return clickAt;}};
+}
+
+{
+  const h=harness();
+  const first=h.rename(), duplicate=h.rename();
+  assert.equal(first,duplicate,'concurrent calls share one exact rename operation');
+  const result=await first;
+  assert.equal(result.ok,true,result.reason||'rename must succeed');
+  assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.document.title,expectedTitle);
+  assert.equal(h.opened,1);assert.equal(h.selected,1);assert.equal(h.saved,1);
+  assert.ok(h.clickAt>=10100,'native save waits at least ten seconds from confirmed handoff send');
+  assert.equal(h.document.querySelector('[contenteditable]')!.textContent,'Owner draft\nKeep this exact');
+  assert.equal(h.sent,0,'rename must never submit the composer');
+  assert.equal((h.storage[`chatgpt-handoff-title:${targetUrl}`] as {title:string}).title,expectedTitle);
+  assert.equal((await h.rename()).ok,true);assert.equal(h.saved,1,'confirmed intent is not replayed');
+}
+for(const mode of ['no-ack','wrong-request','wrong-path','failed-ack','optimistic'] as const){
+  const h=harness(mode);
+  const result=await h.rename();
+  assert.equal(result.ok,false,`${mode} cannot confirm title persistence`);
+  assert.equal(h.record.titleStatus,'failed');
+  assert.equal(h.storage[`chatgpt-handoff-title:${targetUrl}`],undefined);
+  assert.equal(h.saved,1,'uncertain save is not clicked again');
+  await h.rename();assert.equal(h.saved,1,'failure record prevents repeat mutation');
+}
+{
+  const h=harness('unsaved');
+  assert.equal((await h.rename()).ok,false);assert.equal(h.saved,0);assert.equal(h.opened,0);
+  assert.ok(h.time<=71100,'readiness timeout has a bounded total duration');
+}
+{
+  const h=harness('wrong-cache');
+  assert.equal((await h.rename()).ok,false);
+  assert.equal(h.opened,0,'local header identity cannot authorize a different canonical server chat');
+  assert.equal(h.saved,0);
+}
+for(const mode of ['missing-cache','error-cache'] as const) {
+  const h=harness(mode);
+  const result=await h.rename();
+  assert.equal(result.ok,true,result.reason||'native ready chat may have an unfetched or failed GET cache');
+  assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1);
+}
+{
+  const h=harness('split-utf8');
+  const result=await h.rename();
+  assert.equal(result.ok,true,result.reason||'split UTF8 title request must be decoded once');
+  assert.equal(h.document.title,'Задача 🦊 (1)');
+  assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1);
+}
+{
+  const h=harness('navigate');
+  assert.equal((await h.rename()).ok,false);assert.equal(h.selected,0);assert.equal(h.saved,0);
+}
+{
+  const h=harness();
+  h.location.href='https://chatgpt.com/c/unrelated';
+  const result=h.probe({action:'save',url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title});
+  assert.equal(result.ok,false);assert.equal(result.reason,'chat-changed');assert.equal(h.saved,0);
+}
+{
+  const h=harness();h.record.titleStatus='saving';
+  assert.equal((await h.rename()).ok,false);assert.equal(h.opened,0);assert.equal(h.saved,0);
+}
+{
+  const h=harness('deadline');
+  assert.equal((await h.rename()).ok,false);
+  assert.equal(h.saved,0,'late readiness must not allow save after the operation deadline');
+}
+{
+  const h=harness();
+  const foreign=h.document.createElement('section');foreign.setAttribute('role','dialog');foreign.setAttribute('aria-modal','true');
+  foreign.innerHTML='<form><input value="Owner text"><button type="submit">Submit</button></form>';h.document.body.append(foreign);
+  const result=h.probe({action:'open',url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title});
+  assert.equal(result.ok,false);assert.equal(h.opened,0,'existing owner modal must not be opened over');
+  assert.equal(foreign.querySelector('input')!.value,'Owner text');
+}
+{
+  const h=harness();
+  const options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+  for(const action of ['open','select','fill'])assert.equal(h.probe({...options,action}).ok,true);
+  const input=h.document.querySelector('[role="dialog"] input')! as HTMLInputElement;
+  input.value='Owner edited title';
+  assert.equal(h.probe({...options,action:'save'}).ok,false);
+  assert.equal(h.saved,0,'a title manually edited after fill must never be submitted');
+  h.probe({...options,action:'cancel'});
+  assert.equal(input.value,'Owner edited title','cleanup must preserve owner changes');
+  assert.equal(input.isConnected,true,'cleanup must keep an owner-edited dialog open');
+}
+console.log('PASS: observed native rename DOM, local/canonical chat binding, inert modal, split UTF8/exact endpoint ack, no draft send, one save, bounded timeout');
