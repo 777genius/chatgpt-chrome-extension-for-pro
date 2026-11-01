@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.2.9';
+  const SCRIPT_VERSION = '1.2.10';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -379,6 +379,12 @@
     let replaced = false;
     let recoveryStopped = false;
     let recoveryDraft = null;
+    let readinessPhase = 'planned';
+    const readiness = async (phase,details={}) => {
+      if(readinessPhase===phase)return;
+      readinessPhase=phase;
+      await logRetry('retry.readiness',{phase,...details});
+    };
     const stillCurrent = () => runtimeAvailable() && watchToken === expectedToken && location.pathname === path && retryState() === state && !state.blocked &&
       (globalThis.__chatgptNotifierAttemptId || '') === attempt &&
       (!error.recovery || recoveryStopped || currentErrors().some(node=>node.querySelector('.text-chatgpt-recovery'))) &&
@@ -403,7 +409,12 @@
         if (!result?.ok) throw new Error(result?.reason || 'Не удалось остановить зависшее ожидание');
         recoveryStopped = Boolean(result.stopped);
       }
-      const deadline = Date.now() + 10000;
+      // The native stop can clear its banner before the composer becomes
+      // writable. Share one bounded budget across stop settling, button and
+      // actual editor readiness; never extend it after another failed check.
+      const readinessMs=recoveryStopped?60000:10000;
+      const deadline = Date.now() + readinessMs;
+      await readiness('generation-idle',{timeoutMs:readinessMs,deadlineAt:deadline,recoveryStopped});
       while (isGenerating()) {
         if (!stillCurrent()) return;
         if (Date.now() >= deadline) throw new Error('Чат всё ещё занят');
@@ -428,19 +439,39 @@
       replaced = true;
       replacingDraft = true;
       replaceEditorText(editor, RETRY_TEXT);
-      let button = sendButton();
-      while (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') {
+      let stableSince=0;
+      while(Date.now()<deadline) {
         if (!stillCurrent()) return;
-        if (editorText(editor) !== RETRY_TEXT) throw new Error('Содержимое поля изменилось');
-        if (Date.now() >= deadline) throw new Error('Кнопка отправки недоступна');
+        if(composer()!==editor||rawEditorText(editor)!==RETRY_TEXT||isGenerating()) {
+          await logRetry('retry.readiness_cancelled',{phase:readinessPhase,reason:isGenerating()?'generation-resumed':'editor-changed'});
+          return;
+        }
+        const button=sendButton();
+        const buttonReady=button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true';
+        const native=buttonReady?await inspectComposer(RETRY_TEXT):null;
+        if(!stillCurrent())return;
+        if(Date.now()>=deadline)break;
+        if(composer()!==editor||rawEditorText(editor)!==RETRY_TEXT||isGenerating()) {
+          await logRetry('retry.readiness_cancelled',{phase:readinessPhase,reason:isGenerating()?'generation-resumed':'editor-changed'});
+          return;
+        }
+        if(buttonReady&&native?.ok&&native.matches&&native.ready) {
+          if(!stableSince)stableSince=performance.now();
+          await readiness('settling');
+          if(performance.now()-stableSince>=500) {await readiness('ready');break;}
+        } else {
+          stableSince=0;
+          await readiness(!buttonReady?'send-button':native?.ok&&native.matches?'native-ready':'native-text',
+            {matches:native?.matches,ready:native?.ready,reason:native?.reason});
+        }
         await sleepUntilNextCheck();
-        button = sendButton();
       }
-      if (!stillCurrent() || editorText(editor) !== RETRY_TEXT) return;
-      await waitForExactComposer(RETRY_TEXT, () => stillCurrent() && rawEditorText(composer() || editor) === RETRY_TEXT);
+      if(readinessPhase!=='ready')throw new Error(readinessPhase==='send-button'?'Кнопка отправки недоступна':'Редактор ChatGPT не подтвердил готовность точного текста для отправки');
+      if(Date.now()>=deadline)throw new Error('Истекло время подготовки автопродолжения');
+      if (!stillCurrent() || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
       // Exactly one click. An uncertain send is never automatically repeated.
       await logRetry('retry.send_intent',{operationId,text:RETRY_TEXT,promptKey},true);
-      if (!stillCurrent() || editorText(editor) !== RETRY_TEXT) return;
+      if (!stillCurrent() || Date.now()>=deadline || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
       if (!runtimeAvailable()) return;
       clicked = true; // A lost reply may still mean the page received the click.
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
@@ -464,7 +495,7 @@
       }
       throw new Error('Не удалось подтвердить отправку');
     } catch (cause) {
-      await logRetry('retry.failed',{operationId,clicked,confirmed,error:String(cause.message || cause)});
+      await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:String(cause.message || cause)});
       state.blocked = true;
       state.reason = `Автопродолжение остановлено: ${cause.message}`;
       notifyError(error, state.reason);
