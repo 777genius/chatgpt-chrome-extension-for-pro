@@ -36,6 +36,7 @@ const statusIndicatorApi = Object.freeze({
     let icon: HTMLLinkElement | null = null;
     const window = document.defaultView;
     if (!window) throw new Error("Status indicator requires an attached document");
+    const attachedWindow: Window = window;
     const ownedAttribute = "data-chatgpt-notifier-status";
     const retiredAttribute = "data-chatgpt-notifier-status-retired";
     // An old isolated context may leave only our own stale favicon metadata.
@@ -79,7 +80,7 @@ const statusIndicatorApi = Object.freeze({
       disposed = true;
       request++;
       observer.disconnect();
-      window.removeEventListener("popstate", route);
+      attachedWindow.removeEventListener("popstate", route);
       icon?.remove();
       icon = null; status = null;
       restoreNativeIcons();
@@ -187,7 +188,7 @@ const statusIndicatorApi = Object.freeze({
     observeHead();
     if (!observingHead) observer.observe(document, { childList: true, subtree: true });
     const route = (): void => { void refresh(); };
-    window.addEventListener("popstate", route);
+    attachedWindow.addEventListener("popstate", route);
     void refresh();
     return Object.freeze({
       accept, refresh, tick, dispose,
