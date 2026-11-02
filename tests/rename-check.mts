@@ -6,9 +6,9 @@ import { parseHTML } from 'linkedom';
 type Request = { tabId: number; method: string; url: string; requestId: string; requestBody: {raw: {bytes: ArrayBuffer}[]} };
 type Completion = { tabId: number; url: string; requestId: string; statusCode: number };
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
-type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; title?: string; conversationId?: string};
-type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab';
+type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; streaming?:boolean; title?: string; conversationId?: string};
+type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string};
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,11 +28,13 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0;
   let clickAt = 0;
+  let menuReady=mode!=='late-menu';
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
   const failure: ((value: unknown)=>void)[] = [];
   const share = Array.from(document.querySelectorAll('header button')).find(n=>n.textContent?.includes('Поделиться')) as unknown as Record<string,unknown>;
-  const readiness = {conversationId:mode==='wrong-alias'?'local-chatgpt:other-local-id':'local-chatgpt:local-target-id',isReady:mode!=='unsaved'};
+  const readiness = {conversationId:mode==='wrong-alias'?'local-chatgpt:other-local-id':'local-chatgpt:local-target-id',isReady:mode!=='unsaved',isStreaming:mode==='streaming'};
+  if(mode==='streaming')(share as unknown as HTMLButtonElement).disabled=true;
   share.__reactFiber$test = {memoizedProps:readiness,return:null};
   const cachedQuery={queryKey:['chatgpt-conversation','target'],state:{status:mode==='error-cache'?'error':'success',data:mode==='error-cache'?undefined:{conversation_id:mode==='wrong-cache'?'other-chat':'target'}}};
   (document.querySelector('[data-composer-body]')! as unknown as Record<string,unknown>).__reactFiber$test={
@@ -44,7 +46,8 @@ function harness(mode: Mode = 'success') {
     actions.setAttribute('data-state','open');
     if (mode==='navigate') location.href='https://chatgpt.com/c/other';
     const menu=document.createElement('div');menu.setAttribute('role','menu');menu.setAttribute('aria-labelledby',actions.id);
-    menu.innerHTML=menuEvidence[0].html;
+    menu.innerHTML=menuReady?menuEvidence[0].html:'<div role="menuitem">Unrelated action</div>';
+    menu.addEventListener('keydown',event=>{if((event as KeyboardEvent).key==='Escape'){menu.remove();actions.setAttribute('data-state','closed');}});
     // Linkedom splits semicolons inside a quoted SVG data URL; browsers expose
     // the complete maskImage string from this captured style attribute.
     for(const icon of menu.querySelectorAll('[style]')) {
@@ -58,7 +61,7 @@ function harness(mode: Mode = 'success') {
       // must still permit fill/save without reauthorizing through that header.
       document.querySelector('header')!.setAttribute('inert','');
       const input=dialog.querySelector('input')!;
-      input.value=evidence.title;
+      input.value=document.title;
       (input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};
       input.addEventListener('input',()=>{(input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};});
       dialog.querySelector('button[type="button"]')!.addEventListener('click',()=>{dialog.remove();document.querySelector('header')!.removeAttribute('inert');});
@@ -81,7 +84,7 @@ function harness(mode: Mode = 'success') {
     document.body.append(menu);
   });
   document.querySelector('main button')!.addEventListener('click',()=>sent++);
-  const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,HTMLInputElement:window.HTMLInputElement,
+  const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,KeyboardEvent:class extends window.Event{constructor(type:string,options:{key:string}){super(type);Object.defineProperty(this,'key',{value:options.key});}},HTMLInputElement:window.HTMLInputElement,
     Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
     handoffKey:(id:number)=>`handoff:${id}`,
     journalChatId:(url:string)=>new URL(url).pathname.split('/').at(-1),
@@ -106,6 +109,7 @@ function harness(mode: Mode = 'success') {
   const rename = (options?:{recoverTemporaryTarget?:boolean})=>{ctx.renameOptions=options;return runInContext('renameSavedHandoff(7,"handoff",renameOptions)',ctx) as Promise<Result>;};
   const probe = (options:ProbeOptions)=>{ctx.options=options;return runInContext('controlChatTitle(options)',ctx) as Result;};
   return {rename,probe,events,storage,storageWrites,document,location,
+    advance(ms:number){time+=ms;},allowReady(){readiness.isReady=true;readiness.isStreaming=false;(share as unknown as HTMLButtonElement).disabled=false;},allowMenu(){menuReady=true;},
     get record(){return storage['handoff:7'] as Stored;},get time(){return time;},get opened(){return opened;},get selected(){return selected;},get saved(){return saved;},get sent(){return sent;},get clickAt(){return clickAt;}};
 }
 
@@ -149,12 +153,12 @@ for(const mode of ['plural','plural-post','native'] as const) {
 }
 {
   const h=harness('unsaved');
-  assert.equal((await h.rename()).ok,false);assert.equal(h.saved,0);assert.equal(h.opened,0);
+  const result=await h.rename();assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'waiting');assert.equal(h.record.titleRetryable,true);assert.equal(h.saved,0);assert.equal(h.opened,0);
   assert.ok(h.time<=71100,'readiness timeout has a bounded total duration');
 }
 {
   const h=harness('wrong-cache');
-  assert.equal((await h.rename()).ok,false);
+  assert.equal((await h.rename()).ok,true);assert.equal(h.record.titleStatus,'waiting');
   assert.equal(h.opened,0,'local header identity cannot authorize a different canonical server chat');
   assert.equal(h.saved,0);
 }
@@ -269,8 +273,52 @@ for(const status of ['saving','failed']) {
 }
 {
   const h=harness('deadline');
-  assert.equal((await h.rename()).ok,false);
+  assert.equal((await h.rename()).ok,true);assert.equal(h.record.titleStatus,'waiting');
   assert.equal(h.saved,0,'late readiness must not allow save after the operation deadline');
+}
+for(const mode of ['streaming','late-menu'] as const) {
+  const h=harness(mode);
+  const result=await h.rename();
+  assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'waiting');assert.equal(h.record.titleRetryable,true);
+  assert.equal(h.saved,0);assert.equal(h.record.titlePrepareAttempts,mode==='streaming'?0:1);assert.equal(h.record.titlePreparationTitle,mode==='streaming'?undefined:evidence.title);
+  if(mode==='streaming')assert.equal(h.opened,0,'isReady alone cannot open the disabled streaming control');
+  const actionsBefore=h.opened;
+  await h.rename();assert.equal(h.opened,actionsBefore,'a repeated event before the retry fence does no page effects');
+  if(mode==='streaming')for(let i=0;i<4;i++)await h.rename();
+  if(mode==='streaming')h.document.title='Generated title after the first response';
+  h.allowReady();h.allowMenu();if(mode!=='streaming')h.advance(10000);
+  assert.equal((await h.rename()).ok,true);assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.document.title,expectedTitle);assert.equal(h.saved,1,'later native readiness authorizes exactly one title save');
+  assert.equal(h.record.titlePrepareAttempts,mode==='streaming'?1:2);
+  await h.rename();assert.equal(h.saved,1);
+}
+{
+  const h=harness('late-menu');await h.rename();
+  const opened=h.opened;
+  h.document.title='Owner changed this title';h.allowReady();h.advance(10000);
+  assert.equal((await h.rename()).ok,false);assert.equal(h.saved,0);assert.equal(h.opened,opened,'a later manual or server title change cannot be silently overwritten');
+  assert.equal(h.record.titleStatus,'failed');
+}
+{
+  const h=harness('unsaved');
+  h.record.naming={version:1,sourceUrl,baseTitle:'Original chain',part:3,title:'Original chain (3)'};
+  await h.rename();assert.equal(h.record.titlePreparationTitle,undefined,'a not-ready server title is not a valid preparation snapshot');
+  h.document.title='Generated while server was unavailable';h.allowReady();h.advance(10000);await h.rename();
+  assert.equal(h.document.title,'Original chain (3)','deferred readiness preserves the persisted original base and continuation number');
+  assert.equal(h.saved,1);
+}
+{
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  assert.equal(h.record.titlePrepareAttempts,3);assert.equal(h.record.titleRetryable,false);
+  h.allowReady();const before=h.time;
+  await h.rename();assert.equal(h.time,before);assert.equal(h.opened,0);assert.equal(h.saved,0,'exhausted preparation never starts an unbounded background job');
+}
+{
+  const h=harness('no-ack');await h.rename();
+  assert.ok(h.record.titleSaveStartedAt);assert.equal(h.saved,1);
+  h.record.titleStatus='waiting';h.record.titleRetryable=true;
+  await h.rename();assert.equal(h.saved,1,'a prior durable save intent still blocks every waiting-state retry');
 }
 {
   const h=harness();
