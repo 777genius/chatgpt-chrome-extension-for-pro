@@ -96,7 +96,7 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
   const visibleError=String(errorCopy.textContent||'').replace(/\s+/g,' ').trim();
   // Inspect the rendered button subtree only: scanning the component source
   // would match all possible error actions, including inactive branches.
-  for (let i = 0; fiber && i < 45; i += 1, fiber = fiber.return) {
+  for (let i = 0; fiber && i < 45; i += 1, fiber = fiber.return??null) {
     const props = fiber.memoizedProps || {};
     if (i < 9) inspectElement(props.children);
     if (captureHistory && Array.isArray(props.entries)) entries = props.entries;
@@ -167,7 +167,7 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
       }
       const editor=Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,[data-composer-markdown][contenteditable="true"]')).find(visible);
       let controller:ComposerController|null=null;
-      for(let node=editor;node&&!controller;node=node.parentElement){
+      for(let node:Element|null|undefined=editor;node&&!controller;node=node.parentElement){
         const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
         const observed:unknown=key?Reflect.get(node,key):null;
         for(let current:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;current&&i<16;i++,current=current.return??null){
@@ -220,7 +220,7 @@ function inspectChatAttachment(fileName:string):{status:string} {
   if (!label) return { status: 'missing' };
   const key = Object.keys(label).find((name) => name.startsWith('__reactFiber$'));
   const observed:unknown=key?Reflect.get(label,key):null;
-  for (let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null, i = 0; fiber && i < 20; i += 1, fiber = fiber.return) {
+  for (let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null, i = 0; fiber && i < 20; i += 1, fiber = fiber.return??null) {
     const attachment = fiber.memoizedProps?.attachment;
     if (attachment?.name === fileName) return { status: attachment.status || 'unknown' };
   }
@@ -282,10 +282,10 @@ function controlChatComposer(options:ComposerOptions) {
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
   let controller:ComposerController|null = null;
-  for (let node = editor; node && !controller; node = node.parentElement) {
+  for (let node: Element|null|undefined = editor; node && !controller; node = node.parentElement) {
     const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
     const observed:unknown=key?Reflect.get(node,key):null;
-    for (let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null, depth = 0; fiber && depth < 16; fiber = fiber.return, depth += 1) {
+    for (let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null, depth = 0; fiber && depth < 16; fiber = fiber.return??null, depth += 1) {
       const candidate = fiber.memoizedProps?.composerController;
       if (candidate?.view?.dom === editor && typeof candidate.getChatGptPrompt === 'function') { controller = candidate; break; }
     }
