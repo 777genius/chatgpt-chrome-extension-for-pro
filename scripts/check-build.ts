@@ -2,7 +2,6 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as ts from "typescript";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const dir = join(root, "dist", "extension");
@@ -34,15 +33,13 @@ for (const name of ["popup.html", "journal.html", "offscreen.html"]) {
 for (const file of files) {
   if (!existsSync(join(dir, file))) throw new Error("Missing generated MV3 resource " + file);
 }
+const scanner = new Bun.Transpiler({ loader: "js", target: "browser" });
 const js = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
 for (const file of js) {
   const bytes = readFileSync(join(dir, file), "utf8");
-  const parsed = ts.createSourceFile(file, bytes, ts.ScriptTarget.ES2023, true, ts.ScriptKind.JS);
-  for (const statement of parsed.statements) {
-    if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement) ||
-        ts.isExportAssignment(statement) || ts.isImportEqualsDeclaration(statement)) {
-      throw new Error("ES module syntax is forbidden in MV3 classic script: " + file);
-    }
+  const scanned = scanner.scan(bytes);
+  if (scanned.imports.length > 0 || scanned.exports.length > 0) {
+    throw new Error("Import/export or module require found in classic Chrome script: " + file);
   }
   const check = spawnSync(process.execPath, ["--check", join(dir, file)], { stdio: "inherit" });
   if (check.error || check.status !== 0) throw new Error("Generated script failed syntax: " + file);
