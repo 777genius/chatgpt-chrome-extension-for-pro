@@ -44,6 +44,7 @@ test("typed new-chat allocation proof preserves fail-closed native and timestamp
     [record, {...native, firstTurn: false}],
     [record, {...native, firstUserSentAtMs: 110_001}],
     [record, {...native, firstUserSentAtMs: NaN}],
+    [record, {...native, url: "https://chatgpt.com/c/other-chat"}],
     [record, {...native, hasError: true}],
     [record, {...native, isReadOnly: true}],
     [{...record, baselineKey: "old-answer"}, native],
