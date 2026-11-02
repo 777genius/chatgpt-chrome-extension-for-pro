@@ -148,18 +148,25 @@
           if(old.phase!=='paused'||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
-          let record={...old,phase:'waiting',pauseRequested:false,reason:''};
+          if(old.manualOverride) {
+            // An explicit Resume after a real manual intervention is a fresh
+            // user authorization, but the current chat must be idle first.
+            const ready=await tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url:target});
+            if(!ready?.ok||ready.idle!==true)throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
+          }
+          let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
           if(old.pendingSendKind) {
             record={...record,phase:'preparing',pendingSendKind:null,
               operation:operation(record,old.pendingSendKind,tabId,now())};
           } else if(old.pendingCompletion) {
-            const pending=old.pendingCompletion;
             record={...record,pendingCompletion:null};
             if(record.continuations>=record.maxContinuations) {
               record={...record,phase:'stopped',reason:'Лимит продолжений исчерпан'};
             } else {
               record={...record,phase:'preparing',operation:operation(record,'continuation',tabId,now())};
             }
+          } else if(old.manualOverride) {
+            record={...record,phase:'preparing',operation:operation(record,'continuation',tabId,now())};
           }
           await event('resumed',record,tabId);
           await save(record);
@@ -271,6 +278,7 @@
         const inFlight=['sending','clicked'].includes(record.phase);
         const reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
         const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,
+          manualOverride:!inFlight,
           ...(reserved?{pendingSendKind:record.operation.kind,operation:null}:{}),
           reason:inFlight?'Ожидается исход отправки; ручное действие имеет приоритет':'Пауза: ручная отправка пользователя'};
         await event('manual_pause',next,tabId);
