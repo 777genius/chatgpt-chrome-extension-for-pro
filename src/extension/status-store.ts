@@ -149,7 +149,7 @@ function migrateChatStatuses() {
           notices.set(row.tabId,pending);
         } else if(row.kind==='retry.manual_reset'&&url&&typeof row.tabId==='number'&&Number.isInteger(row.tabId)) {
           manuals.set(row.tabId,{url,at:at(row)});
-        } else if(row.kind==='request.started'&&row.automatic===false&&url) {
+        } else if(row.kind==='request.started'&&row.automatic===false&&url&&typeof row.tabId==='number') {
           const manual=typeof row.tabId==='number'?manuals.get(row.tabId):undefined;
           if(manual?.url===url&&at(row)>=manual.at&&at(row)-manual.at<=10000) {
             manuals.delete(row.tabId);
@@ -159,13 +159,13 @@ function migrateChatStatuses() {
               state.manualThrough={epoch:'journal',order:sequence};
             }
           }
-        } else if(row.kind==='notification.result'&&row.warning!==true&&row.notification==='fulfilled'&&typeof row.notificationId==='string'&&active.has(row.notificationId)&&
+        } else if(row.kind==='notification.result'&&row.warning!==true&&row.notification==='fulfilled'&&typeof row.tabId==='number'&&typeof row.notificationId==='string'&&active.has(row.notificationId)&&
             /^chatgpt-prompt-bound:\d+:/.test(row.notificationId)) {
           const pending=typeof row.tabId==='number'?(notices.get(row.tabId)||[]):[],id=row.notificationId!;
           const matches=pending.filter(notice=>url===notice.url&&row.isError===notice.isError&&
             String(row.title||'').replace(/\s+/g,' ').trim()===notice.title&&truncateResponse(row.message)===notice.preview&&
             Number(/^chatgpt-prompt-bound:(\d+):/.exec(id)?.[1])===row.tabId);
-          if(matches.length!==1||bindings.has(id)&&bindings.get(id).url!==url) {
+          if(matches.length!==1||bindings.has(id)&&bindings.get(id)?.url!==url) {
             bindings.delete(id);uncertain.add(id);continue;
           }
           if(uncertain.has(id))continue;
@@ -224,13 +224,13 @@ function updateDeferredChat(url: string,event: DeferredEvent,receipt: StatusRece
     const matching=record.deferred?.cardKey===key||legacyCard;
     if(['pending','unknown'].includes(event.phase)) {
       if((record.consumedDeferredCards||[]).includes(key)||event.phase==='unknown'&&!matching)return {value:statusView(record)};
-      if(matching&&record.deferred.phase===event.phase){record.deferred.observedThrough=receipt;return {write:true,value:statusView(record)};}
+      if(matching&&record.deferred&&record.deferred.phase===event.phase){record.deferred.observedThrough=receipt;return {write:true,value:statusView(record)};}
       record.deferred=matching?{...record.deferred,phase:event.phase,observedThrough:receipt}:{cardKey:key,anchorKey:String(event.anchorKey||'').slice(0,500),taskId:typeof event.taskId==='string'?event.taskId.slice(0,200):null,phase:event.phase,eventAt:Date.now(),receipt,observedThrough:receipt};
       record.revision++;return {write:true,value:statusView(record)};
     }
     if(event.phase==='resumed')consumeDeferredCard(record,key);
     if(!matching)return {write:event.phase==='resumed',value:statusView(record)};
-    const newerActive=record.status&&['error','loading'].includes(record.status.kind)&&statusBefore(record.deferred.receipt,record.status.receipt);
+    const newerActive=record.status&&record.deferred&&['error','loading'].includes(record.status.kind)&&statusBefore(record.deferred.receipt,record.status.receipt);
     consumeDeferredCard(record,record.deferred.cardKey);consumeDeferredCard(record,key);delete record.deferred;
     if(!newerActive&&event.phase==='resumed'&&event.generating===true&&Number.isFinite(event.startedAt)&&event.startedAt>0&&(!record.status||statusBefore(record.status.receipt,receipt))) {
       record.status={kind:'loading',eventAt:event.startedAt,receipt,observed:true};
@@ -243,9 +243,9 @@ function withChatStatus<T>(url: string,change: (record: StatusRecord)=>StatusCha
   const next=prior.catch(()=>{}).then(async()=>{
     await migrateChatStatuses();
     const key=statusKey(url);
-    const record=(await chrome.storage.local.get<StatusRecord>(key))[key]||{url,revision:0,sequence:0,returnedThrough:0,status:null,notifications:[]};
-    const legacyTerminal=['error','success'].includes(record.status?.kind)&&typeof record.status.unread!=='boolean';
-    if(legacyTerminal)record.status={...record.status,unread:false};
+    const record:StatusRecord=(await chrome.storage.local.get<StatusRecord>(key))[key]||{url,revision:0,sequence:0,returnedThrough:0,status:null,notifications:[]};
+    const legacyTerminal=Boolean(record.status&&['error','success'].includes(record.status.kind)&&typeof record.status.unread!=='boolean');
+    if(legacyTerminal&&record.status)record.status={...record.status,unread:false};
     const result=await change(record);
     if(result.write||legacyTerminal)await chrome.storage.local.set({[key]:record});
     return result.value;
@@ -293,7 +293,7 @@ function stopChatLoading(url: string,startedAt: number,receipt: StatusReceipt,st
 function reserveChatNotification(url: string,tabId: number,kind: 'error'|'success',eventAt: number,receipt: StatusReceipt) {
   return withChatStatus(url,record=>{
     const sequence=++record.sequence;
-    const ticket={id:`chatgpt-prompt-bound:${tabId}:${eventAt}:${sequence}:${encodeURIComponent(url)}`,
+    const ticket:NotificationValue={id:`chatgpt-prompt-bound:${tabId}:${eventAt}:${sequence}:${encodeURIComponent(url)}`,
       url,tabId,sequence,receipt,state:'creating'};
     record.notifications.push(ticket);
     if(['error','success'].includes(kind)&&(!record.status||statusBefore(record.status.receipt,receipt))&&(!record.manualThrough||!statusBefore(receipt,record.manualThrough))) {
@@ -331,7 +331,7 @@ function closeChatNotification(url: string,id: string) {
 }
 function markStatusViewed(record: StatusRecord,receipt: StatusReceipt): boolean {
   if(!record.viewedThrough||!statusBefore(receipt,record.viewedThrough))record.viewedThrough=receipt;
-  if(['error','success'].includes(record.status?.kind)&&record.status.unread===true&&statusBefore(record.status.receipt,receipt)) {
+  if(record.status&&['error','success'].includes(record.status.kind)&&record.status.unread===true&&statusBefore(record.status.receipt,receipt)) {
     record.status={...record.status,unread:false};record.revision++;
     return true;
   }
@@ -350,7 +350,7 @@ async function visitChatNotifications(url: string,receipt: StatusReceipt,{manual
     const seenChanged=markStatusViewed(record,receipt);
     if(manual) {
       retireDeferredForRequest(record,receipt);
-      if((!record.status||statusBefore(record.status.receipt,receipt))&&(!record.loadingStoppedThrough||!statusBefore(receipt,record.loadingStoppedThrough)))record.status=Number.isFinite(startedAt)?{kind:'loading',eventAt:startedAt,receipt}:null;
+      if((!record.status||statusBefore(record.status.receipt,receipt))&&(!record.loadingStoppedThrough||!statusBefore(receipt,record.loadingStoppedThrough)))record.status=typeof startedAt==='number'&&Number.isFinite(startedAt)?{kind:'loading',eventAt:startedAt,receipt}:null;
       if(!record.manualThrough||!statusBefore(receipt,record.manualThrough))record.manualThrough=receipt;
       record.revision++;
     }
