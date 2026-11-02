@@ -50,6 +50,7 @@ function element(id: string): HTMLElement {
 }
 const filterField = element("filter");
 if (!(filterField instanceof HTMLInputElement)) throw new Error("Invalid journal filter input");
+const journalFilter: HTMLInputElement = filterField;
 
 let journal: JournalView | null = null;
 let limit = 200;
@@ -75,7 +76,7 @@ const labels: Record<string, string> = {
   'tab.updated': 'Состояние вкладки изменилось', 'tab.closed': 'Вкладка закрыта'
 };
 function render(): void {
-  const query = filterField.value.trim().toLowerCase();
+  const query = journalFilter.value.trim().toLowerCase();
   const entries = (journal?.events || []).filter((e) =>
     !query || JSON.stringify(e).toLowerCase().includes(query)).reverse();
   const root = element("events");
