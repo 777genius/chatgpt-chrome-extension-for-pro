@@ -78,6 +78,7 @@
       const target=requireUrl(url),config=policy.settings({goal,rules,maxContinuations,maxMinutes});
       const result=await serialize(async()=>{
         const previous=await read(target);
+        if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат или вручную разберите журнал');
         if(previous&&!['completed','stopped','moved'].includes(previous.phase))
           throw Error('Для этого чата уже запущена цель. Сначала остановите её');
         const time=now();
@@ -118,7 +119,7 @@
             ...(old.phase==='preparing'?{operation:null,pendingSendKind:null}:{}),
             reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
               'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
-          await event('stopped',record,tabId);
+          await event(inFlight||old.operation?'stop_requested':'stopped',record,tabId);
           await save(record);
           return {record};
         }
