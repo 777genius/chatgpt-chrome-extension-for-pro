@@ -21,3 +21,17 @@ DOM/API mocks are not a real ChatGPT E2E test. If there is no browser access, re
 ## Delivery
 
 Do not claim queue/goal already exist. Implement only the requested scope, describe data migration and known browser validation gaps, and retain upstream attribution/license. Do not commit generated output, dependencies, local diagnostics or secrets.
+
+
+## Agent feedback and required quality gates
+
+- Run `bun run check:changed` for changed-file feedback while editing.
+- Run `bun run check:fast` before handoff.
+- Run `bun run check` for the full candidate before any review-ready/merge
+  decision; it includes the required complete synthetic E2E inventory,
+  compiled-distribution verification and Foundation policies.
+- Draft optimizations are feedback-only. A green skipped job is never
+  qualification; run complete checks on the exact final head and base.
+- Keep `@agent-teams/engineering-foundation` development-only, and use only
+  public version-pinned `@get-modular/*` APIs. Chrome MV3 owns effects,
+  subscriptions, startup registration, durable journal and recovery.
