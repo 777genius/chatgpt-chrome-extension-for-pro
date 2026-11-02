@@ -204,6 +204,27 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(env.messages.length,2,'one replay creates exactly one dispatcher');
 }
 
+// Several final responses can race the same Goal send acknowledgement.
+// Keep their identities separate and replay only the confirmed Goal prompt.
+{
+  const env=fixture();await begin(env);
+  const current=state(env),op=current.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:current.id,operationId:op.id,text:op.text,
+    baselineKey:'/c/goal-fixture-a|old'});
+  const stage=(promptKey:string,userId:string,completionKey:string)=>
+    env.store.completion({url:URL_A,tabId:7,promptKey,userId,completionKey,
+      response:'Still working',nativeVerified:true,rawExact:false});
+  assert.equal((await stage('/c/goal-fixture-a|manual-user','manual-native',
+    '/c/goal-fixture-a|manual-user|assistant-1')).ok,true);
+  assert.equal((await stage('/c/goal-fixture-a|goal-user','goal-native',
+    '/c/goal-fixture-a|goal-user|assistant-2')).ok,true);
+  assert.equal(state(env).earlyCompletions.length,2);
+  await env.store.report({url:URL_A,tabId:7,id:current.id,operationId:op.id,
+    status:'confirmed',newPromptKey:'/c/goal-fixture-a|goal-user'});
+  assert.equal(state(env).phase,'preparing');
+  assert.equal(env.messages.length,2,'only confirmed Goal prompt produces one continuation');
+}
+
 // The fast completion of the exact goal marker is also replayed, without
 // dispatching a continuation before or after the send acknowledgement.
 {
@@ -392,6 +413,28 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,
     handoffId:'early-handoff',tabId:7,acceptedUserId:'accepted-handoff-user'});
   assert.equal(env.messages.length,1,'handoff replay is idempotent');
+}
+
+// A misleading unrelated destination answer must not evict the accepted
+// native handoff answer if both finish before the durable transfer.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'multiple-destination',tabId:7});
+  for(const [userId,response,key] of [
+    ['unrelated-user','GOAL_COMPLETE','manual-final'],
+    ['accepted-user','GOAL_COMPLETE','native-final']
+  ]) {
+    const result=await env.store.stageHandoffCompletion({sourceUrl:URL_A,targetUrl:URL_B,
+      handoffId:'multiple-destination',tabId:7,
+      completionKey:'/c/goal-fixture-b|'+key+'|assistant',promptKey:'/c/goal-fixture-b|'+key,
+      response,userId,nativeVerified:true,rawExact:true});
+    assert.equal(result.ok,true);
+  }
+  assert.equal(state(env).handoffEarlyCompletions.length,2);
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,
+    handoffId:'multiple-destination',tabId:7,acceptedUserId:'accepted-user'});
+  assert.equal(state(env,URL_B).phase,'completed');
+  assert.equal(env.messages.length,1,'only matching handoff final result is accepted');
 }
 
 // Store errors are fail-closed and do not click.
