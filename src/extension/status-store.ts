@@ -112,7 +112,7 @@ function migrateChatStatuses() {
   const migration=(async()=>{
     if((await chrome.storage.local.get<{schema?:number}>(STATUS_MIGRATION_KEY))[STATUS_MIGRATION_KEY]?.schema===1)return;
     const meta=(await chrome.storage.local.get<StatusMetadata>(JOURNAL_META))[JOURNAL_META];
-    const through=Number.isSafeInteger(meta?.sequence)&&meta.sequence>=0?meta.sequence:0;
+    const through=typeof meta?.sequence==='number'&&Number.isSafeInteger(meta.sequence)&&meta.sequence>=0?meta.sequence:0;
     const active=new Set(Object.keys(await chrome.notifications.getAll?.()||{}));
     const states=new Map<string, StatusRecord>(),notices=new Map<number, PendingNotice[]>(),manuals=new Map<number,{url:string;at:number}>(),bindings=new Map<string,NotificationValue>(),uncertain=new Set<string>();
     const firstChatByTab=new Map<number,string>(),ambiguousTabs=new Set<number>();
@@ -202,7 +202,8 @@ function statusBefore(value: StatusReceipt | null | undefined,fence: StatusRecei
 function statusView(record: StatusRecord): StatusView {
   const pending=record.deferred,status=record.status;
   const newerActive=status&&['loading','error'].includes(status.kind)&&pending&&statusBefore(pending.receipt,status.receipt);
-  return {url:record.url,status:pending&&!newerActive?{kind:'deferred',eventAt:pending.eventAt,receipt:pending.receipt,unread:false}:status,revision:record.revision};
+  const displayed:StatusValue|null=pending&&!newerActive?{kind:'deferred',eventAt:pending.eventAt,receipt:pending.receipt,unread:false}:status;
+  return {url:record.url,status:displayed,revision:record.revision};
 }
 function consumeDeferredCard(record: StatusRecord,key: string | null | undefined): void {
   if(!key)return;
@@ -225,14 +226,14 @@ function updateDeferredChat(url: string,event: DeferredEvent,receipt: StatusRece
     if(['pending','unknown'].includes(event.phase)) {
       if((record.consumedDeferredCards||[]).includes(key)||event.phase==='unknown'&&!matching)return {value:statusView(record)};
       if(matching&&record.deferred&&record.deferred.phase===event.phase){record.deferred.observedThrough=receipt;return {write:true,value:statusView(record)};}
-      record.deferred=matching?{...record.deferred,phase:event.phase,observedThrough:receipt}:{cardKey:key,anchorKey:String(event.anchorKey||'').slice(0,500),taskId:typeof event.taskId==='string'?event.taskId.slice(0,200):null,phase:event.phase,eventAt:Date.now(),receipt,observedThrough:receipt};
+      record.deferred=matching&&record.deferred?{...record.deferred,phase:event.phase,observedThrough:receipt}:{cardKey:key,anchorKey:String(event.anchorKey||'').slice(0,500),taskId:typeof event.taskId==='string'?event.taskId.slice(0,200):null,phase:event.phase,eventAt:Date.now(),receipt,observedThrough:receipt};
       record.revision++;return {write:true,value:statusView(record)};
     }
     if(event.phase==='resumed')consumeDeferredCard(record,key);
-    if(!matching)return {write:event.phase==='resumed',value:statusView(record)};
+    if(!matching||!record.deferred)return {write:event.phase==='resumed',value:statusView(record)};
     const newerActive=record.status&&record.deferred&&['error','loading'].includes(record.status.kind)&&statusBefore(record.deferred.receipt,record.status.receipt);
     consumeDeferredCard(record,record.deferred.cardKey);consumeDeferredCard(record,key);delete record.deferred;
-    if(!newerActive&&event.phase==='resumed'&&event.generating===true&&Number.isFinite(event.startedAt)&&event.startedAt>0&&(!record.status||statusBefore(record.status.receipt,receipt))) {
+    if(!newerActive&&event.phase==='resumed'&&event.generating===true&&typeof event.startedAt==='number'&&Number.isFinite(event.startedAt)&&event.startedAt>0&&(!record.status||statusBefore(record.status.receipt,receipt))) {
       record.status={kind:'loading',eventAt:event.startedAt,receipt,observed:true};
     }
     record.revision++;return {write:true,value:statusView(record)};
