@@ -34,6 +34,29 @@ if (existsSync(typed)) {
   }
 }
 
+// Journal uses the public Get Modular packages in a single browser IIFE.
+// This is intentionally not a worker entry: Chrome MV3 event registrations
+// must remain synchronous and must never await graph construction.
+const journalEntrypoint = join(root, "src", "extension", "journal-modular.ts");
+const journalBuild = await Bun.build({
+  entrypoints: [journalEntrypoint],
+  target: "browser",
+  format: "iife",
+  splitting: false,
+  minify: false,
+});
+if (!journalBuild.success || journalBuild.outputs.length !== 1) {
+  const errors = journalBuild.logs.map((log) => String(log.message)).join("; ");
+  throw new Error("Get Modular journal bundle failed: " + errors);
+}
+writeFileSync(join(destination, "journal-modular.js"), await journalBuild.outputs[0]!.text());
+const htmlFile = join(destination, "journal.html");
+const legacyHtml = readFileSync(htmlFile, "utf8");
+const scriptTag = '<script src="journal.js"></script>';
+if (!legacyHtml.includes(scriptTag)) throw new Error("Journal script anchor missing");
+writeFileSync(htmlFile, legacyHtml.replace(scriptTag,
+  '<script src="journal-modular.js"></script>' + scriptTag));
+
 const manifest = JSON.parse(readFileSync(join(destination, "manifest.json"), "utf8")) as {
   background: { service_worker: string };
   content_scripts: { js: string[] }[];
