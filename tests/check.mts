@@ -241,7 +241,7 @@ async function workerCheck() {
     scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
-  const workerContext = createContext({ chrome, console, URL, setTimeout, clearTimeout });
+  const workerContext = createContext({ chrome, console, URL, crypto:globalThis.crypto, setTimeout, clearTimeout });
   Object.assign(workerContext, {importScripts: (name: string) => runInContext(readFileSync(`extension/${name}`, 'utf8'), workerContext)});
   runInContext(worker, workerContext);
   callbacks.installed(); await pause();
