@@ -305,12 +305,24 @@ async function handleHandoffMessage(message, tabId) {
       const lineage=(await chrome.storage.local.get(lineageKey))[lineageKey];
       const naming=ChatGPTHandoffTitle.planNext({sourceUrl:record.sourceUrl,sourceTitle:record.sourceTitle,lineage});
       record={...record,naming};
-      await goalController.handoffBegin({sourceUrl:record.sourceUrl,handoffId:record.id,tabId});
+      // Persist the full handoff and its idempotent marker before moving the
+      // Goal into the handoff phase. A failed journal/storage write must not
+      // strand the Goal waiting on a transfer that never started.
       await appendJournal({kind:'handoff.navigating', operationId:record.id, sourceUrl:record.sourceUrl,
         text:record.text, prompt:record.prompt, asFile:record.asFile, fileName:record.fileName,
         draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,naming}, {id:tabId});
       // Save the full text BEFORE navigating away from the source page.
       await chrome.storage.local.set({ [key]: { ...record, stage: 'navigating' }, [marker]: record.id });
+      try {
+        await goalController.handoffBegin({sourceUrl:record.sourceUrl,handoffId:record.id,tabId});
+      } catch(error) {
+        // No native navigation has been issued yet. Mark the saved handoff
+        // failed and keep the user-facing recovery copy instead of a phantom
+        // handoff that the Goal cannot follow.
+        await chrome.storage.local.set({[key]:{...record,stage:'failed',
+          reason:'Goal handoff could not be prepared: '+String(error?.message||error)}});
+        throw error;
+      }
       return { ok: true, record: { ...record, stage: 'navigating' } };
     }
     if (!current || current.id !== message.id) throw new Error('Handoff changed');
@@ -698,9 +710,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isError&&!isWarning && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
     if (!isError&&!isWarning && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
-    if(!isError&&!isWarning)void goalController.completion({url:sourceUrl,tabId,completionKey:rawCompletionKey,
-      promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
-      rawExact:message.goalRawExact,userId:message.goalNativeUserId}).catch(error=>console.error('Goal completion failed',error));
+    if(!isError&&!isWarning) {
+      const goalAnswer={url:sourceUrl,tabId,completionKey:rawCompletionKey,
+        promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
+        rawExact:message.goalRawExact,userId:message.goalNativeUserId};
+      try {
+        const handoff=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
+        if(handoff?.id&&['sending','awaiting-confirmation','sent'].includes(handoff.stage)&&
+            ChatGPTGoalPolicy.canonical(handoff.sourceUrl)!==sourceUrl&&
+            ChatGPTGoalPolicy.canonical(sourceUrl)) {
+          await goalController.stageHandoffCompletion({sourceUrl:handoff.sourceUrl,
+            targetUrl:sourceUrl,handoffId:handoff.id,...goalAnswer});
+          if(handoff.stage==='sent')await goalController.handoffConfirm({sourceUrl:handoff.sourceUrl,
+            targetUrl:sourceUrl,handoffId:handoff.id,tabId,acceptedUserId:handoff.acceptance?.messageId});
+        }
+        await goalController.completion(goalAnswer);
+      } catch(error) { console.error('Goal completion reconciliation failed',error); }
+    }
     journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
       sourceUrl,warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
     const notification={tabId,title:`${isWarning?'⚠️ ':isError?'❌ ':''}${cleanSessionTitle(message.sessionTitle)}`,
