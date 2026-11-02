@@ -24,7 +24,7 @@ type AnimationApi = {
 
 function load<T>(directory: "extension" | "dist/extension", name: string, globalName: string): T {
   const source = readFileSync(new URL("../" + directory + "/" + name + ".js", import.meta.url), "utf8");
-  const context: Record<string, unknown> = {};
+  const context: Record<string, unknown> = { URL };
   runInNewContext(source, context, { filename: name + ".js" });
   const value: unknown = context[globalName];
   assert.ok(value && typeof value === "object", globalName + " absent after evaluation");
