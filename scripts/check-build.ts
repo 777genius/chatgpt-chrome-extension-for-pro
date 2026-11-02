@@ -17,6 +17,7 @@ const files = new Set<string>([
   "popup.js",
   "offscreen.js",
   "journal.js",
+  "journal-modular.js",
 ]);
 const worker = readFileSync(join(dir, manifest.background.service_worker), "utf8");
 for (const match of worker.matchAll(/\bimportScripts\(([^)]+)\)/g)) {
@@ -46,10 +47,16 @@ for (const name of js) {
     }
   }
 }
-for (const name of ["manifest.json", "popup.html", "journal.html", "offscreen.html"]) {
+for (const name of ["manifest.json", "popup.html", "offscreen.html"]) {
   if (readFileSync(join(legacy, name), "utf8") !== readFileSync(join(dir, name), "utf8")) {
     throw new Error("Chrome MV3 entry or permissions changed during build: " + name);
   }
+}
+const expectedJournalHtml=readFileSync(join(legacy, "journal.html"), "utf8")
+  .replace('<script src="journal.js"></script>',
+    '<script src="journal-modular.js"></script><script src="journal.js"></script>');
+if (readFileSync(join(dir, "journal.html"), "utf8") !== expectedJournalHtml) {
+  throw new Error("Journal module entry or order was changed by build");
 }
 for (const file of js) {
   const bytes = readFileSync(join(dir, file), "utf8");
