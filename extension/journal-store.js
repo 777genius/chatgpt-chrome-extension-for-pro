@@ -144,14 +144,22 @@ function appendJournal(event, tab = {}) {
       requests[event.requestId] = {operationId,sourceUrl};
     }
     if (['request.completed','request.failed'].includes(event.kind)) operationId ||= requests[event.requestId]?.operationId || null;
-    if (['retry.send_intent','handoff.sending'].includes(event.kind)) active[tabId] = {operationId,kind:event.kind,at:Date.now()};
+    if (['retry.send_intent','handoff.sending','goal.send_intent'].includes(event.kind)) {
+      const previous=active[tabId];
+      if(previous&&previous.operationId!==operationId)
+        throw Object.assign(new Error('Вкладка уже имеет другую автоматическую отправку с неизвестным исходом'),{journalPolicy:true});
+      active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,at:Date.now()};
+    }
     if (event.kind === 'send.authorized') {
       if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
       if (!active[tabId] || active[tabId].operationId !== operationId || active[tabId].consumed) throw Object.assign(new Error('Повторная автоматическая отправка запрещена'),{journalPolicy:true});
       active[tabId] = {...active[tabId],consumed:true};
     }
-    if (['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset','handoff.sent','handoff.failed','tab.closed'].includes(event.kind) &&
-      (!operationId || active[tabId]?.operationId === operationId)) delete active[tabId];
+    if (['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset','handoff.sent',
+      'handoff.failed','goal.confirmed','goal.blocked','goal.stopped','tab.closed'].includes(event.kind) &&
+      (!operationId || active[tabId]?.operationId === operationId) &&
+      (event.kind==='tab.closed'||event.kind.startsWith('goal.')?active[tabId]?.kind==='goal.send_intent'||event.kind==='tab.closed':
+        event.kind==='retry.manual_reset'?active[tabId]?.kind==='retry.send_intent':true)) delete active[tabId];
     const requestSource = requests[event.requestId]?.sourceUrl;
     if (['request.completed','request.failed'].includes(event.kind)) delete requests[event.requestId];
     const entry = { ...event, schema: 1, sequence, recordedAt: Date.now(),
