@@ -129,10 +129,12 @@ let journalFailure = '';
 const RETRY_STATE_WINDOW_MS = 120000;
 const RETRY_MIGRATION_BATCH_SIZE = 50;
 function journalChatId(value: string | undefined | null): string | null {
+  if(typeof value!=='string')return null;
   try { const url = new URL(value); return url.origin === 'https://chatgpt.com' ? url.pathname.match(/\/c\/([^/]+)/)?.[1] || null : null; }
   catch { return null; }
 }
 function retryDraftUrl(value: string | undefined | null): string | null {
+  if(typeof value!=='string')return null;
   try { const url=new URL(value); return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)?`${url.origin}${url.pathname.replace(/\/$/,'')}`:null; }
   catch { return null; }
 }
@@ -164,8 +166,8 @@ function reduceRetryDraft(drafts: Record<string,RetryDraft>,event: JournalEvent)
   if(event.kind==='draft.restore_intent')return {...drafts,[url]:{...current,phase:'claimed',claimedAt:event.recordedAt,claimSequence:event.sequence}};
   return phase===current.phase?drafts:{...drafts,[url]:{...current,phase}};
 }
-function retryDraftClaimable(record: RetryDraft | null | undefined): boolean {
-  return Boolean(record&&!record.claimedAt&&['saved','intent','not-clicked','confirmed'].includes(record.phase));
+function retryDraftClaimable(record: RetryDraft | null | undefined): record is RetryDraft {
+  return Boolean(record&&!record.claimedAt&&typeof record.phase==='string'&&['saved','intent','not-clicked','confirmed'].includes(record.phase));
 }
 async function indexedRetryDraft(meta: JournalMeta | null,url: string): Promise<(RetryDraft & {draft:string}) | null> {
   const record=meta?.retryDraftSchema===1?meta.retryDraftByChat?.[retryDraftUrl(url)||'']:null;
@@ -188,9 +190,9 @@ function reduceRetrySummary(retryByChat: Record<string, RetrySummary>, event: Jo
       lastPromptKey:'',lastAttemptId:'',remainingRetries:event.remainingRetries}};
   }
   if(event.kind==='retry.planned' && retryByChat[chatId]?.remainingRetries!=null) {
-    const state=retryByChat[chatId];
+    const state=retryByChat[chatId]!;
     if(state.lastBudgetOperation===event.operationId)return retryByChat;
-    return {...retryByChat,[chatId]:{...state,remainingRetries:Math.max(0,state.remainingRetries-1),lastBudgetOperation:event.operationId}};
+    return {...retryByChat,[chatId]:{...state,remainingRetries:Math.max(0,state.remainingRetries!-1),lastBudgetOperation:event.operationId}};
   }
   const isRetryError = event.kind === 'error.detected' && event.action === 'retry';
   const isBlocked = ['retry.blocked', 'retry.failed', 'draft.restore_failed'].includes(event.kind);
@@ -256,7 +258,7 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
     const requests:Record<string,JournalRequestOp> = { ...meta.requests };
     let operationId: string | null = event.operationId || null;
     const savedDraft=meta.retryDraftByChat[retryDraftUrl(sourceUrl)||''];
-    if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft.operationId!==operationId||savedDraft.savedSequence!==event.savedSequence)) {
+    if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft?.operationId!==operationId||savedDraft?.savedSequence!==event.savedSequence)) {
       throw Object.assign(new Error('Восстановление черновика уже выполнено или исход отправки неизвестен'),{journalPolicy:true});
     }
     const claimedDraft=event.kind==='draft.restore_intent'?await indexedRetryDraft(meta,sourceUrl):null;
@@ -321,8 +323,9 @@ async function readRetryState(url: string): Promise<RetrySummary | null> {
   const read = journalQueue.catch(() => {}).then(async () => {
     const saved = (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
     if (!saved) return null;
-    const meta = await retryMetadata(journalMeta(saved));
-    if (saved.retrySchema !== 1) await chrome.storage.local.set({[JOURNAL_META]: meta});
+    const current=journalMeta(saved);
+    const meta = await retryMetadata(current);
+    if (current.retrySchema !== 1) await chrome.storage.local.set({[JOURNAL_META]: meta});
     const chatId = journalChatId(url);
     const state = chatId && Object.hasOwn(meta.retryByChat || {}, chatId) ? meta.retryByChat[chatId] : null;
     if (!state) return null;
