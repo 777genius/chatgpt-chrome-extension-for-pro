@@ -12,6 +12,7 @@
   let manualSendIntent = null;
   let completionSendIntent = null;
   let completionAttempt = null;
+  let goalDispatchBusy = false;
   let completionRecoveryTimer = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
@@ -140,6 +141,18 @@
     return '';
   }
 
+  function assistantGoalMarker(turn) {
+    if(!turn)return false;
+    const roleNode=turn.matches?.('[data-message-author-role="assistant"]')?turn:
+      turn.querySelector('[data-message-author-role="assistant"]')||turn;
+    const rendered=roleNode.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
+    // Only one entire plain response. Code fences, formatting, other text
+    // or tool cards cannot accidentally satisfy the completion protocol.
+    return !!rendered&&rendered.textContent==='GOAL_COMPLETE'&&
+      roleNode.textContent==='GOAL_COMPLETE'&&
+      !roleNode.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img');
+  }
+
   function assistantText(turn) {
     if (!turn) return '';
     try {
@@ -186,7 +199,7 @@
     ].join('|');
 
     if (!response || assistantIndex < 0) {
-      return { promptKey, assistantKey: '', response: '' };
+      return { promptKey, assistantKey: '', response: '',goalMarkerExact:false };
     }
 
     const assistantTurn = turns[assistantIndex];
@@ -196,7 +209,7 @@
         assistantTurn?.getAttribute('data-testid') ||
         assistantTurn?.getAttribute('data-chatgpt-search-unit-key') ||
         `assistant-${assistantIndex}`,
-      response
+      response,goalMarkerExact:assistantGoalMarker(assistantTurn)
     };
   }
 
@@ -639,6 +652,7 @@
     if (event.isTrusted && event.target instanceof Element &&
         event.target.closest('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')) {
       retryStates.delete(location.pathname);
+      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       rememberManualStatusIntent();
       void audit('retry.manual_reset',{input:'send-button'});
     }
@@ -647,6 +661,7 @@
     if (event.isTrusted && event.key === 'Enter' && !event.shiftKey && !event.isComposing &&
         event.target instanceof Element && event.target.closest('#prompt-textarea, [data-composer-markdown]')) {
       retryStates.delete(location.pathname);
+      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       rememberManualStatusIntent();
       void audit('retry.manual_reset',{input:'enter'});
     }
@@ -830,7 +845,9 @@
     if (handoffRecord && handoffRecord.sourceUrl !== sourceUrl && Date.now() - handoffRecord.createdAt < RETRY_WINDOW_MS) {
       throw new Error('Новый чат тоже завершился ошибкой; повторная передача остановлена');
     }
-    const text = handoffText(info.messages, error.response, sourceUrl);
+    const goalContext=await runtimeMessage({type:'CHATGPT_GOAL_CONTEXT',url:sourceUrl});
+    if(!goalContext?.ok)throw Error('Не удалось сохранить контекст Goal перед переносом чата');
+    const text=handoffText(info.messages,error.response,sourceUrl)+(goalContext.text?'\n\n'+goalContext.text:'');
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
     const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там два последних сообщения пользователя и два ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
@@ -1140,8 +1157,10 @@
               }
               const latest=latestPromptSnapshot();
               if(latest?.promptKey!==attempt.promptKey||latest.response!==text||isGenerating()||currentErrors().length)return;
-              if((native?.assistantKey===latest.assistantKey&&completedAttemptEvidence(attempt,{...native,attemptId:attempt.id})) ||
-                  (attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
+              const nativeFinal=native?.assistantKey===latest.assistantKey&&
+                !!completedAttemptEvidence(attempt,{...native,attemptId:attempt.id});
+              if(nativeFinal||(attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
+                attempt.goalNativeVerified=nativeFinal;
                 void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
                 finish(text);
               }
@@ -1209,6 +1228,8 @@
       durationMs: consumeDuration(),
       sessionTitle: document.title,
       response: snapshot.response,
+      goalPromptKey:snapshot.promptKey,goalNativeVerified:attempt.goalNativeVerified===true,
+      goalRawExact:snapshot.goalMarkerExact===true,
       fingerprint,
       completionKey: snapshot.assistantKey
         ? `${snapshot.promptKey}|${snapshot.assistantKey}`
