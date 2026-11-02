@@ -283,6 +283,7 @@ function controlChatComposer(options:ComposerOptions) {
     }
   }
   if (!controller) return { ok: false, reason: 'Не удалось проверить состояние редактора ChatGPT' };
+  const confirmedController=controller;
   function visibleText():string {
     const directValue:unknown=Reflect.get(editor,'value');
     if (directValue !== undefined) return typeof directValue==='string'?directValue:'';
@@ -298,15 +299,15 @@ function controlChatComposer(options:ComposerOptions) {
     }
     return Array.from(copy.childNodes).map(text).join('\n');
   }
-  const actualPrompt = controller.getChatGptPrompt();
+  const actualPrompt = confirmedController.getChatGptPrompt();
   const prompt = actualPrompt?.prompt;
-  const plainMatches = controller.getPlainText() === options.text && visibleText() === options.text;
+  const plainMatches = confirmedController.getPlainText() === options.text && visibleText() === options.text;
   function literalSerializationMatches():boolean {
     // Native Markdown mode escapes punctuation and wraps generated URL links.
     // Permit the native serialization only for an independently checked plain
     // document: no mentions, hidden nodes, custom links, formatting or hints.
-    const doc = controller.view.state?.doc;
-    if (!doc?.toJSON || typeof controller.markdownEditor?.serialize !== 'function' ||
+    const doc = confirmedController.view.state?.doc;
+    if (!doc?.toJSON || typeof confirmedController.markdownEditor?.serialize !== 'function' ||
         actualPrompt.systemHints?.length) return false;
     const value = doc.toJSON();
     if (value.type !== 'doc' || value.marks?.length || !Array.isArray(value.content)) return false;
@@ -326,11 +327,11 @@ function controlChatComposer(options:ComposerOptions) {
       }
       lines.push(line);
     }
-    return lines.join('\n') === options.text && controller.markdownEditor.serialize(doc) === prompt;
+    return lines.join('\n') === options.text && confirmedController.markdownEditor.serialize(doc) === prompt;
   }
   const promptMatches = typeof prompt === 'string' && (prompt === options.text || (plainMatches && literalSerializationMatches()));
   const matches = plainMatches && promptMatches;
-  const ready = controller.submitReady === true && controller.pendingSubmit == null;
+  const ready = confirmedController.submitReady === true && confirmedController.pendingSubmit == null;
   const effort = Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
   if (options.action === 'inspect') return {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
   if (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max')) {
