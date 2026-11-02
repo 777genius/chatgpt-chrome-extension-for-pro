@@ -1,6 +1,6 @@
 import { declareModule } from "@get-modular/assembly";
 import { required } from "@get-modular/core";
-import { Reader, Transport } "./journal.contracts.ts";
+import { Reader, Transport } from "./journal.contracts.ts";
 
 export const readerDeclaration = declareModule({
   moduleId: "chatgpt/journal/reader",

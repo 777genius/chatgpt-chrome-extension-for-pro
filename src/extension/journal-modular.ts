@@ -1,8 +1,8 @@
 import { assemblyFor } from "@get-modular/assembly";
 import { createScope } from "@get-modular/resources";
-import { composeJournal } "../composition/journal.root.ts";
-import type { JournalCapabilities } "../features/journal/composition/journal.contracts.ts";
-import type { JournalTransport } "../features/journal/contracts/journal.ts";
+import { composeJournal } from "../composition/journal.root.ts";
+import type { JournalCapabilities } from "../features/journal/composition/journal.contracts.ts";
+import type { JournalTransport } from "../features/journal/contracts/journal.ts";
 
 /**
  * Chrome MV3 page-local, read-only composition. Bundled as one classic IIFE

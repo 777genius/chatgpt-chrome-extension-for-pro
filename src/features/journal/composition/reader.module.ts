@@ -1,7 +1,7 @@
 import { implement } from "@get-modular/assembly";
-import type { JournalReader } "../contracts/journal.ts";
-import type { JournalCapabilities } "./journal.contracts.ts";
-import { readerDeclaration } "./reader.declaration.ts";
+import type { JournalReader } from "../contracts/journal.ts";
+import type { JournalCapabilities } from "./journal.contracts.ts";
+import { readerDeclaration } from "./reader.declaration.ts";
 
 export const readerModule = implement<JournalCapabilities>()(readerDeclaration, async ({ transport }) => {
   const port: JournalReader = {

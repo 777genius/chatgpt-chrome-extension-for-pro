@@ -3,9 +3,9 @@ import { test } from "node:test";
 import { assemblyFor } from "@get-modular/assembly";
 import { isolate } from "@get-modular/conformance";
 import { createScope } from "@get-modular/resources";
-import { composeJournal } "../src/composition/journal.root.ts";
-import type { JournalCapabilities } "../src/features/journal/composition/journal.contracts.ts";
-import { readerModule } "../src/features/journal/composition/reader.module.ts";
+import { composeJournal } from "../src/composition/journal.root.ts";
+import type { JournalCapabilities } from "../src/features/journal/composition/journal.contracts.ts";
+import { readerModule } from "../src/features/journal/composition/reader.module.ts";
 
 test("journal reader is strictly read-only and accepts only its declared host port", async () => {
   const requests: unknown[] = [];
