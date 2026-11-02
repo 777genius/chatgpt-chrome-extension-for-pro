@@ -22,6 +22,14 @@ const other='https://chatgpt.com/c/unrelated';
 const log=(kind:string,operationId:string,tabId:number,sourceUrl=url,extra:Record<string,unknown>={})=>
   api.appendJournal({kind,operationId,sourceUrl,...extra},{id:tabId,url:sourceUrl});
 
+// Simulate the intentional crash window: Goal state was persisted but its
+// journal grant was not. Another tab still must not obtain a retry grant.
+storage['chatgpt-goal:'+url]={id:'goal-fixture',phase:'sending',
+  operation:{id:'unacknowledged',status:'intent'}};
+await assert.rejects(()=>log('retry.send_intent','race-after-crash',8),
+  /незавершённую/);
+delete storage['chatgpt-goal:'+url];
+
 await log('goal.send_intent','goal-1',7);
 const meta=()=>storage['chatgpt-journal:meta'];
 assert.equal(meta().active[7].chatUrl,url);
