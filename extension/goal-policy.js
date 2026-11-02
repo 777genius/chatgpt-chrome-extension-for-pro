@@ -28,6 +28,10 @@
       'Если цель полностью выполнена, ответь ровно GOAL_COMPLETE — это должен быть весь окончательный ответ, без оформления и дополнительного текста.',
       'Если цель не завершена, не используй GOAL_COMPLETE. Работай дальше, прямо указывай блокировки и реальные результаты.'].join('\n\n');
   }
+  function continuationText(record) {
+    return [CONTINUATION,'Исходная цель:',record.goal,
+      ...(record.rules?['Условия завершения:',record.rules]:[])].join('\n\n');
+  }
   function handoffText(record) {
     return ['--- Активная цель расширения (не отчёт о выполнении) ---',
       record.goal,...(record.rules?[record.rules]:[]),
@@ -44,7 +48,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,CONTINUATION,canonical,settings,initialText,handoffText,exactMarker,decision});
+  const api=Object.freeze({MARKER,CONTINUATION,canonical,settings,initialText,continuationText,handoffText,exactMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);
