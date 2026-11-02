@@ -265,3 +265,16 @@ The full green CI and Chrome tests are **not yet established**. Candidate
 TypeScript annotations are not a passing qualification. Every future main
 advance must be integrated before any final admission check to avoid
 reintroducing already-fixed concurrency or recovery defects.
+
+
+## Current-head validation checkpoint (2026-11-02, post-Host ports)
+
+The Draft now contains TypeScript source ports for both remaining Chrome host
+entry points (`content-script.ts` and `service-worker.ts`). This closes the
+source-inventory gap, **not** the release-qualification gap: strict TS 7
+compilation, emitted classic-script E2E parity, Get Modular/Foundation checks,
+independent review and real Chrome owner smoke remain mandatory. Previous
+checkpoints identifying these files as missing are historical. No `skipped`
+Draft check is evidence of a passing gate. Use the exact latest candidate SHA
+for every qualification run; do not merge before the designated browser smoke
+has a recorded PASS.
