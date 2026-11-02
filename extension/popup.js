@@ -98,7 +98,7 @@ function showGoal(record) {
     if(record.phase==='blocked')parts.push('Проверьте журнал и нажмите «Остановить» перед новым запуском');
     goalUi.status.textContent=parts.join(' · ');
   } else goalUi.status.textContent='Задайте цель и нажмите «Начать Goal».';
-  goalUi.start.disabled=!editable||!goalBinding||!!record?.operation;
+  goalUi.start.disabled=!editable||!goalBinding||!!record?.operation||record?.phase==='blocked';
   goalUi.pause.disabled=goalBusy||!active||!goalBinding||record.phase==='paused'||record.phase==='handoff';
   goalUi.resume.disabled=goalBusy||record?.phase!=='paused'||!!record?.operation||!goalBinding;
   goalUi.stop.disabled=goalBusy||(!active&&record?.phase!=='blocked')||!goalBinding;
