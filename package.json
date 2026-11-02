@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-chrome-extension-for-pro",
-  "version": "1.6.6",
+  "version": "1.6.7",
   "private": true,
   "description": "Chrome extension for ChatGPT completion alerts, guarded retries and conversation handoffs.",
   "license": "AGPL-3.0-only",

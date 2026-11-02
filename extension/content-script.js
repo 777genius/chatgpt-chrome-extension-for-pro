@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.6.6';
+  const SCRIPT_VERSION = '1.6.7';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -429,7 +429,7 @@
     manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
-    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
+    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, attemptId:attempt, requestId, title:error.sessionTitle, ...details}, required);
     let clicked = false;
     let confirmed = false;
     const expectedToken = watchToken;
@@ -537,6 +537,7 @@
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true; // A lost reply may still mean the page received the click.
+      manualSendIntent=null;
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (sent?.duplicate) {
@@ -644,6 +645,8 @@
     if(startedAt-intent.at>10000){manualSendIntent=null;return;}
     if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
     manualSendIntent=null;
+    if(globalThis.__chatgptNotifierRequestStartedAt===startedAt&&
+        (globalThis.__chatgptNotifierRequestId||null)===(requestId||null))retryStates.delete(location.pathname);
     runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
   }
 
@@ -652,17 +655,13 @@
   document.addEventListener('click', (event) => {
     if (event.isTrusted && event.target instanceof Element &&
         event.target.closest('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')) {
-      retryStates.delete(location.pathname);
       rememberManualStatusIntent();
-      void audit('retry.manual_reset',{input:'send-button'});
     }
   }, { capture: true, signal: listeners.signal });
   document.addEventListener('keydown', (event) => {
     if (event.isTrusted && event.key === 'Enter' && !event.shiftKey && !event.isComposing &&
         event.target instanceof Element && event.target.closest('#prompt-textarea, [data-composer-markdown]')) {
-      retryStates.delete(location.pathname);
       rememberManualStatusIntent();
-      void audit('retry.manual_reset',{input:'enter'});
     }
   }, { capture: true, signal: listeners.signal });
 
@@ -835,6 +834,7 @@
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true;
+      manualSendIntent=null;
       const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,requireMax:true,fileName:record.asFile?record.fileName:null});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка истории не подтверждена');

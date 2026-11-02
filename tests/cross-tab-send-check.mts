@@ -121,6 +121,8 @@ assert.equal((await send(12,'retry-after-no-click')).clicked,true,'a proven pre-
 addPage(13,'https://chatgpt.com/c/manual-fixture');
 await plan(13,'crashed-preparation');await append(13,'draft.saved','crashed-preparation',{draft:'Crash backup'});
 boot();await append(13,'retry.manual_reset','manual-keydown');
+assert.equal((await message(13,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.manual_reset',sourceUrl:pages.get(13)!.url}})).ok,false,'a page event cannot reset state without a real manual request');
+assert.equal((await message(13,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.preparation_superseded',sourceUrl:pages.get(13)!.url}})).ok,false);
 assert.equal((await plan(13,'after-enter','/c/manual-fixture|new-turn')).duplicate,true,'raw Enter/reset without a request cannot supersede an old preparation');
 const manual={type:'CHATGPT_MANUAL_SEND',url:pages.get(13)!.url,requestId:'manual-request',startedAt:100};
 assert.equal((await message(13,manual)).ok,false,'unconfirmed manual message cannot release the preparation');

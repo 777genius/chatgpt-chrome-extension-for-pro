@@ -502,6 +502,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
+    if(['retry.manual_reset','retry.preparation_superseded'].includes(event.kind)) {
+      sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
+    }
     appendJournal(event,sender.tab).then(result=>{
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));

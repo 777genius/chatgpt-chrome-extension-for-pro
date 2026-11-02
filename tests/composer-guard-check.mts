@@ -5,9 +5,9 @@ import {parseHTML} from 'linkedom';
 const {document,window}=parseHTML('<html><body><div data-app-shell-active-page="true"><div data-composer-body><div id="editor-wrap"><div data-composer-markdown contenteditable="true">доделай е2е</div></div><button type="submit">Send</button><button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium">Medium</button></div></div></body></html>');
 Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return [{}];}});
 const editor=document.querySelector('[contenteditable]')!,button=document.querySelector('[type=submit]')!;
-let prompt='USER DRAFT',pending:any=null,ready=true,clicks=0;
+let prompt='USER DRAFT',pending:any=null,ready=true,clicks=0,systemHints:any=undefined;
 button.addEventListener('click',()=>clicks++);
-const controller={view:{dom:editor},getChatGptPrompt:()=>({prompt}),getPlainText:()=>prompt,
+const controller={view:{dom:editor},getChatGptPrompt:()=>({prompt,systemHints}),getPlainText:()=>prompt,
  get pendingSubmit(){return pending;},get submitReady(){return ready;},cancelPendingSubmit(){pending=null;}};
 (document.querySelector('#editor-wrap') as any).__reactFiber$test={memoizedProps:{composerController:controller}};
 const ctx=createContext({document,location:{href:'https://chatgpt.com/c/test'}});
@@ -18,6 +18,14 @@ prompt='доделай е2е';editor.textContent='New user draft';assert.equal(c
 pending=null;ready=false;assert.equal(control().ok,false,'not ready must block automation');
 ready=true;assert.equal(control({requireMax:true}).ok,false,'handoff must not send with medium reasoning');
 document.querySelector('[data-selected-reasoning-effort]')!.setAttribute('data-selected-reasoning-effort','max');
+for(const hiddenHints of [['Owner hidden context'],{context:'Owner hidden context'},'Owner hidden context',null]) {
+ systemHints=hiddenHints;
+ assert.equal(control({requireMax:true}).ok,false,'exact native/visible text must not authorize hidden or unknown native hints');
+ assert.equal(clicks,0,'hidden native context must never reach the send click');
+}
+systemHints=[];
+assert.equal(control({action:'inspect'}).matches,true,'an explicitly empty native hint array remains valid');
+systemHints=undefined;
 assert.equal(control({requireMax:true}).clicked,true);assert.equal(clicks,1);
 prompt='USER DRAFT';assert.equal(control().ok,false);assert.equal(clicks,1,'draft must never get an automatic click');
 prompt='доделай е2е';assert.equal(control({url:'https://chatgpt.com/c/other'}).ok,false);

@@ -13,14 +13,17 @@ document.addEventListener=((type:string,fn:(event:IntentEvent)=>void,...options:
  const list=callbacks.get(type)||[];list.push(fn);callbacks.set(type,list);
  // Capture real handlers without modifying production code or synthesizing trusted DOM events.
 }) as typeof document.addEventListener;
+const durable:Record<string,any>={};
 let now=1000000;let revision=1;const sent:Message[]=[],listeners:Array<(message:Message)=>void>=[];
 const location={href:'https://chatgpt.com/c/example',pathname:'/c/example'};
 const world=createContext({document,window,location,URL,AbortController,crypto:globalThis.crypto,
  Node:window.Node,Element:window.Element,MutationObserver:window.MutationObserver,performance,
  Date:class extends Date{static now(){return now;}},
  setInterval:()=>1,clearInterval:()=>{},setTimeout:()=>1,clearTimeout:()=>{},
- chrome:{runtime:{id:'test',onMessage:{addListener:(fn:(m:Message)=>void)=>listeners.push(fn),removeListener:()=>{}},
- sendMessage:async(message:Message)=>{sent.push(message);if(message.type==='CHATGPT_STATUS_GET')return {ok:true,url:location.href,revision,status:{kind:'success'}};if(message.type==='CHATGPT_MANUAL_SEND')return {ok:true,url:message.url,revision:++revision,status:{kind:'loading',eventAt:message.startedAt,receipt:world.__chatgptNotifierRequestReceipt}};return {ok:true,record:null,state:null};}}}});
+ chrome:{storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,durable[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(durable,structuredClone(value))}},runtime:{id:'test',getManifest:()=>({version:'fixture'}),onMessage:{addListener:(fn:(m:Message)=>void)=>listeners.push(fn),removeListener:()=>{}},
+ sendMessage:async(message:Message)=>{sent.push(message);if(message.type==='CHATGPT_LOG_EVENT')return runInContext('appendJournal('+JSON.stringify(message.event)+',{id:7,url:'+JSON.stringify(location.href)+'})',world);if(message.type==='CHATGPT_STATUS_GET')return {ok:true,url:location.href,revision,status:{kind:'success'}};if(message.type==='CHATGPT_MANUAL_SEND'){await runInContext('appendJournal('+JSON.stringify({kind:'retry.preparation_superseded',sourceUrl:location.href,startedAt:message.startedAt})+',{id:7,url:'+JSON.stringify(location.href)+'})',world);return {ok:true,url:message.url,revision:++revision,status:{kind:'loading',eventAt:message.startedAt,receipt:world.__chatgptNotifierRequestReceipt}};}return {ok:true,record:null,state:null};}}}});
+runInContext(readFileSync('extension/journal-store.js','utf8'),world);
+for(const event of [{kind:'draft.saved',draft:'Private draft'},{kind:'draft.replaced'},{kind:'error.detected',action:'retry',promptKey:'/c/example|user',attemptId:'old'},{kind:'retry.blocked',reason:'Unknown previous send'}])await runInContext('appendJournal('+JSON.stringify({...event,sourceUrl:location.href,operationId:'draft-op'})+',{id:7,url:'+JSON.stringify(location.href)+'})',world);
 for(const file of ['memory-maintenance.js','handoff-title.js','status-indicator.js','content-script.js'])runInContext(readFileSync(`extension/${file}`,'utf8'),world);
 const editor=document.querySelector('#prompt-textarea')!,button=document.querySelector('button')!;
 const fire=(type:string,event:IntentEvent)=>{for(const fn of callbacks.get(type)||[])fn(event);};
@@ -31,7 +34,10 @@ await flush();
 assert.ok(document.querySelector('[data-chatgpt-notifier-status]'),'completed response starts with a green indicator');
 fire('keydown',{isTrusted:true,key:'Enter',target:editor as unknown as Element});
 assert.equal(resets().length,0,'Enter newline alone must preserve indicator');
-start();await flush();assert.equal(resets().length,1,'actual manual request acknowledges indicator');
+await flush();
+assert.equal(durable['chatgpt-journal:meta'].retryDraftByChat[location.href].phase,'saved','Enter without a request must not supersede the saved owner draft');
+assert.equal(durable['chatgpt-journal:meta'].retryByChat.example.blocked,true,'newline must not reset the durable retry budget or unknown-outcome block');
+start();await flush();assert.equal(resets().length,1,'actual manual request acknowledges indicator');assert.equal(await runInContext('readRetryState('+JSON.stringify(location.href)+')',world),null,'actual manual request resets older durable retries through the public state API');assert.equal(durable['chatgpt-journal:meta'].retryDraftByChat[location.href].phase,'superseded');
 assert.match(decodeURIComponent(document.querySelector('[data-chatgpt-notifier-status]')!.getAttribute('href')!),/#2563eb/,'manual send replaces green with a waiting loader');
 start();assert.equal(resets().length,1,'one intent acknowledges only one request');
 fire('click',{isTrusted:false,target:button as unknown as Element});start();assert.equal(resets().length,1,'automatic clicks cannot reset indicator');

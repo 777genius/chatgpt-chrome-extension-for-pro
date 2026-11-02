@@ -145,6 +145,7 @@ async function domCheck() {
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].operationId,run.logs.find(e=>e.kind==='retry.planned').operationId);
+  assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].attemptId,run.logs.find(e=>e.kind==='retry.planned').attemptId,'retry lifecycle remains bound to its failed request after a newer request starts');
   const noLog=setup('Draft');noLog.breakJournal();await noLog.fail('error');
   assert.equal(noLog.sends.length,0,'journal failure must prevent automatic send');
   assert.equal(noLog.document.querySelector('#prompt-textarea')!.textContent,'Draft');

@@ -2,7 +2,7 @@
 
 **Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Version **1.6.6** · Chrome / Chromium **116+** · No build required
+Version **1.6.7** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -13,8 +13,8 @@ Version **1.6.6** · Chrome / Chromium **116+** · No build required
 | **Scheduled-task clock** | Shows a clock for a native scheduled-task card. Watches for actual continuation with a five-minute fallback check; does not parse localized dates or refresh the page. |
 | **Red / green status icons** | Red for stopped errors, green for completed responses, in notifications and the tab favicon. |
 | **Unread result dot** | A blue dot marks unseen results. Viewing the chat removes the dot and its OS notifications; the green/red result stays until your next send. |
-| **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` follows the native action: retry here or transfer context when ChatGPT offers a new chat. Stops interrupted generation before retrying. Stops on exhausted limits or an unconfirmed send. A durable per-chat claim prevents duplicate retries from multiple tabs. |
-| **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. Concurrent edits and user attachments cancel handoff preparation; cancelled transfers do not resume later. |
+| **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` follows the native action: retry here or transfer context when ChatGPT offers a new chat. Stops interrupted generation before retrying. Stops on exhausted limits or an unconfirmed send. A durable per-chat claim prevents duplicate retries from multiple tabs. Only a request-confirmed manual send resets the retry state. |
+| **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. Hidden native prompt context also blocks automatic sending. Concurrent edits and user attachments cancel handoff preparation; cancelled transfers do not resume later. |
 | **New-chat handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. A shared source-chat claim prevents duplicate handoffs from multiple tabs. |
 | **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the first response to finish and rename controls to become ready. |
 | **Reload recovery** | Saves request/response bindings and elapsed-time metadata locally. Reattaches to existing tabs after an extension reload; restores safe draft backups without repeating uncertain sends. Follows a new chat from its initial page to its permanent URL using native first-message evidence. |
