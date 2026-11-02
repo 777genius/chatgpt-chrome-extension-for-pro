@@ -1,67 +1,50 @@
 # ChatGPT Chrome Extension for Pro
 
-Chrome-расширение для длительной работы с ChatGPT: уведомления о завершении, автопродолжение после ошибок и перенос задачи при достижении лимита чата.
+**Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Текущая версия: **1.3.1**. **Очередь сообщений и goal пока не реализованы.** Задача на их разработку описана в [docs/queue-and-goal.md](docs/queue-and-goal.md).
+Version **1.3.1** · Chrome / Chromium **116+** · No build required
 
-## Что уже работает
+## Features
 
-- Красный значок ошибки и зелёный значок завершения в уведомлении и во вкладке. При возвращении в активный чат его системные уведомления закрываются. Значок вкладки остаётся до фактической ручной отправки нового сообщения; чтение, черновик и автоматические повторы его не сбрасывают.
-- Звук и системное уведомление при завершении ответа или окончательной ошибке, текст ответа/ошибки и известная длительность ожидания.
-- До четырёх автоповторов за две минуты. При ошибке расширение самостоятельно отправляет `доделай е2е`; пользовательский черновик сохраняется и восстанавливается. После остановки по лимиту новый ручной запрос начинает новый цикл.
-- После остановки зависшего восстановления соединения редактор может готовиться до 60 секунд. Ручной ввод и возобновление ответа отменяют автоматическую отправку; неизвестный результат клика не повторяется.
-- Сохраняемые счётчики, запреты повторов и отдельный ограниченный бюджет дополнительных попыток.
-- `Unknown error` вызывает повтор в том же чате, даже если интерфейс предлагает новый чат.
-- Определение ошибок по структуре интерфейса и внутренним идентификаторам. Неизменившийся старый блок ошибки не считается новым сбоем следующего запроса.
-- При лимите длины: последние два сообщения пользователя и два финальных ответа ChatGPT в исходном порядке переносятся в новый чат в той же вкладке. Большой контекст прикладывается текстовым файлом. Отправка требует уровня рассуждений `max` / «Очень высокий».
-- Перенос исходного названия с номером продолжения `(1)`, `(2)`, ожидание готовности чата к переименованию и проверка подтверждения сохранения.
-- Временный адрес нового чата не считается подтверждённым переносом. После клика расширение может дождаться постоянного адреса и подтверждения точного отправленного текста; историю повторно не отправляет. Для старых ошибок переименования в меню есть явное восстановление с показом нужного названия.
-- Подтверждение переименования поддерживает текущий POST-запрос ChatGPT `/backend-api/conversation/id/{id}/rename` и старые адреса; одного изменения заголовка страницы недостаточно.
-- Ожидание позднего адреса чата не теряет проверку из-за округления таймера; подтверждение всё равно требует сохранённого отправленного текста.
-- Если видимая ошибка уже обрабатывалась до обновления или отправка осталась неподтверждённой, расширение сообщает ошибку и причину остановки, сохраняя запрет повторной отправки. Одинаковые повторно появляющиеся блоки не создают поток уведомлений.
-- Полный локальный журнал с идентификаторами чатов, исходным/целевым URL, намерением отправить, фактическим текстом и результатом подтверждения.
-- Отключение устаревших наблюдателей и таймеров. Это ограничивает ресурсы расширения, но не очищает весь внутренний кеш ChatGPT.
+| Feature | What it does |
+| --- | --- |
+| **Desktop alerts** | Sound, answer or error preview, and elapsed response time when known. |
+| **Red / green status icons** | Red for errors, green for completed responses, in notifications and the tab favicon. |
+| **Read without losing status** | Visiting a chat dismisses its OS notifications. The tab indicator stays until you manually send a new message. |
+| **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` retries in the same chat. Stops on exhausted limits or an unconfirmed send. |
+| **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. |
+| **Chat-limit handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. |
+| **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the new chat to be saved before renaming. |
+| **Persistent activity log** | Records chat IDs, source/destination URLs, send intents, sent text, confirmations, retry counts, and stop reasons. Preserves recovery copies across extension updates. |
+| **Safe recovery** | Reports visible errors even when retries are blocked. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
 
-**Автопродолжение включено в текущем коде.** Это расширение может отправлять команды и создавать новые чаты, а не только показывать уведомления. Журнал и резервные копии могут содержать сообщения и черновики; они хранятся в локальном хранилище расширения. Не публикуйте их экспорты.
+**Automatic retries and handoffs are enabled.** The extension can send continuation commands and create chats. Logs and recovery copies are stored locally and may contain messages and drafts.
 
-## Установка
+**Message queue and goal mode are not implemented yet.** See the [development brief](docs/queue-and-goal.md).
 
-1. Склонируйте или скачайте этот репозиторий.
-2. Откройте `chrome://extensions`, включите режим разработчика.
-3. Выберите «Загрузить распакованное расширение» и папку `extension/`.
-4. Проверьте звук и уведомления через меню расширения.
+## Install
 
-Перезапуск Chrome не требуется. При установке/обновлении расширение пытается подключиться к уже открытым страницам ChatGPT без их обновления. Выгруженные, зависшие или недоступные Chrome вкладки оно принудительно не открывает.
+1. Clone or download this repository.
+2. Open `chrome://extensions` and enable **Developer mode**.
+3. Select **Load unpacked** and choose the [`extension/`](extension/) folder.
 
-Нужен Chromium 116+ и доступ к `https://chatgpt.com/*`. Вариант переноса зависит от доступности режима «Очень высокий» у выбранной модели. Сборка и npm-зависимости для установки расширения не нужны.
+No Chrome restart is needed. The extension attempts to attach to existing ChatGPT tabs without refreshing them. Chrome may block access to unloaded or restricted tabs.
 
-## Разработка и проверка
+Use the extension popup to test sound and notifications. ChatGPT page access is required; handoffs also require a model with the supported reasoning setting.
 
-Нужен Node.js 26+. В корне проекта:
+## Development
+
+Node.js **26+**:
 
 ```sh
 npm ci
 npm run check
 ```
 
-Проверка включает синтаксис, ресурсы manifest, TypeScript и программы тестирования. Тесты работают с синтетическим DOM и имитациями API Chrome; браузер, аккаунт ChatGPT, CDP и локальные файлы владельца не нужны. `npm run test:retry` и `npm run test:handoff` запускают соответствующие сценарии отдельно.
+Checks cover syntax, manifest resources, TypeScript, and synthetic DOM / Chrome API tests. Live ChatGPT sending, attachments, reasoning selection, and server-side renaming require a separate browser test.
 
-Эти проверки не доказывают совместимость с будущим интерфейсом ChatGPT и реальное сохранение на его сервере. Живой тест отправки, вложений, переключателя рассуждений и переименования проводится отдельно в специально выбранном тестовом чате.
+Contributor instructions: [AGENTS.md](AGENTS.md).
 
-## Где находится логика
+## License
 
-| Файл | Ответственность |
-| --- | --- |
-| `extension/content-script.js` | Наблюдение за ответом/ошибкой, черновики, повторы, передача контекста |
-| `extension/page-probe.js` | Проверки в контексте страницы, фактическое состояние редактора и защищённый клик |
-| `extension/service-worker.js` | Сообщения, сетевые события, уведомления и разрешение одной отправки |
-| `extension/status-store.js`, `status-indicator.js` | Состояние значка и привязка системных уведомлений к чату; восстановление из существующего журнала без повторных уведомлений |
-| `extension/journal-store.js` | Сериализованная запись журнала и устойчивое состояние повторов |
-| `extension/handoff-title.js`, `chat-title-probe.js`, `handoff-renamer.js` | Номер продолжения, интерфейс переименования и подтверждение результата |
-| `extension/memory-maintenance.js` | Жизненный цикл единственного актуального наблюдения за ответом |
-
-Инструкции для облачного исполнителя: [AGENTS.md](AGENTS.md) и [docs/queue-and-goal.md](docs/queue-and-goal.md).
-
-## Происхождение
-
-Основано на [ChatGPT-Response-Complete-Notifier](https://github.com/ramhaidar/ChatGPT-Response-Complete-Notifier). Исходная лицензия сохранена: [LICENSE](LICENSE), подробности в [NOTICE.md](NOTICE.md).
+Based on [ChatGPT-Response-Complete-Notifier](https://github.com/ramhaidar/ChatGPT-Response-Complete-Notifier). Licensed under [AGPL-3.0](LICENSE); see [NOTICE.md](NOTICE.md).
