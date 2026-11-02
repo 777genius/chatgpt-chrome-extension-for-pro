@@ -1,11 +1,25 @@
 name: Checks
 on:
   push:
+    branches:
+      - main
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   check:
+    # Draft PRs do not burn a full test runner. Ready PRs and main remain blocking.
+    # workflow_dispatch explicitly permits a requested verification during drafting.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
