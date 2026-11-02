@@ -1074,8 +1074,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const supplied=message.startReceipt;
         const nativeReceipt=!message.requestId&&supplied&&current.status?.kind==='loading'&&current.status.eventAt===message.startedAt&&
           supplied.epoch===current.status.receipt?.epoch&&supplied.order===current.status.receipt?.order?supplied:null;
-        const startReceipt=request?.receipt||nativeReceipt;
-        if(startReceipt)await completionCheckpointFinish(sender.tab.id,message.startedAt,'stopped',request?.requestId);
+        // A request from the root new-chat page has no canonical chat URL.
+        // It must not stop an unrelated chat's checkpoint just because this
+        // tab and request ID match. First bind the root attempt to the actual
+        // saved chat using native checkpoint allocation evidence.
+        const checkpoint=request&&!request.url?await completionCheckpointRead(sender.tab.id):null;
+        const boundRequest=request&&(request.url===url||(!request.url&&checkpoint?.url===url&&
+          checkpoint.startedAt===request.startedAt&&checkpoint.requestId===request.requestId))?request:null;
+        const startReceipt=boundRequest?.receipt||nativeReceipt;
+        if(startReceipt)await completionCheckpointFinish(sender.tab.id,message.startedAt,'stopped',boundRequest?.requestId);
         const view=await stopChatLoading(url,message.startedAt,receipt,startReceipt);
         void broadcastChatStatus(view).catch(()=>{});
         return {ok:true,...view};
