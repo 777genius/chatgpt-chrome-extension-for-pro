@@ -162,6 +162,50 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(env.messages.length,2);
 }
 
+// A fully completed assistant answer can race the native send acknowledgement.
+// It is persisted against the same operation, then processed only after its
+// exact new prompt is confirmed, without requiring a second completion event.
+{
+  const env=fixture();await begin(env);
+  const rec=state(env),op=rec.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:rec.id,operationId:op.id,text:op.text,
+    baselineKey:'/c/goal-fixture-a|previous'});
+  const fast=await env.store.completion({url:URL_A,tabId:7,
+    completionKey:'/c/goal-fixture-a|fast-user|fast-assistant',
+    promptKey:'/c/goal-fixture-a|fast-user',response:'Still in progress',
+    userId:'native-fast-user',nativeVerified:true,rawExact:false});
+  assert.equal(fast.ok,true);
+  assert.equal(state(env).phase,'sending','completion does not bypass send acknowledgement');
+  assert.equal(env.messages.length,1);
+  const duplicate=await env.store.completion({url:URL_A,tabId:7,
+    completionKey:'/c/goal-fixture-a|fast-user|fast-assistant',
+    promptKey:'/c/goal-fixture-a|fast-user',response:'Still in progress',
+    userId:'native-fast-user',nativeVerified:true,rawExact:false});
+  assert.equal(duplicate.ok,false);
+  await env.store.report({url:URL_A,tabId:7,id:rec.id,operationId:op.id,
+    status:'confirmed',newPromptKey:'/c/goal-fixture-a|fast-user'});
+  assert.equal(state(env).phase,'preparing');
+  assert.equal(env.messages.length,2,'saved fast completion schedules only one continuation');
+  await env.store.recoverTab({id:7,url:URL_A});
+  assert.equal(state(env).phase,'preparing','already consumed early result is not replayed');
+}
+
+// The fast completion of the exact goal marker is also replayed, without
+// dispatching a continuation before or after the send acknowledgement.
+{
+  const env=fixture();await begin(env);
+  const rec=state(env),op=rec.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:rec.id,operationId:op.id,text:op.text});
+  await env.store.completion({url:URL_A,tabId:7,
+    completionKey:'/c/goal-fixture-a|fast-user|fast-assistant',
+    promptKey:'/c/goal-fixture-a|fast-user',response:'GOAL_COMPLETE',userId:'fast-native-user',
+    nativeVerified:true,rawExact:true});
+  await env.store.report({url:URL_A,tabId:7,id:rec.id,operationId:op.id,
+    status:'confirmed',newPromptKey:'/c/goal-fixture-a|fast-user'});
+  assert.equal(state(env).phase,'completed');
+  assert.equal(env.messages.length,1,'final marker never causes another send');
+}
+
 // Pause or stop after the send intent never clears the unknown-operation fence.
 {
   const env=fixture();await begin(env);
@@ -288,6 +332,11 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'handoff-fixture',tabId:7});
   assert.equal(state(env).phase,'handoff');
   assert.match(await env.store.context(URL_A),/Активная цель/);
+  await env.store.stageHandoffCompletion({sourceUrl:URL_A,targetUrl:URL_B,
+    handoffId:'handoff-fixture',tabId:7,
+    completionKey:'/c/goal-fixture-b|handoff-user|handoff-answer',
+    promptKey:'/c/goal-fixture-b|handoff-user',response:'Still working',
+    userId:'unrelated-user',nativeVerified:true,rawExact:false});
   await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7,acceptedUserId:'handoff-user-1'});
   assert.equal(state(env).phase,'moved');
   assert.equal(state(env,URL_B).id,id);
@@ -306,6 +355,26 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
     promptKey:'/c/goal-fixture-b|user-1',response:'GOAL_COMPLETE',userId:'handoff-user-1',nativeVerified:true,rawExact:true});
   assert.equal(state(env,URL_B).phase,'completed');
   assert.equal(env.messages.length,1);
+}
+
+// A native-final response arriving before a handoff is confirmed is durable
+// and accepted only when its userId matches the native accepted handoff turn.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'early-handoff',tabId:7});
+  assert.equal((await env.store.stageHandoffCompletion({sourceUrl:URL_A,targetUrl:URL_B,
+    handoffId:'early-handoff',tabId:7,
+    completionKey:'/c/goal-fixture-b|native-hand|native-answer',
+    promptKey:'/c/goal-fixture-b|native-hand',response:'GOAL_COMPLETE',
+    nativeVerified:true,rawExact:true,userId:'accepted-handoff-user'})).ok,true);
+  assert.equal(state(env).phase,'handoff');
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,
+    handoffId:'early-handoff',tabId:7,acceptedUserId:'accepted-handoff-user'});
+  assert.equal(state(env,URL_B).phase,'completed','handoff completion is replayed at transfer');
+  assert.equal(env.messages.length,1,'handoff marker does not create another send');
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,
+    handoffId:'early-handoff',tabId:7,acceptedUserId:'accepted-handoff-user'});
+  assert.equal(env.messages.length,1,'handoff replay is idempotent');
 }
 
 // Store errors are fail-closed and do not click.
