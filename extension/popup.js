@@ -57,3 +57,70 @@ recoverTitle.addEventListener('click',async()=>{
     status.textContent=`Название не восстановлено: ${error.message}`;
   }
 });
+
+
+const goalUi={
+  text:document.getElementById('goal-text'),
+  rules:document.getElementById('goal-rules'),
+  max:document.getElementById('goal-max'),
+  minutes:document.getElementById('goal-minutes'),
+  status:document.getElementById('goal-status'),
+  start:document.getElementById('goal-start'),
+  pause:document.getElementById('goal-pause'),
+  resume:document.getElementById('goal-resume'),
+  stop:document.getElementById('goal-stop')
+};
+let goalBusy=false;
+let goalRecord=null;
+const goalPhases={
+  preparing:'Подготовка сообщения',sending:'Разрешённая отправка',
+  clicked:'Ожидание подтверждения клика',waiting:'Ожидание полного ответа',
+  recovering:'Восстановление ошибки',handoff:'Перенос в новый чат',
+  paused:'Пауза',completed:'Модель выдала GOAL_COMPLETE',
+  blocked:'Остановлено для безопасности',stopped:'Остановлено',moved:'Перенесено в новый чат'
+};
+function showGoal(record) {
+  goalRecord=record;
+  const active=!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
+  const editable=!active&&!goalBusy;
+  for(const field of [goalUi.text,goalUi.rules,goalUi.max,goalUi.minutes])field.disabled=!editable;
+  if(record) {
+    goalUi.text.value=record.goal;
+    goalUi.rules.value=record.rules||'';
+    goalUi.max.value=String(record.maxContinuations);
+    goalUi.minutes.value=String(record.maxMinutes);
+    const parts=[goalPhases[record.phase]||record.phase,
+      record.continuations+' / '+record.maxContinuations+' продолжений',
+      'до '+new Date(record.deadlineAt).toLocaleString()];
+    if(record.reason)parts.push(record.reason);
+    goalUi.status.textContent=parts.join(' · ');
+  } else goalUi.status.textContent='Задайте цель и нажмите «Начать Goal».';
+  goalUi.start.disabled=!editable;
+  goalUi.pause.disabled=goalBusy||!active||record.phase==='paused'||record.phase==='handoff';
+  goalUi.resume.disabled=goalBusy||record?.phase!=='paused'||!!record?.operation;
+  goalUi.stop.disabled=goalBusy||!active;
+}
+async function goalAction(action) {
+  if(goalBusy)return;
+  goalBusy=true;
+  for(const key of ['start','pause','resume','stop'])goalUi[key].disabled=true;
+  goalUi.status.textContent='Сохранение Goal…';
+  try {
+    const result=await chrome.runtime.sendMessage({type:'CHATGPT_GOAL_CONTROL',action,
+      ...(action==='start'?{goal:goalUi.text.value,rules:goalUi.rules.value,
+        maxContinuations:Number(goalUi.max.value),maxMinutes:Number(goalUi.minutes.value)}:{})});
+    if(!result?.ok)throw Error(result?.error||'Операция Goal не подтверждена');
+    goalBusy=false;
+    showGoal(result.record);
+  }catch(error){
+    goalBusy=false;
+    showGoal(goalRecord);
+    goalUi.status.textContent='Goal: '+String(error?.message||error);
+  }
+}
+for(const action of ['start','pause','resume','stop'])
+  goalUi[action].addEventListener('click',()=>void goalAction(action));
+chrome.runtime.sendMessage({type:'CHATGPT_GOAL_CONTROL',action:'get'}).then(result=>{
+  if(!result?.ok)throw Error(result?.error||'Нет доступа к чату');
+  showGoal(result.record);
+}).catch(error=>{goalUi.status.textContent='Goal: '+String(error?.message||error);});
