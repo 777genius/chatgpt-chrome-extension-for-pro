@@ -230,12 +230,13 @@
         return {ok:true};
       });
     }
-    async function retry({url,tabId,kind,promptKey}) {
+    async function retry({url,tabId,kind,promptKey,goalHandoff=false}) {
       const target=canonical(url);
       if(!target)return;
       await serialize(async()=>{
         const record=await read(target);
         if(!record||!['waiting','recovering','paused'].includes(record.phase))return;
+        if(kind==='retry.blocked'&&goalHandoff)return; // new-chat recovery is not a failed Goal
         let next=record;
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
