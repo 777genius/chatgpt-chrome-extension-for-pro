@@ -169,3 +169,35 @@ Browser testing and Chrome/ChatGPT UI drift can expand this range.
 Further implementation must follow the acceptance matrix above, repair CI
 findings, qualify the actual browser bundle, and request designated test-chat
 manual verification before the PR is made ready.
+
+## Integration checkpoint: main 1.6.4 (2026-11-02)
+
+The upstream baseline advanced from 1.6.1 to **1.6.4** while this
+migration was in Draft. PR #4 has incorporated main commit
+`e0da8e4c4d8975263c74b7e89666935f79d74a78` with a merge commit.
+This includes the new legacy-handoff completion reconciliation, assistant-only
+recovery and native stop guards, title readiness/streaming checks and their
+new test programs. Do not rebase by replacing those files with old v1.6.1
+snapshots.
+
+The current branch contains **21 historical runtime JS files** and a
+partial set of typed overlays in `src/extension/` (currently 16). New tests
+from the upstream release were carried to ordinary `.ts` files. The full
+nonbrowser test inventory is now 38 TypeScript programs, including migration
+parity checks, not the old 29-program baseline.
+
+**Blocking qualification still required:**
+- A real Bun lockfile frozen against the *current* package.json (now 1.6.4);
+  `package-lock.json` is historical and does not qualify Bun.
+- Real TS 7 typechecking of every typed overlay and every tool/test;
+  specifically distinguish TS7 native compiler from removed TS JS APIs.
+- Repeat all nonbrowser E2E programs on both original and emitted runtime
+  after every latest-head change, including the v1.6.4 tests.
+- Finish all unported legacy JS in strict TS, introduce actual typed Get Modular
+  module composition, and execute Foundation/conformance gates; declaring
+  dependencies is not enough.
+- Multiple independent reviews, complete current-head CI and final
+  owner-approved Chrome smoke checks in a designated test chat.
+
+The old draft checkpoints above are retained as historical snapshots only.
+They are not completion evidence for the current branch.
