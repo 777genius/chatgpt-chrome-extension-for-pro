@@ -232,7 +232,7 @@ async function workerCheck() {
     runtime: { id:'test-extension',onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
       getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
-    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}} },
+    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}if(message.type==='CHATGPT_GOAL_DISPATCH')return {ok:true};} },
     scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
@@ -307,6 +307,56 @@ async function workerCheck() {
   assert.equal((await sendGuard(options)).clicked,true);
   assert.equal((await sendGuard(options)).ok,false,'one operation may dispatch only once');
   assert.equal(injections.length,injectBefore+1);
+  // Goal E2E through the real worker message router, journal grants, native
+  // composer protection and exact native-final completion handling.
+  // No Chrome/browser access or network calls are used.
+  await runInContext("appendJournal({kind:'retry.confirmed',operationId:'only-once'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
+  activeTab={id:7,url:'https://chatgpt.com/c/example'};
+  const goalPopup={id:chrome.runtime.id,url:chrome.runtime.getURL('popup.html')};
+  const goalControl=(payload:any,origin:any=goalPopup)=>new Promise<any>(resolve=>
+    callbacks.message({type:'CHATGPT_GOAL_CONTROL',expectedTabId:7,
+      expectedUrl:'https://chatgpt.com/c/example',...payload},origin,resolve));
+  assert.equal((await goalControl({action:'start',goal:'Verify CI and merge safely',
+    rules:'Native answer must finish',maxContinuations:2,maxMinutes:30},{...goalPopup,id:'another-extension'})).ok,false);
+  const begunGoal=await goalControl({action:'start',goal:'Verify CI and merge safely',
+    rules:'Native answer must finish',maxContinuations:2,maxMinutes:30});
+  assert.equal(begunGoal.ok,true);
+  const goalUrl='https://chatgpt.com/c/example';
+  const goalKey='chatgpt-goal:'+goalUrl;
+  let goal=storage[goalKey];
+  assert.equal(goal.phase,'preparing');
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1);
+  const goalText=goal.operation.text,goalOperation=goal.operation.id,goalId=goal.id;
+  assert.ok(goalText.includes('GOAL_COMPLETE')&&goalText.includes('Verify CI and merge safely'));
+  const goalSender={tab:{id:7,url:goalUrl}};
+  const goalCall=(type:string,payload:any)=>new Promise<any>(resolve=>
+    callbacks.message({type,url:goalUrl,goalId,operationId:goalOperation,...payload},goalSender,resolve));
+  assert.equal((await goalCall('CHATGPT_GOAL_CHECK',{})).ok,true);
+  assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).ok,false,
+    'a reserved Goal without intent cannot bypass journal authorization');
+  assert.equal((await goalCall('CHATGPT_GOAL_INTENT',{text:goalText,baselineKey:'/c/example|previous-user'})).ok,true);
+  assert.equal((await sendGuard({action:'send',text:'User draft',url:goalUrl,operationId:goalOperation})).ok,false,
+    'Goal authorization cannot send user-draft substitution');
+  assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).clicked,true);
+  assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).ok,false,
+    'Goal has one persisted click grant even after a repeated worker message');
+  assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'clicked'})).ok,true);
+  assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'confirmed',newPromptKey:'/c/example|goal-user-1'})).ok,true);
+  goal=storage[goalKey];assert.equal(goal.phase,'waiting');
+  const goalCompletion={...success,response:'GOAL_COMPLETE',completionKey:'/c/example|goal-user-1|goal-assistant-1',
+    goalPromptKey:'/c/example|goal-user-1',goalNativeVerified:true,goalRawExact:true};
+  callbacks.message(goalCompletion,goalSender);await pause();
+  goal=storage[goalKey];
+  assert.equal(goal.phase,'completed','only the native-final, entire marker completes the Goal');
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1,
+    'exact marker cannot schedule a second continuation');
+  callbacks.message({...goalCompletion,completionKey:'/c/example|goal-user-1|goal-assistant-2',
+    response:'GOAL_COMPLETE is a word',goalRawExact:false},goalSender);
+  await pause();
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1,
+    'duplicate or later completion cannot restart Goal');
+  console.log('PASS: Goal popup -> journal -> native send gate -> confirmed answer -> exact marker');
+
   console.log('PASS: worker forbids user drafts, enforces persisted exact command and one-use send');
   console.log('PASS: durable handoff state, source deduplication, no resend after sending');
   console.log('PASS: error title/body, repeat attempts, success deduplication, existing-tab activation, request-start activation');
