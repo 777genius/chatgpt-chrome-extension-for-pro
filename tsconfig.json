@@ -11,7 +11,14 @@
       "node",
       "bun"
     ],
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "moduleDetection": "force",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable",
+      "ESNext.Disposable"
+    ]
   },
   "include": [
     "scripts/**/*.ts",
