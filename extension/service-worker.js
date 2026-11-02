@@ -382,7 +382,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
       const url=ChatGPTGoalPolicy.canonical(tab?.url);
       if(typeof tab?.id!=='number'||!url)throw Error('Откройте сохранённый чат ChatGPT');
-      if(message.action==='get')return {ok:true,record:await goalController.get(url)};
+      if(message.action==='get')return {ok:true,record:await goalController.get(url),tabId:tab.id,url};
+      if(message.expectedTabId!==tab.id||message.expectedUrl!==url)
+        throw Error('Активный чат изменился после открытия popup; откройте меню расширения ещё раз');
       if(message.action==='start')return goalController.start({url,tabId:tab.id,goal:message.goal,rules:message.rules,
         maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
       return goalController.control({action:message.action,url,tabId:tab.id});
