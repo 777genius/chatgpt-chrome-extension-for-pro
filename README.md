@@ -2,7 +2,7 @@
 
 **Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Version **1.4.0** · Chrome / Chromium **116+** · No build required
+Version **1.5.0** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -10,14 +10,15 @@ Version **1.4.0** · Chrome / Chromium **116+** · No build required
 | --- | --- |
 | **Desktop alerts** | Sound, answer or error preview, and elapsed response time when known. |
 | **Animated waiting indicator** | A rotating blue loader in the tab favicon while a request is running, including background tabs. Animation pauses when Chrome is unfocused. No estimated percentages. |
+| **Scheduled-task clock** | Shows a clock for a native scheduled-task card. Watches for actual continuation with a five-minute fallback check; does not parse localized dates or refresh the page. |
 | **Red / green status icons** | Red for stopped errors, green for completed responses, in notifications and the tab favicon. |
-| **Read without losing status** | Visiting a chat dismisses its OS notifications. The result icon stays until your next manual send, then becomes a waiting loader. |
+| **Unread result dot** | A blue dot marks unseen results. Viewing the chat removes the dot and its OS notifications; the green/red result stays until your next send. |
 | **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` retries in the same chat. Stops on exhausted limits or an unconfirmed send. |
 | **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. |
 | **Chat-limit handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. |
 | **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the new chat to be saved before renaming. |
 | **Persistent activity log** | Records chat IDs, source/destination URLs, send intents, sent text, confirmations, retry counts, and stop reasons. Preserves recovery copies across extension updates. |
-| **Safe recovery** | Reports visible errors even when retries are blocked. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
+| **Safe recovery** | Recognizes a completed response even if its network stream failed. Service warnings do not replace response status. Reports visible errors even when retries are blocked. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
 
 **Automatic retries and handoffs are enabled.** The extension can send continuation commands and create chats. Logs and recovery copies are stored locally and may contain messages and drafts.
 
@@ -32,6 +33,19 @@ Version **1.4.0** · Chrome / Chromium **116+** · No build required
 No Chrome restart is needed. The extension attempts to attach to existing ChatGPT tabs without refreshing them. Chrome may block access to unloaded or restricted tabs.
 
 Use the extension popup to test sound and notifications. ChatGPT page access is required; handoffs also require a model with the supported reasoning setting.
+
+## Optional Chrome memory cleanup
+
+Inspect JavaScript heaps or explicitly collect unreachable objects without closing or reloading tabs:
+
+```sh
+npm run memory -- --cdp http://127.0.0.1:9222
+npm run memory -- --cdp http://127.0.0.1:9222 --collect --max-tabs 3
+```
+
+Requires Node.js 26+ and an existing local debugging connection. An existing authenticated connection can be reused with `--bridge-config`. Shared heaps are collected once; cooldowns and private reports prevent blind repeats. JavaScript heap savings do **not** guarantee lower physical RAM usage. [Options and safety behavior](docs/memory-cleanup.md).
+
+Strict mode refuses collection when another page's shared heap identity is unknown. `--collect --include-active --allow-unmeasured-peers` is an explicit alternative for measurable heaps; shared activity with unreachable pages remains unverified. Private macOS shortcuts can provide separate **Inspect** and **Clean available memory** actions, using the same private ledger at `$HOME/.local/state/chatgpt-chrome-memory`. [Shortcut behavior and reports](docs/memory-cleanup.md#daily-use-on-macos).
 
 ## Development
 

@@ -38,3 +38,6 @@ browser-profile*/
 bridge.json
 chatgpt-journal-*.json
 chat-handoff-*.txt
+
+# Private memory-utility ledger and browsing reports
+.chrome-memory/

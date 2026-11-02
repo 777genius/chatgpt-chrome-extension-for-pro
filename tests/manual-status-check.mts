@@ -24,7 +24,7 @@ const world=createContext({document,window,location,URL,AbortController,crypto:g
 for(const file of ['memory-maintenance.js','handoff-title.js','status-indicator.js','content-script.js'])runInContext(readFileSync(`extension/${file}`,'utf8'),world);
 const editor=document.querySelector('#prompt-textarea')!,button=document.querySelector('button')!;
 const fire=(type:string,event:IntentEvent)=>{for(const fn of callbacks.get(type)||[])fn(event);};
-const start=(at=++now)=>{world.__chatgptNotifierAttemptId=String(at);for(const fn of listeners)fn({type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:at});};
+const start=(at=++now)=>{world.__chatgptNotifierAttemptId=String(at);world.__chatgptNotifierRequestStartedAt=at;for(const fn of listeners)fn({type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:at});};
 const resets=()=>sent.filter(m=>m.type==='CHATGPT_MANUAL_SEND');
 await flush();
 assert.ok(document.querySelector('[data-chatgpt-notifier-status]'),'completed response starts with a green indicator');

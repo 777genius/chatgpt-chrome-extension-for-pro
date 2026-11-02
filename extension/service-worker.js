@@ -1,5 +1,6 @@
 'use strict';
 importScripts('page-probe.js');
+importScripts('completion-probe.js');
 importScripts('journal-store.js');
 importScripts('handoff-title.js');
 importScripts('status-store.js');
@@ -109,7 +110,7 @@ function formatDuration(durationMs, isError) {
   return `${isError ? 'Ошибка через' : 'Ответ за'} ${parts.join(' ')}`;
 }
 
-async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response finished.', isTest = false, isError = false, durationMs = null, retryReason = '', ticket = null } = {}) {
+async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response finished.', isTest = false, isError = false, isWarning = false, durationMs = null, retryReason = '', ticket = null } = {}) {
   const id = ticket?.id || (isTest
     ? `chatgpt-prompt-bound-test:${Date.now()}`
     : `chatgpt-prompt-bound:${tabId}:${Date.now()}`);
@@ -118,12 +119,12 @@ async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response f
     playCompletionSound(),
     chrome.notifications.create(id, {
       type: 'basic',
-      iconUrl: isTest?'icons/icon128.png':isError?'icons/status-error.png':'icons/status-success.png',
+      iconUrl: isTest||isWarning?'icons/icon128.png':isError?'icons/status-error.png':'icons/status-success.png',
       title: isTest ? 'Background alert test' : title,
       message,
       contextMessage: isTest
         ? 'Sound + desktop notification dispatched by the extension'
-        : [formatDuration(durationMs, isError), retryReason].filter(Boolean).join(' · '),
+        : [isWarning?'':formatDuration(durationMs, isError), retryReason].filter(Boolean).join(' · '),
       priority: 2,
       requireInteraction: false,
       silent: true
@@ -138,7 +139,7 @@ async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response f
 
   if (soundResult.status === 'rejected') console.error('Prompt-Bound Alert: sound failed', soundResult.reason);
   if (notificationResult.status === 'rejected') console.error('Prompt-Bound Alert: notification failed', notificationResult.reason);
-  journalInBackground({ kind: 'notification.result', tabId, notificationId: id, title, message, isError, durationMs,
+  journalInBackground({ kind: 'notification.result', tabId, notificationId: id, title, message, isError, warning:isWarning, durationMs,
     sound: soundResult.status, notification: notificationResult.status,
     soundError: soundResult.status === 'rejected' ? String(soundResult.reason) : '',
     notificationError: notificationResult.status === 'rejected' ? String(notificationResult.reason) : '' });
@@ -150,6 +151,9 @@ async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response f
 
 async function broadcastChatStatus(view) {
   const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*'});
+  // Querying tabs may finish after a newer generation has changed the status.
+  // The animation subscription must obey the same revision guard as the icon.
+  if((await readChatStatus(view.url)).revision!==view.revision)return;
   await Promise.allSettled(tabs.filter(tab=>ChatGPTHandoffTitle.chatUrl(tab.url)===view.url).map(tab=>{
     statusAnimation.set(tab.id,view.url,view.status?.kind==='loading');
     return chrome.tabs.sendMessage(tab.id,{type:'CHATGPT_STATUS_CHANGED',...view});
@@ -171,7 +175,20 @@ async function visibleChatTab(tabId,url) {
 }
 
 async function visitVisibleChat(tabId,url,receipt) {
-  if(url&&await visibleChatTab(tabId,url))await visitChatNotifications(url,receipt);
+  if(!url||!await visibleChatTab(tabId,url))return;
+  const view=await visitChatNotifications(url,receipt);
+  if(view.seenChanged)void broadcastChatStatus(view).catch(()=>{});
+  return view;
+}
+
+async function seeVisibleResult(url,receipt) {
+  const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*',active:true});
+  for(const tab of tabs) {
+    if(!tab.active||ChatGPTHandoffTitle.chatUrl(tab.url)!==url||!await visibleChatTab(tab.id,url))continue;
+    const view=await markChatViewed(url,receipt);
+    if(view.seenChanged)void broadcastChatStatus(view).catch(()=>{});
+    return;
+  }
 }
 
 async function signalConversationRequestEvent(tabId,message) {
@@ -185,7 +202,7 @@ async function signalConversationRequestEvent(tabId,message) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'content-script.js']
+      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js', 'content-script.js']
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
@@ -198,7 +215,7 @@ async function installErrorWatchers() {
   const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
   await Promise.allSettled(tabs.map(async (tab) => {
     journalInBackground({kind:'tab.snapshot',discarded:tab.discarded,frozen:tab.frozen,status:tab.status},tab);
-    try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','content-script.js']}); }
+    try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','content-script.js']}); }
     catch (error) { journalInBackground({kind:'watcher.unavailable',reason:String(error.message || error)},tab); }
   }));
 }
@@ -207,7 +224,7 @@ chrome.runtime.onStartup.addListener(() => installErrorWatchers().catch(console.
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
   const receipt=statusReceipt();
-  manualRequestReceiptsByTab.set(details.tabId,{startedAt:details.timeStamp,receipt,url:ChatGPTHandoffTitle.chatUrl(details.documentUrl)});
+  manualRequestReceiptsByTab.set(details.tabId,{startedAt:details.timeStamp,requestId:details.requestId,receipt,url:ChatGPTHandoffTitle.chatUrl(details.documentUrl)});
   // Use the source captured by the serialized journal, never a later tab URL.
   void journalRequest('request.started',details).then(async event=>{
     const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl);
@@ -215,7 +232,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
   }).catch(()=>{});
   chrome.scripting.executeScript({
     target: { tabId: details.tabId },
-    func: (startedAt) => { globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`; },
+    func: (startedAt) => { if(!(globalThis.__chatgptNotifierRequestStartedAt>startedAt)){globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`;} },
     args: [details.timeStamp]
   }).then(()=>signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:details.timeStamp})).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
@@ -224,11 +241,15 @@ chrome.webRequest.onCompleted.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
   void journalRequest('request.completed',details).catch(()=>{});
   if (details.statusCode < 200 || details.statusCode >= 300) return;
-  signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED'}).catch(() => {});
+  const request=manualRequestReceiptsByTab.get(details.tabId);
+  if(request&&request.requestId===details.requestId)signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED',startedAt:request.startedAt}).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
 
 chrome.webRequest.onErrorOccurred?.addListener((details) => {
-  if (isAnswerStreamRequest(details)) void journalRequest('request.failed',details).catch(()=>{});
+  if (!isAnswerStreamRequest(details))return;
+  void journalRequest('request.failed',details).catch(()=>{});
+  const request=manualRequestReceiptsByTab.get(details.tabId);
+  if(request&&request.requestId===details.requestId)signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_FAILED',startedAt:request.startedAt}).catch(()=>{});
 }, CHATGPT_REQUEST_FILTER);
 
 const handoffWrites = new Map();
@@ -463,7 +484,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === 'CHATGPT_RESPONSE_COMPLETE' || message?.type === 'CHATGPT_RESPONSE_ERROR') {
+  if(message?.type==='CHATGPT_COMPLETION_PROBE') {
+    const url=messageChatUrl(message,sender),initial=manualRequestReceiptsByTab.get(sender.tab?.id);
+    if(!url||!Number.isFinite(message.startedAt)||message.startedAt<=0||initial&&(initial.startedAt!==message.startedAt||initial.url&&initial.url!==url)){
+      sendResponse?.({ok:false,reason:'attempt-changed'});return false;
+    }
+    (async()=>{
+      // A worker upgrade loses the in-memory request map. Recover UI observation
+      // only from the same durable loading generation and live native progress.
+      const before=initial?null:await readChatStatus(url);
+      if(!initial&&(before.status?.kind!=='loading'||before.status.eventAt!==message.startedAt))return {ok:false,reason:'attempt-changed'};
+      const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectCompletedTurn,args:[url]});
+      const native=results[0]?.result||{ok:false,reason:'native-turn-missing'};
+      const tab=await chrome.tabs.get(sender.tab.id);
+      if(manualRequestReceiptsByTab.get(sender.tab.id)!==initial||ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'attempt-changed'};
+      if(!initial){
+        if(!native.ok||native.turnStatus!=='in_progress'||native.generating!==true||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
+        const runtime=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'ISOLATED',func:()=>({attempt:globalThis.__chatgptNotifierAttemptId,startedAt:globalThis.__chatgptNotifierRequestStartedAt})});
+        const current=await readChatStatus(url);
+        if(runtime[0]?.result?.attempt!==String(message.startedAt)||runtime[0]?.result?.startedAt!==message.startedAt||
+            current.revision!==before.revision||current.status?.kind!=='loading'||current.status.eventAt!==message.startedAt||
+            manualRequestReceiptsByTab.has(sender.tab.id)||(await chrome.tabs.get(sender.tab.id)).url!==url)return {ok:false,reason:'attempt-changed'};
+        if(manualRequestReceiptsByTab.has(sender.tab.id))return {ok:false,reason:'attempt-changed'};
+        manualRequestReceiptsByTab.set(sender.tab.id,{startedAt:message.startedAt,receipt:current.status.receipt,url,consumed:true,recoveredPromptKey:native.promptKey});
+      }
+      const bound=manualRequestReceiptsByTab.get(sender.tab.id);
+      if(bound?.recoveredPromptKey&&bound.recoveredPromptKey!==native.promptKey)return {ok:false,reason:'prompt-changed'};
+      return native;
+    })().then(sendResponse).catch(()=>sendResponse?.({ok:false,reason:'probe-unavailable'}));
+    return true;
+  }
+  if (['CHATGPT_RESPONSE_COMPLETE','CHATGPT_RESPONSE_ERROR','CHATGPT_OPERATION_WARNING'].includes(message?.type)) {
+    const isWarning=message.type==='CHATGPT_OPERATION_WARNING';
     const isError = message.type === 'CHATGPT_RESPONSE_ERROR';
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/')||sender.frameId>0) return;
     const tabId = sender.tab?.id;
@@ -472,24 +524,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // later SPA route must not reattribute this event to another chat.
     const sourceUrl=ChatGPTHandoffTitle.chatUrl(sender.tab.url);
     if(message.url&&(!message.url.startsWith('https://chatgpt.com/')||ChatGPTHandoffTitle.chatUrl(message.url)!==sourceUrl))return;
+    const completionRequest=manualRequestReceiptsByTab.get(tabId);
+    if(!isError&&!isWarning&&(!completionRequest||completionRequest.startedAt!==message.completionStartedAt||
+        String(completionRequest.startedAt)!==message.attemptId||completionRequest.url&&completionRequest.url!==sourceUrl))return;
     const receipt=statusReceipt(),eventAt=Date.now();
 
     const fingerprint = String(message.fingerprint || '');
     const rawCompletionKey=String(message.completionKey||fingerprint);
     const completionKey = rawCompletionKey?`${sourceUrl}|${rawCompletionKey}`:'';
-    if (!isError && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
-    if (!isError && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
+    if (!isError&&!isWarning && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
+    if (!isError&&!isWarning && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
-    journalInBackground({kind:isError?'notification.requested':'response.complete', response:message.response,
-      durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
-    const reserve=sourceUrl?reserveChatNotification(sourceUrl,tabId,isError?'error':'success',eventAt,receipt):Promise.resolve(null);
+    journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
+      warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
+    const reserve=sourceUrl?reserveChatNotification(sourceUrl,tabId,isWarning?'warning':isError?'error':'success',eventAt,receipt):Promise.resolve(null);
     reserve.then(reserved=>{
-      if(reserved)void broadcastChatStatus(reserved.view).catch(()=>{});
+      if(reserved&&!isWarning)void broadcastChatStatus(reserved.view).catch(()=>{});
+      // A foreground result is already visible. Only its captured generation
+      // is acknowledged; OS dismissal still follows an actual visit event.
+      if(reserved&&!isWarning)void seeVisibleResult(sourceUrl,receipt).catch(()=>{});
       return emitBoth({
       tabId,
-      title: `${isError ? '❌ ' : ''}${cleanSessionTitle(message.sessionTitle)}`,
+      title: `${isWarning?'⚠️ ':isError ? '❌ ' : ''}${cleanSessionTitle(message.sessionTitle)}`,
       message: truncateResponse(message.response),
-      isError,
+      isError,isWarning,
       durationMs: message.durationMs,
       retryReason: message.retryReason || '',ticket:reserved?.ticket||null
       });
@@ -497,6 +555,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.error('Prompt-Bound Alert: completion alert failed', error);
     });
     return;
+  }
+
+  if(message?.type==='CHATGPT_DEFERRED_TASK') {
+    const url=messageChatUrl(message,sender),receipt=statusReceipt();
+    if(!url){sendResponse?.({ok:false});return false;}
+    (async()=>{
+      const tab=await chrome.tabs.get(sender.tab.id);
+      if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false};
+      const view=await updateDeferredChat(url,message.event||{},receipt);
+      journalInBackground({kind:'deferred.'+String(message.event?.phase||'unknown'),sourceUrl:url,cardKey:message.event?.cardKey,anchorKey:message.event?.anchorKey,taskId:message.event?.taskId,reason:message.event?.reason},sender.tab);
+      void broadcastChatStatus(view).catch(()=>{});return {ok:true,...view};
+    })().then(sendResponse).catch(()=>sendResponse?.({ok:false}));return true;
   }
 
   if (['CHATGPT_PAGE_RETURNED','CHATGPT_STATUS_GET','CHATGPT_MANUAL_SEND','CHATGPT_GENERATION_STOPPED'].includes(message?.type)) {

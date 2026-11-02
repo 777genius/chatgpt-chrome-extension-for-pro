@@ -24,14 +24,18 @@ globalThis.ChatGPTStatusAnimation=Object.freeze({
       for(const binding of bindings.values()) {
         if(binding.pending)continue;
         binding.pending=true;
-        let result;
-        try {result=send(binding.tabId,{type:'CHATGPT_STATUS_TICK',url:binding.url,frame:current});}
-        catch {retire(binding);continue;}
-        Promise.resolve(result).then(ack=>{
+        const generation=binding.generation;
+        const settled=failed=>{
           if(disposed||bindings.get(binding.tabId)!==binding)return;
           binding.pending=false;
-          if(ack?.ok!==true)retire(binding);
-        },()=>retire(binding));
+          if(failed&&binding.generation===generation)retire(binding);
+        };
+        let result;
+        try {result=send(binding.tabId,{type:'CHATGPT_STATUS_TICK',url:binding.url,frame:current});}
+        catch {settled(true);continue;}
+        Promise.resolve(result).then(ack=>{
+          settled(ack?.ok!==true);
+        },()=>settled(true));
       }
       schedule();
     }
@@ -40,7 +44,8 @@ globalThis.ChatGPTStatusAnimation=Object.freeze({
         if(disposed||!Number.isInteger(tabId)||tabId<0||typeof url!=='string'||!url)return;
         const existing=bindings.get(tabId);
         if(loading===true) {
-          if(existing?.url!==url)bindings.set(tabId,{tabId,url,pending:false});
+          if(existing?.url!==url)bindings.set(tabId,{tabId,url,pending:false,generation:0});
+          else existing.generation++;
           schedule();
         } else if(existing?.url===url)retire(existing);
       },

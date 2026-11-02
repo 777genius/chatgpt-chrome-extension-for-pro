@@ -68,6 +68,17 @@ function harness(send:Adapters['send']) {
   assert.deepEqual(calls.filter(call=>call.tabId===7).map(call=>call.frame),[0,5],'a recovered tab receives only the next current frame');
   h.clock.dispose();assert.equal(h.pending,0);assert.equal(h.maximum,1);
 }
+for(const failure of ['negative','reject'] as const) {
+  const old=deferred<Ack>();let calls=0;
+  const h=harness(async()=>{calls++;return calls===1?old.promise:{ok:true};});
+  h.clock.set(7,a,true);h.advance();
+  h.clock.set(7,a,true);h.advance(1000);await settle();
+  assert.equal(calls,1,'same-URL rearming preserves the single in-flight bound');
+  if(failure==='negative')old.resolve({ok:false});else old.reject(new Error('Old generation failed'));
+  await settle();h.advance();await settle();
+  assert.equal(calls,2,`${failure} from the old generation cannot retire the rearmed binding`);
+  h.clock.dispose();assert.equal(h.pending,0);assert.equal(h.maximum,1);
+}
 for(const failure of ['negative','missing','reject','throw'] as const) {
   const h=harness(()=>{
     if(failure==='throw')throw new Error('Tab is gone');

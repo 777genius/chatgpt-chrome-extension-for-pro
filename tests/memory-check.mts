@@ -66,9 +66,12 @@ interface LifecycleContext {
   __chatgptNotifierDispose: () => void;
   __chatgptNotifierAlive: () => boolean;
   __chatgptNotifierAttemptId?: string;
+  __chatgptNotifierRequestStartedAt?: number;
 }
 function lifecycleSetup(runtimeId: string | null = 'test-extension') {
-  const {document, window} = parseHTML('<html><body><main></main></body></html>');
+  const {document, window} = parseHTML('<html><body><main></main><form><div id="prompt-textarea" contenteditable="true">Private draft</div><button data-testid="send-button">Send</button></form></body></html>');
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  let turnIndex=0;
   const activeObservers = new Set<OwnedObserver>();
   class OwnedObserver {
     readonly callback: (records: unknown[]) => void;
@@ -82,7 +85,7 @@ function lifecycleSetup(runtimeId: string | null = 'test-extension') {
   const timeouts = new Map<number, () => void>();
   const listeners = new Set<(message: RuntimeMessage) => void>();
   const sent: RuntimeMessage[] = [];
-  const location = {pathname: '/c/source', href: 'https://chatgpt.com/c/source'};
+  const location = {origin:'https://chatgpt.com',pathname: '/c/source', href: 'https://chatgpt.com/c/source'};
   const runtime = {
     id: runtimeId,
     onMessage: {
@@ -91,10 +94,17 @@ function lifecycleSetup(runtimeId: string | null = 'test-extension') {
     },
     async sendMessage(message: RuntimeMessage) {
       sent.push(message);
+      if(message.type==='CHATGPT_COMPLETION_PROBE'){
+        const user=Array.from(document.querySelectorAll('[data-turn=user]')).at(-1);
+        const assistant=Array.from(document.querySelectorAll('[data-turn=assistant]')).at(-1);
+        return {ok:true,url:location.origin+location.pathname,promptKey:location.pathname+'|'+user?.getAttribute('data-testid'),
+          assistantKey:assistant?.getAttribute('data-testid')||'',isLatest:true,isReadOnly:false,generating:false,
+          hasError:false,turnStatus:assistant?'complete':'in_progress',assistantPhase:'final_answer',assistantCompleted:!!assistant};
+      }
       return {ok: true, record: null};
     }
   };
-  const world = createContext({document, window, location, chrome: {runtime}, AbortController,
+  const world = createContext({document, window, location, chrome: {runtime}, AbortController, URL,
     Node: window.Node, Element: window.Element, MutationObserver: OwnedObserver, performance,
     Date: class extends Date {static now() {return clock;}},
     setInterval(callback: () => void) { const id = ++timerId; intervals.set(id, callback); return id; },
@@ -103,15 +113,24 @@ function lifecycleSetup(runtimeId: string | null = 'test-extension') {
     clearTimeout(id: number) {timeouts.delete(id);}
   });
   const source = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' + readFileSync('extension/handoff-title.js', 'utf8') + '\n' +
-    readFileSync('extension/content-script.js', 'utf8');
+    readFileSync('extension/completion-state.js', 'utf8')+'\n'+readFileSync('extension/content-script.js', 'utf8');
   runInContext(source, world);
   const lifecycle = world as unknown as LifecycleContext;
   return {world, lifecycle, runtime, activeObservers, intervals, timeouts, listeners, sent, location,
-    arm() {for (const listener of listeners) listener({type: 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'});},
+    arm() {
+      // Capture a trusted send before mounting its new user turn, then deliver
+      // the actual request metadata. Old answers cannot authorize this watcher.
+      const event=new window.Event('click',{bubbles:true});Object.defineProperty(event,'isTrusted',{value:true});
+      document.querySelector('[data-testid=send-button]')!.dispatchEvent(event);
+      document.querySelector('main')!.insertAdjacentHTML('beforeend',`<article data-testid="conversation-turn-${++turnIndex}" data-turn="user">Question</article>`);
+      lifecycle.__chatgptNotifierRequestStartedAt=++clock;
+      lifecycle.__chatgptNotifierAttemptId=String(clock);
+      for(const listener of listeners)listener({type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:clock});
+    },
+    observeCompleted(){for(const listener of listeners)listener({type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED',startedAt:lifecycle.__chatgptNotifierRequestStartedAt});},
     advance(ms: number) {clock += ms;},
     answer() {
-      document.querySelector('main')!.innerHTML = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>' +
-        '<article data-testid="conversation-turn-1" data-turn="assistant"><div class="markdown">Finished answer</div></article>';
+      document.querySelector('main')!.insertAdjacentHTML('beforeend',`<article data-testid="conversation-turn-${++turnIndex}" data-turn="assistant"><div class="markdown">Finished answer</div></article>`);
     },
     manualStop() {
       const button = document.createElement('button');
@@ -169,16 +188,18 @@ assert.equal(retired.activeObservers.size, 0, 'runtime invalidation disconnects 
 assert.equal(retired.intervals.size, 0);
 assert.equal(retired.listeners.size, 0);
 const completed = lifecycleSetup();
-completed.answer();
 completed.arm();
+completed.answer();
 completed.advance(1000);
 completed.poll();
-await Promise.resolve();
+completed.advance(1000);
+completed.poll();
+for(let i=0;i<8;i++)await Promise.resolve();
 assert.equal(completed.intervals.size, 0, 'natural completion clears its polling');
 assert.equal(completed.activeObservers.size, 1);
 assert.equal(completed.sent.filter(message => message.type === 'CHATGPT_RESPONSE_COMPLETE').length, 1,
   'natural completion still emits the completed answer');
-completed.arm();
+completed.observeCompleted();
 completed.advance(1000);
 completed.poll();
 await Promise.resolve();

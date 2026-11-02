@@ -227,7 +227,8 @@ async function workerCheck() {
   assert.equal(notifications[0].contextMessage, 'Ошибка через 2 мин 5 с');
   callbacks.message(error, sender); await pause();
   assert.equal(notifications.length, 2, 'new attempt must not be suppressed by service-worker dedupe');
-  const success = { type: 'CHATGPT_RESPONSE_COMPLETE', sessionTitle: 'My chat', response: 'Done', durationMs: 3661000, completionKey: 'prompt|assistant' };
+  await runInContext("manualRequestReceiptsByTab.set(7,{startedAt:123,receipt:statusReceipt(),url:'https://chatgpt.com/c/example'})",workerContext);
+  const success = { attemptId:'123',completionStartedAt:123,type: 'CHATGPT_RESPONSE_COMPLETE', sessionTitle: 'My chat', response: 'Done', durationMs: 3661000, completionKey: 'prompt|assistant' };
   callbacks.message(success, sender); callbacks.message(success, sender); await pause();
   assert.equal(notifications.length, 3, 'success deduplication must remain intact');
   assert.equal(notifications[2].title, 'My chat');
@@ -353,11 +354,12 @@ async function popupRecoveryCheck() {
 async function notificationStatusCheck() {
   const a='https://chatgpt.com/c/chat-a',b='https://chatgpt.com/c/chat-b';
   const storage:Record<string,any>={};
-  const tabs:Record<number,any>={7:{id:7,url:a,active:true,windowId:1},8:{id:8,url:b,active:false,windowId:1}};
+  const tabs:Record<number,any>={7:{id:7,url:a,active:false,windowId:1},8:{id:8,url:b,active:false,windowId:1},9:{id:9,url:a,active:false,windowId:1}};
   let focused=true,deferCreates=false,focusEffects=0;
   const created=new Set<string>(),cleared:string[]=[],pending:{id:string;resolve:(id:string)=>void}[]=[];
   const notices:{id:string;options:any}[]=[],statusMessages:any[]=[];
   let gate:Promise<void>|null=null;
+  let queryGate:Promise<void>|null=null;
   let beforeWindowRead:(()=>void)|null=null;
   let requestSequence=2000;
   const flush=()=>new Promise(resolve=>setTimeout(resolve,20));
@@ -368,7 +370,7 @@ async function notificationStatusCheck() {
       storage:{local:{get:async(key:string|string[]|null)=>structuredClone(key===null?storage:Object.fromEntries((Array.isArray(key)?key:[key]).map(name=>[name,storage[name]]))),set:async(value:any)=>Object.assign(storage,structuredClone(value))}},
       runtime:{id:'test-extension',onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),getManifest:()=>({version:'test'}),getURL:(path:string)=>`chrome-extension://test-extension/${path}`,getContexts:async()=>[{}],sendMessage:async()=>{}},
       webRequest:{onBeforeRequest:event('before'),onCompleted:event('complete'),onErrorOccurred:event('error')},
-      tabs:{query:async()=>Object.values(tabs),get:async(id:number)=>{const wait=gate;gate=null;if(wait)await wait;return {...tabs[id]};},
+      tabs:{query:async()=>{const wait=queryGate;queryGate=null;if(wait)await wait;return Object.values(tabs);},get:async(id:number)=>{const wait=gate;gate=null;if(wait)await wait;return {...tabs[id]};},
         sendMessage:async(id:number,message:any)=>{statusMessages.push({id,...message});},onRemoved:event('removed'),onUpdated:event('updated'),onActivated:event('activated'),update:async()=>{focusEffects++;}},
       windows:{get:async()=>{const hook=beforeWindowRead;beforeWindowRead=null;hook?.();return {focused};},onFocusChanged:event('focused'),update:async()=>{focusEffects++;}},
       scripting:{executeScript:async()=>[{result:{ok:true}}]},
@@ -389,7 +391,9 @@ async function notificationStatusCheck() {
       return startedAt;
     };
     return {callbacks,sender,
-      emit:async(tabId:number,key:string,isError=true)=>{callbacks.message({type:isError?'CHATGPT_RESPONSE_ERROR':'CHATGPT_RESPONSE_COMPLETE',url:tabs[tabId].url,sessionTitle:'Title',response:'Result',completionKey:key,fingerprint:key},sender(tabId));await flush();},
+      emit:async(tabId:number,key:string,isError=true)=>{ctx.fixtureTabId=tabId;const existing=runInContext('manualRequestReceiptsByTab.get(fixtureTabId)',ctx);const startedAt=existing?.startedAt??++requestSequence;if(!isError&&!existing){ctx.fixtureTabId=tabId;ctx.fixtureStartedAt=startedAt;ctx.fixtureUrl=tabs[tabId].url;runInContext('manualRequestReceiptsByTab.set(fixtureTabId,{startedAt:fixtureStartedAt,receipt:statusReceipt(),url:fixtureUrl})',ctx);}callbacks.message({attemptId:String(startedAt),completionStartedAt:startedAt,type:isError?'CHATGPT_RESPONSE_ERROR':'CHATGPT_RESPONSE_COMPLETE',url:tabs[tabId].url,sessionTitle:'Title',response:'Result',completionKey:key,fingerprint:key},sender(tabId));await flush();},
+      warning:async(tabId:number)=>{callbacks.message({type:'CHATGPT_OPERATION_WARNING',url:tabs[tabId].url,sessionTitle:'Title',response:'Synthetic handoff metadata warning',warningKind:'handoff',operationId:'synthetic-handoff'},sender(tabId));await flush();},
+      broadcast:(view:any)=>{ctx.externalView=view;return runInContext('broadcastChatStatus(externalView)',ctx) as Promise<void>;},
       request,startRequest,manual:(url=tabs[7].url)=>request('CHATGPT_MANUAL_SEND',url,sender(),{startedAt:startRequest(url)})};
   }
   let h=boot();await flush();
@@ -397,18 +401,28 @@ async function notificationStatusCheck() {
   const aIds=notices.slice(0,2).map(n=>n.id),bId=notices[2].id;
   assert.equal(new Set(aIds).size,2,'multiple alerts in one chat have distinct durable IDs');
   const oldRevision=(await h.request('CHATGPT_STATUS_GET',a)).revision;
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true,'a background result is unread and passive status GET cannot acknowledge it');
   tabs[7].active=false;
   await h.request('CHATGPT_PAGE_RETURNED',a);assert.equal(cleared.length,0,'an inactive tab cannot clear notifications');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true);
   tabs[7].active=true;focused=false;
   await h.request('CHATGPT_PAGE_RETURNED',a);assert.equal(cleared.length,0,'an unfocused window cannot clear notifications');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true);
   focused=true;
   h=boot();await flush();
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'error','tab state survives worker restart');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true,'unread state survives worker restart');
   await h.request('CHATGPT_PAGE_RETURNED',a);
   assert.ok(aIds.every(id=>!created.has(id)),'a visit clears every persisted notification for that chat');
   assert.ok(created.has(bId),'a matching visit leaves another chat notification alone');
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'error','focus does not reset the tab indicator');
-  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).revision,oldRevision);
+  const seen=(await h.request('CHATGPT_STATUS_GET',a));
+  assert.equal(seen.status.unread,false);assert.equal(seen.revision,oldRevision+1,'the visit removes only the badge with a new revision');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',b,h.sender(8))).status.unread,true,'reading A never acknowledges B');
+  await flush();
+  assert.ok([7,9].every(id=>statusMessages.some(message=>message.id===id&&message.url===a&&message.status?.unread===false&&message.status.kind==='error')),'a real visit broadcasts the seen color to every matching tab');
+  h=boot();await flush();
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'seen state survives another worker restart');
   const staleSender=h.sender();tabs[7].url=b;
   assert.equal((await h.request('CHATGPT_PAGE_RETURNED',a,staleSender)).ok,false,'a route-changed sender cannot clear its old chat');
   assert.ok(created.has(bId));
@@ -425,26 +439,37 @@ async function notificationStatusCheck() {
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'loading','a real automatic request also starts the loader');
   await h.emit(7,'completed-after-loading',false);
   assert.equal((await h.request('CHATGPT_GENERATION_STOPPED',a,h.sender(),{startedAt:autoStart})).status.kind,'success','a late stop cannot erase a completed result');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'a result verified in the active focused tab is already seen');
 
 
   deferCreates=true;
+  tabs[7].active=false;
   await h.emit(7,'pending-old');
   const old=pending.shift()!;
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true);
+  tabs[7].active=true;
   await h.request('CHATGPT_PAGE_RETURNED',a);
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'visit acknowledges the result even before OS creation resolves');
+  tabs[7].active=false;
   await h.emit(7,'pending-new',false);
   const fresh=pending.shift()!;
   old.resolve(old.id);fresh.resolve(fresh.id);await flush();
   assert.equal(created.has(old.id),false,'a return before create resolves clears its eventual notification');
   assert.equal(created.has(fresh.id),true,'a later generation is not cleared by the earlier return');
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'success');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true,'late creation of the viewed result cannot acknowledge the newer one');
+  tabs[7].active=true;
   deferCreates=false;
   let release:()=>void=()=>{};
   gate=new Promise<void>(resolve=>{release=resolve;});
   const visit=h.request('CHATGPT_PAGE_RETURNED',a);
+  tabs[7].active=false;
   await h.emit(7,'after-return',false);
   const afterReturn=notices.at(-1)!.id;
+  tabs[7].active=true;
   release();await visit;
   assert.ok(created.has(afterReturn),'async focus verification does not swallow a later event');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true,'an older delayed visit cannot acknowledge a later background terminal result');
   gate=new Promise<void>(resolve=>{release=resolve;});
   const manual=h.manual(a);
   await h.emit(7,'after-manual',false);
@@ -452,20 +477,26 @@ async function notificationStatusCheck() {
   release();await manual;
   assert.ok(created.has(afterManual));
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'success','a newer result survives an older manual reset');
+  tabs[7].active=false;
   const fastStartedAt=h.startRequest(a);
   await h.emit(7,'fast-before-manual-message',false);
   const fast=notices.at(-1)!.id;
   assert.equal((await h.request('CHATGPT_MANUAL_SEND',a,h.sender(),{startedAt:fastStartedAt+1})).ok,false);
   const lateReset=await h.request('CHATGPT_MANUAL_SEND',a,h.sender(),{startedAt:fastStartedAt});
   assert.equal(lateReset.status.kind,'success','a fast result before delayed MANUAL_SEND survives the earlier request fence');
+  assert.equal(lateReset.status.unread,true,'an earlier manual request cannot acknowledge its later background result');
   assert.ok(created.has(fast));
   assert.equal((await h.request('CHATGPT_MANUAL_SEND',a,h.sender(),{startedAt:fastStartedAt})).ok,false,'one captured request cannot be replayed as a later reset');
-  h.callbacks.activated({tabId:7});await flush();
+  tabs[7].active=true;h.callbacks.activated({tabId:7});await flush();
   assert.equal(created.has(afterManual),false,'native tab activation clears a visible chat');
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'success');
-  await h.emit(7,'window-return');focused=false;
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'native tab activation removes the unread dot without resetting success');
+  focused=false;await h.emit(7,'window-return');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true);
   h.callbacks.focused(1);await flush();assert.ok(created.has(notices.at(-1)!.id));
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,true,'unfocused Chrome cannot mark a result viewed');
   focused=true;h.callbacks.focused(1);await flush();assert.equal(created.has(notices.at(-1)!.id),false);
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'window focus removes only unread state');
   await h.emit(7,'closed-live');
   const closed=notices.at(-1)!.id,revisionBeforeClose=(await h.request('CHATGPT_STATUS_GET',a)).revision;
   const journalBefore=JSON.stringify(Object.fromEntries(Object.entries(storage).filter(([key])=>key.startsWith('chatgpt-journal:event:'))));
@@ -496,8 +527,38 @@ async function notificationStatusCheck() {
   h.callbacks.updated(7,{url:b},{...tabs[7]});await flush();
   assert.ok(created.has(captured),'a route change clears the visited chat, never the previous source');
   assert.equal(created.has(bId),false);
+  assert.equal((await h.request('CHATGPT_STATUS_GET',b)).status.unread,false,'SPA visit acknowledges its current chat');
+  assert.equal(storage[`chatgpt-status:${a}`].status.unread,true,'SPA visit cannot acknowledge the previous chat');
   await h.callbacks.clicked(captured);
   assert.equal(focusEffects,0,'clicking an old alert never focuses an unrelated chat now occupying that tab');
+  tabs[7].url=a;tabs[7].active=false;
+  const oldView=await h.request('CHATGPT_STATUS_GET',a);
+  const beforeBroadcast=statusMessages.length;
+  queryGate=new Promise<void>(resolve=>{release=resolve;});
+  const oldBroadcast=h.broadcast(oldView);
+  const loadingStart=h.startRequest(a);await flush();
+  const loadingView=await h.request('CHATGPT_STATUS_GET',a);
+  assert.equal(loadingView.status.kind,'loading');
+  release();await oldBroadcast;
+  assert.equal(statusMessages.slice(beforeBroadcast).some(message=>message.type==='CHATGPT_STATUS_CHANGED'&&message.url===a&&message.revision===oldView.revision),false,'a stale terminal broadcast cannot retire the newer loader subscription');
+  const beforeTick=statusMessages.filter(message=>message.type==='CHATGPT_STATUS_TICK').length;
+  await new Promise(resolve=>setTimeout(resolve,300));
+  assert.ok(statusMessages.filter(message=>message.type==='CHATGPT_STATUS_TICK').length>beforeTick,'the newer loader keeps its clock after an older query finishes');
+  await h.warning(7);
+  const afterWarning=await h.request('CHATGPT_STATUS_GET',a);
+  assert.equal(afterWarning.status.kind,'loading');assert.equal(afterWarning.revision,loadingView.revision,'handoff warnings never overwrite an actual running request');
+  assert.equal(notices.at(-1)!.options.iconUrl,'icons/icon128.png','metadata warnings use a neutral notification icon');
+  assert.ok(Object.values(storage).some((row:any)=>row?.kind==='operation.warning'&&row.warningKind==='handoff'));
+  await h.emit(7,'genuine-response-failed');
+  const realFailure=await h.request('CHATGPT_STATUS_GET',a);
+  assert.equal(realFailure.status.kind,'error');assert.equal(realFailure.status.unread,true,'a genuine response error remains red and unread');
+  await h.warning(7);
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).revision,realFailure.revision,'operational metadata cannot replace or acknowledge a real terminal error');
+  assert.equal((await h.request('CHATGPT_GENERATION_STOPPED',a,h.sender(),{startedAt:loadingStart})).status.kind,'error');
+  tabs[9].active=true;
+  await h.emit(7,'same-chat-visible-in-another-tab');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'an already visible duplicate tab views its chat result even when the reporting tab is in the background');
+  assert.ok(created.has(notices.at(-1)!.id),'foreground acknowledgement does not change existing OS dismissal behavior');
   console.log('PASS: durable per-chat status and all notification IDs, restart, active/focused route guards, pending-create/generation races, manual-only status reset and no focus stealing');
 }
 async function statusMigrationCheck() {
@@ -567,6 +628,7 @@ async function statusMigrationCheck() {
   assert.equal(storage[statusKey('spa-a')].status.kind,'error');assert.equal(storage[statusKey('spa-b')].status.kind,'error');
   assert.equal(storage[statusKey('spa-b')].notifications.length,0,'a delayed legacy result cannot borrow the later SPA chat identity even with identical title/body');
   assert.equal(storage[statusKey('e')].status.kind,'error','an Enter reset without a request preserves the indicator');
+  assert.equal(storage[statusKey('e')].status.unread,false,'legacy results have no invented unread history');
   assert.equal(storage[statusKey('f')].status,null,'a matching actual manual request clears the seed');
   for(const name of ['g','h','i'])assert.equal(storage[statusKey(name)].status.kind,'error');
   assert.deepEqual(storage[statusKey('k')],existing,'existing live records are never replaced');

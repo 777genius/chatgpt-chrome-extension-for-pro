@@ -173,7 +173,8 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    await clock.until(transferred,'late route must durably confirm transfer, lineage and draft restoration',5000);
    assert.equal(storage[lineageKey].part,1,'late reconciliation persists continuation lineage');
  }
- assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,ambiguous||lateTarget?2:1,'unknown send notifies only once in addition to the terminal source error');
+ assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,1,'only the source response error may set terminal error status');
+ assert.equal(notices.filter(n=>n.type==='CHATGPT_OPERATION_WARNING').length,ambiguous||lateTarget?1:0,'uncertain transfer notifies once as operational metadata, never as a failed response');
  assert.equal(sends.length,1,'handoff sends once');assert.notEqual(sends[0],'доделай е2е');
  assert.equal(stored.stage,ambiguous?'awaiting-confirmation':'sent');
  assert.ok(stored.text.indexOf('Earlier answer')<stored.text.indexOf('First request'));

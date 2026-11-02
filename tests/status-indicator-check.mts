@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
-interface State {ok:boolean;url:string;revision:number;status:null|{kind:'error'|'success'|'loading';eventAt:number}}
+interface State {ok:boolean;url:string;revision:number;status:null|{kind:'error'|'success'|'loading';eventAt:number;unread?:boolean}}
 interface Indicator {tick(value:{url:string;frame:number}):boolean;accept(state:State):boolean;refresh():Promise<void>;dispose():void;loadingStartedAt():number|null}
 interface Factory {create(options:unknown):Indicator}
 const source=readFileSync('extension/status-indicator.js','utf8');
@@ -101,3 +101,19 @@ assert.equal(oldIcon.isConnected,false);assert.equal(firstOwner.accept(state('er
 assert.equal(firstOwner.loadingStartedAt(),null);
 assert.equal(shared.document.querySelectorAll('[data-chatgpt-notifier-status]').length,1);
 secondOwner.dispose();await tick();assert.equal(sharedNative.getAttribute('rel'),'ICON');assert.equal(sharedNative.getAttribute('href'),'shared-native.ico');
+
+const badges=parseHTML('<html><head><link rel="icon" href="badge-native.ico"></head><body></body></html>');
+const badgeState=(kind:'error'|'success'|'loading',revision:number,unread:boolean):State=>({...state(kind,revision),status:{kind,eventAt:1000,unread}});
+const badge=(world.ChatGPTStatusIndicator as Factory).create({document:badges.document,getUrl:()=>url,load:async()=>badgeState('error',1,true)});
+await tick();
+const badgeSVG=()=>decodeURIComponent(badges.document.querySelector('[data-chatgpt-notifier-status]')!.getAttribute('href')!.split(',')[1]);
+const badgeCircle=()=>parseHTML(badgeSVG()).document.querySelector('circle[data-chatgpt-unread]');
+assert.ok(badgeCircle());assert.equal(badgeCircle()!.getAttribute('fill'),'#2563eb');assert.equal(badgeCircle()!.getAttribute('stroke'),'white');
+assert.ok(Number(badgeCircle()!.getAttribute('cx'))>=48&&Number(badgeCircle()!.getAttribute('cy'))<=16,'blue unread dot belongs in the top-right corner');
+assert.match(badgeSVG(),/#dc2626/);assert.match(badgeSVG(),/M22 22l20 20/,'unread error preserves its cross');
+badge.accept(badgeState('error',2,false));assert.equal(badgeCircle(),null);assert.equal(badgeSVG(),readFileSync('extension/icons/status-error.svg','utf8').trim(),'viewing retains the exact red base icon');
+badge.accept(badgeState('success',3,true));assert.ok(badgeCircle());assert.match(badgeSVG(),/#16a34a/);assert.match(badgeSVG(),/M17 32l10 10/,'unread success preserves its check');
+badge.accept(badgeState('success',4,false));assert.equal(badgeCircle(),null);assert.equal(badgeSVG(),readFileSync('extension/icons/status-success.svg','utf8').trim());
+badge.accept(badgeState('loading',5,true));assert.equal(badgeCircle(),null,'loader never renders an unread dot');
+badge.tick({url,frame:2});assert.equal(badgeCircle(),null);badge.dispose();
+console.log('Unread badge: blue top-right dot on terminal icons only, view preserves base glyph/color, loader remains unchanged.');
