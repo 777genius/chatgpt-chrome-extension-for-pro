@@ -140,3 +140,32 @@ Approximate engineering effort for a fully typed, feature-preserving rewrite:
 35–70 hours, including setup and migration, existing-test adaptation,
 architecture conformance, offline/nonbrowser verification and review.
 Browser testing and Chrome/ChatGPT UI drift can expand this range.
+
+## Draft implementation checkpoint, 2026-11-02
+
+**Not qualified or mergeable yet.** The current draft includes:
+
+- Strict TS implementations of `memory-maintenance`, `watcher-bootstrap`,
+  `status-animation`, `handoff-title`, `completion-state`,
+  `completion-checkpoint`, `request-receipts` and `offscreen`.
+  Original `extension/*.js` files remain the 1.6.1 baseline; build emits
+  migrated JS over a byte-for-byte copy of the original extension.
+- Parity tests evaluate original and emitted policy code in isolated VMs
+  (memory cleanup, request receipts, completion checkpoints, completion
+  evidence, notification tick and title lineage).
+- The full 29-program nonbrowser suite now also runs on an isolated copy of
+  the emitted MV3 distribution, not just on the original JavaScript.
+- Foundation consumer workflow configuration and exact declared package
+  versions are staged. The Bun dependency lock, real package availability,
+  published Get Modular composition wiring and Foundation qualification
+  have **not** been confirmed. Never substitute package manifests or this
+  text for actual qualification.
+- Main content script, service worker, durable journal, migration/status
+  adapters and most UI adapters remain unported. No runtime version or
+  Chrome permissions were changed in the original extension.
+- Draft CI is opt-in via `[ci:test]` on its branch. Before merge, remove
+  the temporary draft-push trigger and switch all CI to frozen `bun.lock`.
+
+Further implementation must follow the acceptance matrix above, repair CI
+findings, qualify the actual browser bundle, and request designated test-chat
+manual verification before the PR is made ready.
