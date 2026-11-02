@@ -1,9 +1,4 @@
 "use strict";
-function goalErrorLabel(value:unknown):string {
-  const message=value!=null&&(typeof value==="object"||typeof value==="function")
-    ? Reflect.get(value,"message"):undefined;
-  return String(message||value);
-}
 interface GoalOperation {id:string;kind:"initial"|"continuation";text:string;tabId:number;createdAt:number;status:string;baselineKey?:string}
 interface GoalCompletion {url:string;tabId:number;completionKey:string;promptKey:string;response:string;nativeVerified:boolean;rawExact:boolean;userId:string}
 interface GoalSettings {goal:string;rules:string;maxContinuations:number;maxMinutes:number}
@@ -46,6 +41,11 @@ declare const module:undefined|{exports:unknown};
 // Chrome worker owns the only durable Goal coordinator. No page script may
 // authorize itself to click; the journal's consumed send grant is authoritative.
 (function(root:typeof globalThis & {ChatGPTGoalPolicy?:GoalPolicy;ChatGPTGoalStore?:{create(host:GoalHost):GoalStore}}) {
+  function goalErrorLabel(value:unknown):string {
+    const message=value!=null&&(typeof value==="object"||typeof value==="function")
+      ? Reflect.get(value,"message"):undefined;
+    return String(message||value);
+  }
   function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID()}:GoalHost):GoalStore {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
