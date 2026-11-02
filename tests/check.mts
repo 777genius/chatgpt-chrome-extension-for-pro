@@ -41,6 +41,8 @@ async function domCheck() {
         if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
         if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return {ok:false};
         if(message.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS')return {ok:true,changed:false};
+        if(message.type==='CHATGPT_GOAL_RECOVER')return {ok:false};
+        if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:''};
         if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
         if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
         if(message.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,message.delayMs));return {ok:true};}
