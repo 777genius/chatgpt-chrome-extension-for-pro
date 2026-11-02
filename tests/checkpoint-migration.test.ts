@@ -49,4 +49,6 @@ test("migrated checkpoint preserves original stale-receipt and terminal guards",
   assert.equal(generated[8], false, "old terminal must not close newer send");
   assert.equal(generated[10], true);
   assert.equal(generated[11], false, "terminal checkpoint cannot be consumed twice");
+  assert.equal(generated[13], false,
+    "a stale request ID cannot finish a newer same-millisecond checkpoint");
 });
