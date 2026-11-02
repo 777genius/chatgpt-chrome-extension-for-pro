@@ -638,11 +638,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async()=>{
       if(message.action==='intent')return {ok:await completionCheckpointIntent(tabId,{url,baselineKey:message.baselineKey,at:message.at})};
       if(message.action==='update')return {ok:await completionCheckpointUpdate(tabId,{url,startedAt:message.startedAt,requestId:message.requestId,baselineKey:message.baselineKey,promptKey:message.promptKey,httpCompleted:message.httpCompleted})};
-      const record=await completionCheckpointRead(tabId);
-      if(!record||record.state!=='active'||record.url!==url||typeof record.baselineKey!=='string')return {ok:false};
+      let record=await completionCheckpointRead(tabId);
+      if(!record||record.state!=='active'||typeof record.baselineKey!=='string')return {ok:false};
       const view=await readChatStatus(url),tab=await chrome.tabs.get(tabId);
       const request=await latestRequestReceipt(tabId);
       if(completionCheckpointUrl(tab.url)!==url||view.status?.kind!=='loading'||view.status.eventAt!==record.startedAt||request&&(request.startedAt!==record.startedAt||request.requestId!==record.requestId))return {ok:false};
+      if(record.url!==url){
+        const initial=manualRequestReceiptsByTab.get(tabId);
+        const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url]});
+        const allocation=completionAllocationEvidence(record,url,checked?.result);
+        if(!allocation)return {ok:false,pending:record.url==='https://chatgpt.com/'&&record.baselineKey===''&&!record.promptKey&&
+          ['turn-missing','native-turn-missing','bound-messages-missing'].includes(checked?.result?.reason)};
+        const live=await readChatStatus(url),current=await completionCheckpointRead(tabId);
+        if(manualRequestReceiptsByTab.get(tabId)!==initial||
+            live.revision!==view.revision||live.status?.kind!=='loading'||live.status.eventAt!==record.startedAt||
+            completionCheckpointUrl((await chrome.tabs.get(tabId)).url)!==url||JSON.stringify(current)!==JSON.stringify(record))return {ok:false};
+        if(!await completionCheckpointUpdate(tabId,{...allocation,startedAt:record.startedAt,requestId:record.requestId}))return {ok:false};
+        record={...record,...allocation};
+        journalInBackground({kind:'completion.url_allocated',sourceUrl:url,requestId:record.requestId,attemptId:record.attemptId,promptKey:record.promptKey},{id:tabId,url});
+      }
       const current=await completionCheckpointRead(tabId);
       if(current?.state!=='active'||current.startedAt!==record.startedAt||current.requestId!==record.requestId||current.url!==url)return {ok:false};
       return {ok:true,record:{...record,receipt:request?.receipt||view.status.receipt}};
