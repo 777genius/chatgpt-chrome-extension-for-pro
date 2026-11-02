@@ -155,9 +155,11 @@ function loadCompletion(directory: "extension" | "dist/extension"): CompletionPo
   const content = readFileSync(new URL("../" + directory + "/completion-state.js", import.meta.url), "utf8");
   const context: { module: { exports: Record<string, unknown> } } = { module: { exports: {} } };
   runInNewContext(content, context);
-  assert.equal(typeof context.module.exports.bindAttemptPrompt, "function");
-  assert.equal(typeof context.module.exports.completedAttemptEvidence, "function");
-  return context.module.exports as CompletionPolicy;
+  const exports: unknown = context.module.exports;
+  assert.ok(exports && typeof exports === "object");
+  assert.ok("bindAttemptPrompt" in exports && typeof exports.bindAttemptPrompt === "function");
+  assert.ok("completedAttemptEvidence" in exports && typeof exports.completedAttemptEvidence === "function");
+  return exports as CompletionPolicy;
 }
 test("typed completion policy cannot promote stale or generating turns", () => {
   function observe(api: CompletionPolicy): string[] {
