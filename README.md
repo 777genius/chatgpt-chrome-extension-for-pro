@@ -2,7 +2,7 @@
 
 **Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Version **1.6.4** · Chrome / Chromium **116+** · No build required
+Version **1.7.0** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
