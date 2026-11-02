@@ -51,8 +51,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - run: bun run check
-      - name: Reject incomplete migration before ready/main
-        if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
+      - name: Reject incomplete migration before draft qualification, ready/main
+        if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && !github.event.pull_request.draft) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[ci:test]'))
         run: bun run check:complete
       # Download the exact tested unpacked build for the owner's final Chrome
       # smoke test. Never publish an unqualified Draft or failed build.
