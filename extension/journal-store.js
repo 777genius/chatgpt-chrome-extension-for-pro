@@ -146,8 +146,8 @@ function appendJournal(event, tab = {}) {
     if (['request.completed','request.failed'].includes(event.kind)) operationId ||= requests[event.requestId]?.operationId || null;
     if (['retry.send_intent','handoff.sending','goal.send_intent'].includes(event.kind)) {
       const previous=active[tabId];
-      if(previous&&previous.operationId!==operationId)
-        throw Object.assign(new Error('Вкладка уже имеет другую автоматическую отправку с неизвестным исходом'),{journalPolicy:true});
+      if(previous)
+        throw Object.assign(new Error('Вкладка уже имеет незавершённую автоматическую отправку; новое разрешение запрещено'),{journalPolicy:true});
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,at:Date.now()};
     }
     if (event.kind === 'send.authorized') {
@@ -155,11 +155,16 @@ function appendJournal(event, tab = {}) {
       if (!active[tabId] || active[tabId].operationId !== operationId || active[tabId].consumed) throw Object.assign(new Error('Повторная автоматическая отправка запрещена'),{journalPolicy:true});
       active[tabId] = {...active[tabId],consumed:true};
     }
-    if (['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset','handoff.sent',
-      'handoff.failed','goal.confirmed','goal.blocked','goal.stopped','tab.closed'].includes(event.kind) &&
-      (!operationId || active[tabId]?.operationId === operationId) &&
-      (event.kind==='tab.closed'||event.kind.startsWith('goal.')?active[tabId]?.kind==='goal.send_intent'||event.kind==='tab.closed':
-        event.kind==='retry.manual_reset'?active[tabId]?.kind==='retry.send_intent':true)) delete active[tabId];
+    const currentSend=active[tabId];
+    const exactGrant=Boolean(currentSend&&operationId&&currentSend.operationId===operationId);
+    const resetRetry=event.kind==='retry.manual_reset'&&currentSend?.kind==='retry.send_intent';
+    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&
+      ['goal.confirmed','goal.blocked','goal.stopped'].includes(event.kind);
+    const clearsRetry=(exactGrant||resetRetry)&&currentSend?.kind==='retry.send_intent'&&
+      ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
+    const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&
+      ['handoff.sent','handoff.failed'].includes(event.kind);
+    if(event.kind==='tab.closed'||clearsGoal||clearsRetry||clearsHandoff)delete active[tabId];
     const requestSource = requests[event.requestId]?.sourceUrl;
     if (['request.completed','request.failed'].includes(event.kind)) delete requests[event.requestId];
     const entry = { ...event, schema: 1, sequence, recordedAt: Date.now(),
