@@ -1,6 +1,6 @@
 import { declareModule, input } from "@get-modular/assembly";
-import { Transport } from "./journal.contracts.js";
-import type { JournalCapabilities } from "./journal.contracts.js";
+import { Transport } "./journal.contracts.ts";
+import type { JournalCapabilities } "./journal.contracts.ts";
 
 export const transportDeclaration = declareModule({
   moduleId: "chatgpt/journal/transport",

@@ -1,8 +1,8 @@
 import type { Assembly } from "@get-modular/assembly";
-import type { JournalCapabilities } from "../features/journal/composition/journal.contracts.js";
-import { journalGroup } from "../features/journal/composition/journal.group.js";
-import { readerModule } from "../features/journal/composition/reader.module.js";
-import { transportInput } from "../features/journal/composition/transport.input.js";
+import type { JournalCapabilities } "../features/journal/composition/journal.contracts.ts";
+import { journalGroup } "../features/journal/composition/journal.group.ts";
+import { readerModule } "../features/journal/composition/reader.module.ts";
+import { transportInput } "../features/journal/composition/transport.input.ts";
 
 export function composeJournal(api: Assembly<JournalCapabilities>) {
   return api.prepare({

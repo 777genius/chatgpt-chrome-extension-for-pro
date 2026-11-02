@@ -1,5 +1,5 @@
 import { defineContract, type CapabilitiesOf } from "@get-modular/assembly";
-import type { JournalReader, JournalTransport } from "../contracts/journal.js";
+import type { JournalReader, JournalTransport } "../contracts/journal.ts";
 
 export const Transport = defineContract<JournalTransport>()({
   id: "chatgpt/journal/transport", revision: 1,
