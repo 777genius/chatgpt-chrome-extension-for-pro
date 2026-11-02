@@ -40,8 +40,8 @@ Use the extension popup to test sound and notifications. ChatGPT page access is 
 Inspect JavaScript heaps or explicitly collect unreachable objects without closing or reloading tabs:
 
 ```sh
-npm run memory -- --cdp http://127.0.0.1:9222
-npm run memory -- --cdp http://127.0.0.1:9222 --collect --max-tabs 3
+bun run memory -- --cdp http://127.0.0.1:9222
+bun run memory -- --cdp http://127.0.0.1:9222 --collect --max-tabs 3
 ```
 
 Requires Node.js 26+ and an existing local debugging connection. An existing authenticated connection can be reused with `--bridge-config`. Shared heaps are collected once; a private ledger enforces cooldowns and unknown-outcome blocks; reports record results. JavaScript heap savings do **not** guarantee lower physical RAM usage. [Options and safety behavior](docs/memory-cleanup.md).
@@ -73,11 +73,11 @@ and current blockers.
 
 ## Development
 
-Node.js **26+**:
+Node.js **26+**, Bun **1.4.3**:
 
 ```sh
-npm ci
-npm run check
+bun install --frozen-lockfile
+bun run check
 ```
 
 Checks cover syntax, manifest resources, TypeScript, and synthetic DOM / Chrome API tests. Live ChatGPT sending, attachments, reasoning selection, and server-side renaming require a separate browser test.
