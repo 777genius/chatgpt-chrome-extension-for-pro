@@ -17,11 +17,11 @@ interface RetryError { at: number; promptKey: string; attemptId: string }
 interface RetrySummary {
   failures: number[];
   recentErrors: RetryError[];
-  blocked: boolean;
-  terminal: boolean;
-  reason: string;
-  lastPromptKey: string;
-  lastAttemptId: string;
+  blocked?: boolean;
+  terminal?: boolean;
+  reason?: string;
+  lastPromptKey?: string;
+  lastAttemptId?: string;
   remainingRetries?: number;
   lastBudgetOperation?: string | null;
 }
@@ -41,7 +41,7 @@ interface JournalRequestOp {
   operationId?: string | null;
   sourceUrl?: string;
 }
-interface JournalMeta {
+interface JournalMeta extends Record<string, unknown> {
   sequence: number;
   startedAt: number;
   retrySchema?: number;
@@ -111,7 +111,7 @@ function journalMeta(value: unknown): JournalMeta {
   }
   // The writer is the sole owner of these serialized records. Preserve every
   // historic key and never rewrite a record merely to satisfy a newer shape.
-  return value as unknown as JournalMeta;
+  return value as JournalMeta;
 }
 function journalEvent(value: unknown): JournalEvent | null {
   return journalObject(value) && typeof value.kind === "string"
@@ -169,7 +169,7 @@ function retryDraftClaimable(record: RetryDraft | null | undefined): boolean {
 }
 async function indexedRetryDraft(meta: JournalMeta | null,url: string): Promise<(RetryDraft & {draft:string}) | null> {
   const record=meta?.retryDraftSchema===1?meta.retryDraftByChat?.[retryDraftUrl(url)]:null;
-  if(!record||!Number.isInteger(record.savedSequence)||record.savedSequence<1)return null;
+  if(!record||typeof record.savedSequence!=='number'||!Number.isInteger(record.savedSequence)||record.savedSequence<1)return null;
   const key=`${JOURNAL_PREFIX}${String(record.savedSequence).padStart(12,'0')}`;
   const entry=journalEvent((await chrome.storage.local.get(key))[key]);
   return entry?.kind==='draft.saved'&&entry.operationId===record.operationId&&retryDraftUrl(entry.sourceUrl)===record.sourceUrl&&
@@ -183,7 +183,7 @@ function reduceRetrySummary(retryByChat: Record<string, RetrySummary>, event: Jo
     delete next[chatId];
     return next;
   }
-  if(event.kind==='retry.resume' && Number.isInteger(event.remainingRetries) && event.remainingRetries>=1 && event.remainingRetries<=3) {
+  if(event.kind==='retry.resume' && typeof event.remainingRetries==='number' && Number.isInteger(event.remainingRetries) && event.remainingRetries>=1 && event.remainingRetries<=3) {
     return {...retryByChat,[chatId]:{failures:[],recentErrors:[],blocked:false,terminal:false,reason:'',
       lastPromptKey:'',lastAttemptId:'',remainingRetries:event.remainingRetries}};
   }
@@ -196,7 +196,7 @@ function reduceRetrySummary(retryByChat: Record<string, RetrySummary>, event: Jo
   const isBlocked = ['retry.blocked', 'retry.failed', 'draft.restore_failed'].includes(event.kind);
   if (!isRetryError && !isBlocked) return retryByChat;
   const previous: Partial<RetrySummary> = Object.hasOwn(retryByChat, chatId) ? retryByChat[chatId]! : {};
-  const now = Number.isFinite(event.recordedAt) ? event.recordedAt : Date.now();
+  const now = typeof event.recordedAt==='number'&&Number.isFinite(event.recordedAt) ? event.recordedAt : Date.now();
   const inWindow = (at: number) => Number.isFinite(at) && at <= now && now - at <= RETRY_STATE_WINDOW_MS;
   const state = {...previous,
     failures: (previous.failures || []).filter(inWindow),
@@ -208,7 +208,7 @@ function reduceRetrySummary(retryByChat: Record<string, RetrySummary>, event: Jo
     const duplicate = (previous.lastPromptKey === promptKey && previous.lastAttemptId === attemptId) ||
       state.recentErrors.some((item) => item.promptKey === promptKey && item.attemptId === attemptId);
     if (!duplicate) {
-      const at = Number.isFinite(event.eventAt) ? Math.min(event.eventAt, now) : now;
+      const at = typeof event.eventAt==='number'&&Number.isFinite(event.eventAt) ? Math.min(event.eventAt, now) : now;
       if (inWindow(at)) {
         state.failures.push(at);
         state.recentErrors.push({at, promptKey, attemptId});
@@ -297,7 +297,7 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
   journalQueue = write;
   return write.catch((error: unknown) => { if (!journalObject(error)||error.journalPolicy!==true) {journalFailure = journalMessage(error); console.error('Journal write failed', journalFailure);} throw error; });
 }
-function readRetryDraft(url) {
+function readRetryDraft(url: string): Promise<(RetryDraft & {draft:string}) | null> {
   const read=journalQueue.catch(()=>{}).then(async()=>{
     const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
     return indexedRetryDraft(meta,url);
@@ -345,7 +345,10 @@ async function readJournal() {
   const values = await chrome.storage.local.get(null);
   return { ok: true, schema: 1, exportedAt: Date.now(), meta: values[JOURNAL_META] || null,
     storageError: journalFailure,
-    events: Object.entries(values).filter(([key]) => key.startsWith(JOURNAL_PREFIX)).map(([, value]) => value).sort((a,b) => a.sequence - b.sequence) };
+    events: Object.entries(values).filter(([key]) => key.startsWith(JOURNAL_PREFIX)).map(([, value]) => value).sort((a,b) => {
+      const number=(value: unknown): number=>journalObject(value)&&typeof value.sequence==='number'?value.sequence:0;
+      return number(a)-number(b);
+    }) };
 }
 async function initializeJournal(reason: string) {
   const meta = (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
@@ -353,10 +356,13 @@ async function initializeJournal(reason: string) {
     await appendJournal({ kind: 'journal.started', reason, note: 'С этого момента ведётся журнал. Прошлые автоповторы восстановить нельзя.' });
     const saved = await chrome.storage.local.get(null);
     for (const [key, record] of Object.entries(saved)) {
-      if (/^chatgpt-handoff:\d+$/.test(key) && record?.id) {
-        await appendJournal({ kind: 'handoff.imported', operationId: record.id, sourceUrl: record.sourceUrl,
-          targetUrl: record.targetUrl, stage: record.stage, originalCreatedAt: record.createdAt,
-          text: record.text, prompt: record.prompt, asFile: record.asFile, reason: record.reason,
+      if (/^chatgpt-handoff:\d+$/.test(key) && journalObject(record) && typeof record.id==='string') {
+        await appendJournal({ kind: 'handoff.imported', operationId: record.id, sourceUrl: typeof record.sourceUrl==='string'?record.sourceUrl:undefined,
+          targetUrl: typeof record.targetUrl==='string'?record.targetUrl:undefined, stage: record.stage,
+          originalCreatedAt: typeof record.createdAt==='number'?record.createdAt:undefined,
+          text: typeof record.text==='string'?record.text:undefined,
+          prompt: typeof record.prompt==='string'?record.prompt:undefined,
+          asFile: record.asFile, reason: typeof record.reason==='string'?record.reason:undefined,
           provenance: 'Сохранённое состояние до начала журнала; это не запись наблюдения отправки' }, { id: Number(key.split(':')[1]) });
       }
     }
