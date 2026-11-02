@@ -455,6 +455,9 @@ async function popupRecoveryCheck() {
     assert.equal(sent[0].expectedUrl,goalUrl,'actions remain bound to the initial chat');
     if(action==='start')assert.equal(sent[0].goal,'Finalize popup goal');
     if(nextId)await waitFor(()=>(document.getElementById(nextId) as HTMLButtonElement).disabled===false);
+    // The worker receives the message before popup's async continuation paints
+    // the saved result. Wait for the actual UI state, including terminal Stop.
+    if(action==='stop')await waitFor(()=>/Остановлено/.test(document.getElementById('goal-status')!.textContent||''));
   }
   assert.match(document.getElementById('goal-status')!.textContent||'',/Остановлено/);
   const button=document.getElementById('recover-title')!;
