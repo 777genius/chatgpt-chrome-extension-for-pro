@@ -2,6 +2,7 @@
 importScripts('page-probe.js');
 importScripts('journal-store.js');
 importScripts('handoff-title.js');
+importScripts('status-store.js');
 importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
 
@@ -19,7 +20,7 @@ const CHATGPT_REQUEST_FILTER = {
 
 let creatingOffscreen = null;
 const lastNotificationFingerprintByTab = new Map();
-const pageReturnDismissByTab = new Map();
+const manualRequestReceiptsByTab=new Map();
 
 function normalizePathname(url) {
   try {
@@ -104,16 +105,16 @@ function formatDuration(durationMs, isError) {
   return `${isError ? 'Ошибка через' : 'Ответ за'} ${parts.join(' ')}`;
 }
 
-async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response finished.', isTest = false, isError = false, durationMs = null, retryReason = '' } = {}) {
-  const id = isTest
+async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response finished.', isTest = false, isError = false, durationMs = null, retryReason = '', ticket = null } = {}) {
+  const id = ticket?.id || (isTest
     ? `chatgpt-prompt-bound-test:${Date.now()}`
-    : `chatgpt-prompt-bound:${tabId}:${Date.now()}`;
+    : `chatgpt-prompt-bound:${tabId}:${Date.now()}`);
 
   const [soundResult, notificationResult] = await Promise.allSettled([
     playCompletionSound(),
     chrome.notifications.create(id, {
       type: 'basic',
-      iconUrl: 'icons/icon128.png',
+      iconUrl: isTest?'icons/icon128.png':isError?'icons/status-error.png':'icons/status-success.png',
       title: isTest ? 'Background alert test' : title,
       message,
       contextMessage: isTest
@@ -122,6 +123,12 @@ async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response f
       priority: 2,
       requireInteraction: false,
       silent: true
+    }).then(async result=>{
+      if(ticket)await completeChatNotification(ticket,true);
+      return result;
+    },async error=>{
+      if(ticket)await completeChatNotification(ticket,false);
+      throw error;
     })
   ]);
 
@@ -137,26 +144,28 @@ async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response f
   return id;
 }
 
-function cancelPageReturnDismiss(tabId) {
-  if (typeof tabId !== 'number') return;
-  const record = pageReturnDismissByTab.get(tabId);
-  if (!record) return;
-  if (record.autoCloseId !== null) clearTimeout(record.autoCloseId);
-  pageReturnDismissByTab.delete(tabId);
+async function broadcastChatStatus(view) {
+  const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*'});
+  await Promise.allSettled(tabs.filter(tab=>ChatGPTHandoffTitle.chatUrl(tab.url)===view.url).map(tab=>
+    chrome.tabs.sendMessage(tab.id,{type:'CHATGPT_STATUS_CHANGED',...view})));
 }
 
-function schedulePageReturnDismiss(tabId) {
-  if (typeof tabId !== 'number') return;
-  cancelPageReturnDismiss(tabId);
-  const record = {
-    notificationId: '',
-    returnDismissArmedAt: Date.now() + 500,
-    autoCloseId: setTimeout(() => {
-      pageReturnDismissByTab.delete(tabId);
-    }, 8500)
-  };
-  pageReturnDismissByTab.set(tabId, record);
-  return record;
+function messageChatUrl(message,sender) {
+  if(sender.frameId>0||typeof sender.tab?.id!=='number')return '';
+  const url=ChatGPTHandoffTitle.chatUrl(sender.tab.url);
+  return url&&(!message.url||ChatGPTHandoffTitle.chatUrl(message.url)===url)?url:'';
+}
+
+async function visibleChatTab(tabId,url) {
+  const tab=await chrome.tabs.get(tabId);
+  if(!tab.active||ChatGPTHandoffTitle.chatUrl(tab.url)!==url||typeof tab.windowId!=='number')return false;
+  if((await chrome.windows.get(tab.windowId)).focused!==true)return false;
+  const current=await chrome.tabs.get(tabId);
+  return current.active&&current.windowId===tab.windowId&&ChatGPTHandoffTitle.chatUrl(current.url)===url;
+}
+
+async function visitVisibleChat(tabId,url,receipt) {
+  if(url&&await visibleChatTab(tabId,url))await visitChatNotifications(url,receipt);
 }
 
 async function signalConversationRequestCompleted(tabId) {
@@ -171,7 +180,7 @@ async function signalConversationRequestCompleted(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['memory-maintenance.js', 'handoff-title.js', 'content-script.js']
+      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'content-script.js']
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
@@ -184,7 +193,7 @@ async function installErrorWatchers() {
   const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
   await Promise.allSettled(tabs.map(async (tab) => {
     journalInBackground({kind:'tab.snapshot',discarded:tab.discarded,frozen:tab.frozen,status:tab.status},tab);
-    try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','content-script.js']}); }
+    try { await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','content-script.js']}); }
     catch (error) { journalInBackground({kind:'watcher.unavailable',reason:String(error.message || error)},tab); }
   }));
 }
@@ -192,14 +201,15 @@ chrome.runtime.onInstalled.addListener(() => installErrorWatchers().catch(consol
 chrome.runtime.onStartup.addListener(() => installErrorWatchers().catch(console.warn));
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
+  manualRequestReceiptsByTab.set(details.tabId,{startedAt:details.timeStamp,receipt:statusReceipt(),url:ChatGPTHandoffTitle.chatUrl(details.documentUrl)});
   journalRequest('request.started',details);
   chrome.scripting.executeScript({
     target: { tabId: details.tabId },
     func: (startedAt) => { globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`; },
     args: [details.timeStamp]
   }).then(() => chrome.scripting.executeScript({
-    target: { tabId: details.tabId }, files: ['memory-maintenance.js', 'handoff-title.js', 'content-script.js']
-  })).catch(() => {});
+    target: { tabId: details.tabId }, files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'content-script.js']
+  })).then(()=>chrome.tabs.sendMessage(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:details.timeStamp})).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
 
 chrome.webRequest.onCompleted.addListener((details) => {
@@ -447,45 +457,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === 'CHATGPT_RESPONSE_COMPLETE' || message?.type === 'CHATGPT_RESPONSE_ERROR') {
     const isError = message.type === 'CHATGPT_RESPONSE_ERROR';
-    if (sender.tab?.url && !sender.tab.url.startsWith('https://chatgpt.com/')) return;
+    if (!sender.tab?.url?.startsWith('https://chatgpt.com/')||sender.frameId>0) return;
     const tabId = sender.tab?.id;
     if (typeof tabId !== 'number') return;
+    // Capture the conversation before any notification or sound awaits. A
+    // later SPA route must not reattribute this event to another chat.
+    const sourceUrl=ChatGPTHandoffTitle.chatUrl(sender.tab.url);
+    if(message.url&&(!message.url.startsWith('https://chatgpt.com/')||ChatGPTHandoffTitle.chatUrl(message.url)!==sourceUrl))return;
+    const receipt=statusReceipt(),eventAt=Date.now();
 
     const fingerprint = String(message.fingerprint || '');
-    const completionKey = String(message.completionKey || fingerprint);
+    const rawCompletionKey=String(message.completionKey||fingerprint);
+    const completionKey = rawCompletionKey?`${sourceUrl}|${rawCompletionKey}`:'';
     if (!isError && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
     if (!isError && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
-    const pageReturnRecord = message.dismissOnReturn ? schedulePageReturnDismiss(tabId) : null;
     journalInBackground({kind:isError?'notification.requested':'response.complete', response:message.response,
       durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
-    emitBoth({
+    const reserve=sourceUrl?reserveChatNotification(sourceUrl,tabId,isError?'error':'success',eventAt,receipt):Promise.resolve(null);
+    reserve.then(reserved=>{
+      if(reserved)void broadcastChatStatus(reserved.view).catch(()=>{});
+      return emitBoth({
       tabId,
       title: `${isError ? '❌ ' : ''}${cleanSessionTitle(message.sessionTitle)}`,
       message: truncateResponse(message.response),
       isError,
       durationMs: message.durationMs,
-      retryReason: message.retryReason || ''
-    }).then((notificationId) => {
-      if (pageReturnRecord) pageReturnRecord.notificationId = String(notificationId || '');
+      retryReason: message.retryReason || '',ticket:reserved?.ticket||null
+      });
     }).catch((error) => {
-      if (pageReturnRecord) cancelPageReturnDismiss(tabId);
       console.error('Prompt-Bound Alert: completion alert failed', error);
     });
     return;
   }
 
-  if (message?.type === 'CHATGPT_PAGE_RETURNED') {
-    const tabId = sender.tab?.id;
-    if (typeof tabId !== 'number') return;
-    const record = pageReturnDismissByTab.get(tabId);
-    if (!record) return;
-    if (Date.now() < record.returnDismissArmedAt) return;
-    cancelPageReturnDismiss(tabId);
-    if (record.notificationId) {
-      chrome.notifications.clear(record.notificationId).catch(() => {});
+  if (['CHATGPT_PAGE_RETURNED','CHATGPT_STATUS_GET','CHATGPT_MANUAL_SEND'].includes(message?.type)) {
+    const url=messageChatUrl(message,sender);
+    let receipt=statusReceipt();
+    if(!url){sendResponse?.({ok:false,reason:'Чат изменился'});return false;}
+    if(message.type==='CHATGPT_MANUAL_SEND') {
+      const request=manualRequestReceiptsByTab.get(sender.tab.id);
+      if(!request||!Number.isFinite(message.startedAt)||request.startedAt!==message.startedAt||request.url&&request.url!==url) {
+        sendResponse?.({ok:false,reason:'Ручная отправка не подтверждена текущим запросом'});return false;
+      }
+      receipt=request.receipt;
+      manualRequestReceiptsByTab.delete(sender.tab.id);
     }
-    return;
+    (async()=>{
+      const tab=await chrome.tabs.get(sender.tab.id);
+      if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'Чат изменился'};
+      if(message.type==='CHATGPT_STATUS_GET')return {ok:true,...await readChatStatus(url)};
+      if(message.type==='CHATGPT_MANUAL_SEND') {
+        const view=await visitChatNotifications(url,receipt,{manual:true});
+        void broadcastChatStatus(view).catch(()=>{});
+        return {ok:true,...view};
+      }
+      await visitVisibleChat(sender.tab.id,url,receipt);
+      return {ok:true,...await readChatStatus(url)};
+    })().then(result=>sendResponse?.(result)).catch(error=>sendResponse?.({ok:false,reason:String(error.message||error)}));
+    return true;
   }
 
   if (message?.type === 'TEST_BOTH') {
@@ -501,7 +531,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
-  cancelPageReturnDismiss(tabId);
+  manualRequestReceiptsByTab.delete(tabId);
+});
+
+chrome.tabs.onActivated?.addListener(({tabId})=>{
+  const receipt=statusReceipt();
+  void chrome.tabs.get(tabId).then(tab=>visitVisibleChat(tabId,ChatGPTHandoffTitle.chatUrl(tab.url),receipt)).catch(()=>{});
+});
+chrome.windows?.onFocusChanged?.addListener(windowId=>{
+  if(windowId<0)return;
+  const receipt=statusReceipt();
+  void chrome.tabs.query({active:true,windowId}).then(([tab])=>tab&&visitVisibleChat(tab.id,ChatGPTHandoffTitle.chatUrl(tab.url),receipt)).catch(()=>{});
 });
 
 chrome.tabs.onUpdated?.addListener((tabId, change, tab) => {
@@ -510,6 +550,7 @@ chrome.tabs.onUpdated?.addListener((tabId, change, tab) => {
     journalInBackground({kind:'tab.updated',changes:change},tab);
   }
   if(change.url)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_ROUTE_CHANGED'}).catch(()=>{});
+  if(change.url)void visitVisibleChat(tabId,ChatGPTHandoffTitle.chatUrl(tab.url),statusReceipt()).catch(()=>{});
 });
 
 chrome.notifications.onClicked.addListener(async (notificationId) => {
@@ -518,11 +559,25 @@ chrome.notifications.onClicked.addListener(async (notificationId) => {
   const tabId = Number(match[1]);
   try {
     const tab = await chrome.tabs.get(tabId);
+    const url=ChatGPTHandoffTitle.chatUrl(tab.url);
+    if(!url)return;
+    const record=(await chrome.storage.local.get(statusKey(url)))[statusKey(url)];
+    if(!record?.notifications?.some(item=>item.id===notificationId))return;
     await chrome.tabs.update(tabId, { active: true });
     if (typeof tab.windowId === 'number') await chrome.windows.update(tab.windowId, { focused: true });
+    await visitVisibleChat(tabId,url,statusReceipt());
   } catch (error) {
     console.warn('Prompt-Bound Alert: source tab no longer exists', error);
   } finally {
     chrome.notifications.clear(notificationId).catch(() => {});
   }
+});
+
+chrome.notifications.onClosed?.addListener(notificationId=>{
+  const match=/^chatgpt-prompt-bound:\d+:\d+:\d+:(.+)$/.exec(notificationId);
+  if(!match)return;
+  let url;
+  try {url=decodeURIComponent(match[1]);}catch{return;}
+  if(ChatGPTHandoffTitle.chatUrl(url)!==url)return;
+  void closeChatNotification(url,notificationId).catch(()=>{});
 });

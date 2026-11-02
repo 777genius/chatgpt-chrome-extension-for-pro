@@ -1,11 +1,14 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.2.12';
+  const SCRIPT_VERSION = '1.3.0';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
+  let statusIndicator = null;
+  let manualSendIntent = null;
+  let returnedPageUrl = '';
   const listeners = new AbortController();
   const answerWaitSlot = ChatGPTNotifierMemory.createLatestTaskSlot();
   const recoveryFirstSeen = new Map();
@@ -17,6 +20,8 @@
   }
   function stopContext() {
     contextAlive = false;
+    statusIndicator?.dispose();
+    manualSendIntent = null;
     listeners.abort();
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
     answerWaitSlot.cancel();
@@ -77,13 +82,21 @@
       ? Date.now() - startedAt : null;
   }
 
-  function notifyPageReturned() {
-    runtimeMessage({ type: 'CHATGPT_PAGE_RETURNED' }).catch(() => {});
+  statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,
+    load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url}),alive:runtimeAvailable})||null;
+
+  function notifyPageReturned(event) {
+    if((event&&event.isTrusted===false)||!pageIsActive()||returnedPageUrl===location.href)return;
+    const url=location.href;
+    returnedPageUrl=url;
+    runtimeMessage({type:'CHATGPT_PAGE_RETURNED',url}).then(result=>{if(!result?.ok&&returnedPageUrl===url)returnedPageUrl='';});
   }
 
-  window.addEventListener('focus', notifyPageReturned, { capture: true, signal: listeners.signal });
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') notifyPageReturned();
+  window.addEventListener('focus', event=>{returnedPageUrl='';void statusIndicator?.refresh();notifyPageReturned(event);}, { capture: true, signal: listeners.signal });
+  window.addEventListener('blur',()=>{returnedPageUrl='';},{capture:true,signal:listeners.signal});
+  document.addEventListener('visibilitychange', event => {
+    returnedPageUrl='';
+    if (document.visibilityState === 'visible') {void statusIndicator?.refresh();notifyPageReturned(event);}
   }, { capture: true, signal: listeners.signal });
   document.addEventListener('pointerdown', notifyPageReturned, { capture: true, passive: true, signal: listeners.signal });
   document.addEventListener('keydown', notifyPageReturned, { capture: true, passive: true, signal: listeners.signal });
@@ -249,7 +262,7 @@
 
   function notifyError(error, retryReason = '') {
     runtimeMessage({
-      type: 'CHATGPT_RESPONSE_ERROR', ...error, retryReason
+      type: 'CHATGPT_RESPONSE_ERROR', ...error, url:error.sourceUrl||location.href, retryReason
     }).catch(() => {});
   }
 
@@ -369,6 +382,7 @@
   }
 
   async function retryAfterError(error, attempt, path, promptKey, state) {
+    manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
     const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
@@ -548,11 +562,27 @@
     retryTask = retryTask.then(() => retryAfterError(error, attempt, path, promptKey, state));
   }
 
-  // A deliberate manual send starts a new run; automated clicks are untrusted.
+  function rememberManualStatusIntent() {
+    const button=sendButton();
+    if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return;
+    manualSendIntent={url:ChatGPTHandoffTitle.chatUrl(location.href),at:Date.now(),attempt:globalThis.__chatgptNotifierAttemptId||''};
+  }
+  function confirmManualStatusIntent(startedAt) {
+    const intent=manualSendIntent;
+    if(!intent)return;
+    if(!intent.url||Date.now()-intent.at>10000||ChatGPTHandoffTitle.chatUrl(location.href)!==intent.url){manualSendIntent=null;return;}
+    if(!Number.isFinite(startedAt)||startedAt<intent.at||String(startedAt)===intent.attempt||String(startedAt)!==String(globalThis.__chatgptNotifierAttemptId||''))return;
+    manualSendIntent=null;
+    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
+  }
+
+  // Reset the indicator only after a trusted send intent produces a request.
+  // Enter configured as a newline and automated retries do not acknowledge it.
   document.addEventListener('click', (event) => {
     if (event.isTrusted && event.target instanceof Element &&
         event.target.closest('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')) {
       retryStates.delete(location.pathname);
+      rememberManualStatusIntent();
       void audit('retry.manual_reset',{input:'send-button'});
     }
   }, { capture: true, signal: listeners.signal });
@@ -560,6 +590,7 @@
     if (event.isTrusted && event.key === 'Enter' && !event.shiftKey && !event.isComposing &&
         event.target instanceof Element && event.target.closest('#prompt-textarea, [data-composer-markdown]')) {
       retryStates.delete(location.pathname);
+      rememberManualStatusIntent();
       void audit('retry.manual_reset',{input:'enter'});
     }
   }, { capture: true, signal: listeners.signal });
@@ -652,6 +683,7 @@
   }
 
   async function submitHandoff() {
+    manualSendIntent = null;
     if (handoffBusy || !handoffRecord || !['navigating', 'preparing'].includes(handoffRecord.stage)) return;
     if (location.href === handoffRecord.sourceUrl) return;
     handoffBusy = true;
@@ -812,7 +844,7 @@
     if (!record?.naming || record.stage!=='sent' || !ChatGPTHandoffTitle.chatUrl(record.targetUrl) ||
         ChatGPTHandoffTitle.chatUrl(record.targetUrl)!==ChatGPTHandoffTitle.chatUrl(location.href)) return;
     const result=await runtimeMessage({type:'CHATGPT_HANDOFF_RENAME',id:record.id});
-    if(result?.ok===false) notifyError({sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`});
+    if(result?.ok===false) notifyError({sourceUrl:record.targetUrl,sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`});
   }
 
   function currentErrors() {
@@ -871,6 +903,7 @@
         durationMs: consumeDuration(),
         sessionTitle: document.title,
         response: errorText,
+        sourceUrl:location.href,
         recovery: Boolean(alert.querySelector('.text-chatgpt-recovery')),
         fingerprint
       }, promptKey, alert);
@@ -1064,6 +1097,7 @@
     lastSentFingerprint = fingerprint;
     runtimeMessage({
       type: 'CHATGPT_RESPONSE_COMPLETE',
+      url:location.href,
       durationMs: consumeDuration(),
       sessionTitle: document.title,
       response: snapshot.response,
@@ -1118,6 +1152,10 @@
   }, { capture: true, signal: listeners.signal });
 
   function onRuntimeMessage(message) {
+    if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt);
+    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){void statusIndicator?.refresh();notifyPageReturned();}
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED') armForCurrentPrompt();
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }

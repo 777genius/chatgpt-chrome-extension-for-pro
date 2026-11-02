@@ -189,7 +189,7 @@ async function workerCheck() {
   let handoffProof:any=null;
   const storage: Record<string, any> = {};
   const chrome = {
-    storage: { local: { get: async (key: string | null) => key === null ? {...storage} : ({ [key]: storage[key] }), set: async (entries: any) => {Object.assign(storage, entries);} } },
+    storage: { local: { get: async (key: string | string[] | null) => key === null ? {...storage} : Object.fromEntries((Array.isArray(key)?key:[key]).map(name=>[name,storage[name]])), set: async (entries: any) => {Object.assign(storage, entries);} } },
     runtime: { id:'test-extension',onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
       getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
@@ -206,6 +206,7 @@ async function workerCheck() {
   const error = { type: 'CHATGPT_RESPONSE_ERROR', sessionTitle: 'My chat - ChatGPT', response: 'Network failed', durationMs: 125000, fingerprint: 'error|prompt|Network failed' };
   callbacks.message(error, sender); await pause();
   assert.equal(notifications[0].title, '❌ My chat');
+  assert.equal(notifications[0].iconUrl,'icons/status-error.png');
   assert.equal(soundCalls,2,'offscreen listener startup race retries without losing notification');
   assert.equal(notifications[0].message, 'Network failed');
   assert.equal(notifications[0].contextMessage, 'Ошибка через 2 мин 5 с');
@@ -215,6 +216,7 @@ async function workerCheck() {
   callbacks.message(success, sender); callbacks.message(success, sender); await pause();
   assert.equal(notifications.length, 3, 'success deduplication must remain intact');
   assert.equal(notifications[2].title, 'My chat');
+  assert.equal(notifications[2].iconUrl,'icons/status-success.png');
   assert.equal(notifications[2].contextMessage, 'Ответ за 1 ч 1 мин 1 с');
   callbacks.message({ ...success, completionKey: 'unknown', durationMs: null }, sender); await pause();
   assert.equal(notifications[3].contextMessage, '', 'unknown duration leaves subtitle empty');
@@ -327,6 +329,240 @@ async function popupRecoveryCheck() {
   assert.equal(document.getElementById('status')!.textContent,'Название чата восстановлено.');
   console.log('PASS: popup previews exact saved title and waits for an explicit one-use recovery click');
 }
+async function notificationStatusCheck() {
+  const a='https://chatgpt.com/c/chat-a',b='https://chatgpt.com/c/chat-b';
+  const storage:Record<string,any>={};
+  const tabs:Record<number,any>={7:{id:7,url:a,active:true,windowId:1},8:{id:8,url:b,active:false,windowId:1}};
+  let focused=true,deferCreates=false,focusEffects=0;
+  const created=new Set<string>(),cleared:string[]=[],pending:{id:string;resolve:(id:string)=>void}[]=[];
+  const notices:{id:string;options:any}[]=[],statusMessages:any[]=[];
+  let gate:Promise<void>|null=null;
+  let beforeWindowRead:(()=>void)|null=null;
+  let requestSequence=2000;
+  const flush=()=>new Promise(resolve=>setTimeout(resolve,20));
+  function boot() {
+    const callbacks:Record<string,any>={};
+    const event=(name:string)=>({addListener:(fn:any)=>{callbacks[name]=fn;}});
+    const chrome={
+      storage:{local:{get:async(key:string|string[]|null)=>structuredClone(key===null?storage:Object.fromEntries((Array.isArray(key)?key:[key]).map(name=>[name,storage[name]]))),set:async(value:any)=>Object.assign(storage,structuredClone(value))}},
+      runtime:{id:'test-extension',onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),getManifest:()=>({version:'test'}),getURL:(path:string)=>`chrome-extension://test-extension/${path}`,getContexts:async()=>[{}],sendMessage:async()=>{}},
+      webRequest:{onBeforeRequest:event('before'),onCompleted:event('complete'),onErrorOccurred:event('error')},
+      tabs:{query:async()=>Object.values(tabs),get:async(id:number)=>{const wait=gate;gate=null;if(wait)await wait;return {...tabs[id]};},
+        sendMessage:async(id:number,message:any)=>{statusMessages.push({id,...message});},onRemoved:event('removed'),onUpdated:event('updated'),onActivated:event('activated'),update:async()=>{focusEffects++;}},
+      windows:{get:async()=>{const hook=beforeWindowRead;beforeWindowRead=null;hook?.();return {focused};},onFocusChanged:event('focused'),update:async()=>{focusEffects++;}},
+      scripting:{executeScript:async()=>[{result:{ok:true}}]},
+      notifications:{create:async(id:string,options:any)=>{
+        notices.push({id,options});
+        if(deferCreates)return new Promise<string>(resolve=>pending.push({id,resolve:(result)=>{created.add(id);resolve(result);}}));
+        created.add(id);return id;
+      },clear:async(id:string)=>{cleared.push(id);return created.delete(id);},onClicked:event('clicked'),onClosed:event('closed')}
+    };
+    const ctx=createContext({chrome,console,URL,setTimeout,clearTimeout,Date:class extends Date{static now(){return 123456;}}});
+    Object.assign(ctx,{importScripts:(name:string)=>runInContext(readFileSync(`extension/${name}`,'utf8'),ctx)});
+    runInContext(worker,ctx);
+    const sender=(tabId=7)=>({frameId:0,tab:{...tabs[tabId]}});
+    const request=(type:string,url=tabs[7].url,origin=sender(),extra:any={})=>new Promise<any>(resolve=>callbacks.message({type,url,...extra},origin,resolve));
+    const startRequest=(url=tabs[7].url)=>{
+      const startedAt=++requestSequence;
+      callbacks.before({tabId:7,method:'POST',timeStamp:startedAt,documentUrl:url,url:'https://chatgpt.com/backend-api/f/conversation'});
+      return startedAt;
+    };
+    return {callbacks,sender,
+      emit:async(tabId:number,key:string,isError=true)=>{callbacks.message({type:isError?'CHATGPT_RESPONSE_ERROR':'CHATGPT_RESPONSE_COMPLETE',url:tabs[tabId].url,sessionTitle:'Title',response:'Result',completionKey:key,fingerprint:key},sender(tabId));await flush();},
+      request,startRequest,manual:(url=tabs[7].url)=>request('CHATGPT_MANUAL_SEND',url,sender(),{startedAt:startRequest(url)})};
+  }
+  let h=boot();await flush();
+  await h.emit(7,'a-1');await h.emit(7,'a-2');await h.emit(8,'b-1');
+  const aIds=notices.slice(0,2).map(n=>n.id),bId=notices[2].id;
+  assert.equal(new Set(aIds).size,2,'multiple alerts in one chat have distinct durable IDs');
+  const oldRevision=(await h.request('CHATGPT_STATUS_GET',a)).revision;
+  tabs[7].active=false;
+  await h.request('CHATGPT_PAGE_RETURNED',a);assert.equal(cleared.length,0,'an inactive tab cannot clear notifications');
+  tabs[7].active=true;focused=false;
+  await h.request('CHATGPT_PAGE_RETURNED',a);assert.equal(cleared.length,0,'an unfocused window cannot clear notifications');
+  focused=true;
+  h=boot();await flush();
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'error','tab state survives worker restart');
+  await h.request('CHATGPT_PAGE_RETURNED',a);
+  assert.ok(aIds.every(id=>!created.has(id)),'a visit clears every persisted notification for that chat');
+  assert.ok(created.has(bId),'a matching visit leaves another chat notification alone');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'error','focus does not reset the tab indicator');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).revision,oldRevision);
+  const staleSender=h.sender();tabs[7].url=b;
+  assert.equal((await h.request('CHATGPT_PAGE_RETURNED',a,staleSender)).ok,false,'a route-changed sender cannot clear its old chat');
+  assert.ok(created.has(bId));
+  tabs[7].url=a;
+  const reset=await h.manual(a);
+  await flush();
+  assert.equal(reset.status,null);assert.ok(reset.revision>oldRevision);
+  assert.ok(statusMessages.some(message=>message.type==='CHATGPT_STATUS_CHANGED'&&message.url===a&&message.status===null));
+  assert.equal(focusEffects,0,'notification retirement never activates a tab or focuses a window');
+
+  deferCreates=true;
+  await h.emit(7,'pending-old');
+  const old=pending.shift()!;
+  await h.request('CHATGPT_PAGE_RETURNED',a);
+  await h.emit(7,'pending-new',false);
+  const fresh=pending.shift()!;
+  old.resolve(old.id);fresh.resolve(fresh.id);await flush();
+  assert.equal(created.has(old.id),false,'a return before create resolves clears its eventual notification');
+  assert.equal(created.has(fresh.id),true,'a later generation is not cleared by the earlier return');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'success');
+  deferCreates=false;
+  let release:()=>void=()=>{};
+  gate=new Promise<void>(resolve=>{release=resolve;});
+  const visit=h.request('CHATGPT_PAGE_RETURNED',a);
+  await h.emit(7,'after-return',false);
+  const afterReturn=notices.at(-1)!.id;
+  release();await visit;
+  assert.ok(created.has(afterReturn),'async focus verification does not swallow a later event');
+  gate=new Promise<void>(resolve=>{release=resolve;});
+  const manual=h.manual(a);
+  await h.emit(7,'after-manual',false);
+  const afterManual=notices.at(-1)!.id;
+  release();await manual;
+  assert.ok(created.has(afterManual));
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'success','a newer result survives an older manual reset');
+  const fastStartedAt=h.startRequest(a);
+  await h.emit(7,'fast-before-manual-message',false);
+  const fast=notices.at(-1)!.id;
+  assert.equal((await h.request('CHATGPT_MANUAL_SEND',a,h.sender(),{startedAt:fastStartedAt+1})).ok,false);
+  const lateReset=await h.request('CHATGPT_MANUAL_SEND',a,h.sender(),{startedAt:fastStartedAt});
+  assert.equal(lateReset.status.kind,'success','a fast result before delayed MANUAL_SEND survives the earlier request fence');
+  assert.ok(created.has(fast));
+  assert.equal((await h.request('CHATGPT_MANUAL_SEND',a,h.sender(),{startedAt:fastStartedAt})).ok,false,'one captured request cannot be replayed as a later reset');
+  h.callbacks.activated({tabId:7});await flush();
+  assert.equal(created.has(afterManual),false,'native tab activation clears a visible chat');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'success');
+  await h.emit(7,'window-return');focused=false;
+  h.callbacks.focused(1);await flush();assert.ok(created.has(notices.at(-1)!.id));
+  focused=true;h.callbacks.focused(1);await flush();assert.equal(created.has(notices.at(-1)!.id),false);
+  await h.emit(7,'closed-live');
+  const closed=notices.at(-1)!.id,revisionBeforeClose=(await h.request('CHATGPT_STATUS_GET',a)).revision;
+  const journalBefore=JSON.stringify(Object.fromEntries(Object.entries(storage).filter(([key])=>key.startsWith('chatgpt-journal:event:'))));
+  created.delete(closed);h.callbacks.closed(closed,true);await flush();
+  assert.ok(!storage[`chatgpt-status:${a}`].notifications.some((item:any)=>item.id===closed));
+  assert.ok(storage[`chatgpt-status:${b}`].notifications.some((item:any)=>item.id===bId));
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'error');
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).revision,revisionBeforeClose);
+  assert.equal(JSON.stringify(Object.fromEntries(Object.entries(storage).filter(([key])=>key.startsWith('chatgpt-journal:event:')))),journalBefore,'OS closure does not rewrite the journal');
+  deferCreates=true;await h.emit(7,'closed-before-create-reply');
+  const pendingClose=pending.shift()!;
+  created.add(pendingClose.id);created.delete(pendingClose.id);h.callbacks.closed(pendingClose.id,true);await flush();
+  assert.equal(storage[`chatgpt-status:${a}`].notifications.find((item:any)=>item.id===pendingClose.id).closed,true,'an unresolved create retains a closed tombstone');
+  pendingClose.resolve(pendingClose.id);await flush();
+  assert.equal(created.has(pendingClose.id),false,'a late create reply cannot resurrect a closed notification');
+  assert.ok(!storage[`chatgpt-status:${a}`].notifications.some((item:any)=>item.id===pendingClose.id));
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'error');deferCreates=false;
+  await h.emit(7,'window-check-route');
+  const switched=notices.at(-1)!.id;
+  beforeWindowRead=()=>{tabs[7].url=b;};
+  await h.request('CHATGPT_PAGE_RETURNED',a);
+  assert.ok(created.has(switched),'a route change while window focus is checked must not clear the earlier chat');
+  tabs[7].url=a;
+  const emitting=h.emit(7,'captured-source');tabs[7].url=b;await emitting;
+  const captured=notices.at(-1)!.id;
+  assert.ok(storage[`chatgpt-status:${a}`].notifications.some((item:any)=>item.id===captured),'an async create keeps its captured source chat');
+  assert.ok(!storage[`chatgpt-status:${b}`].notifications.some((item:any)=>item.id===captured));
+  h.callbacks.updated(7,{url:b},{...tabs[7]});await flush();
+  assert.ok(created.has(captured),'a route change clears the visited chat, never the previous source');
+  assert.equal(created.has(bId),false);
+  await h.callbacks.clicked(captured);
+  assert.equal(focusEffects,0,'clicking an old alert never focuses an unrelated chat now occupying that tab');
+  console.log('PASS: durable per-chat status and all notification IDs, restart, active/focused route guards, pending-create/generation races, manual-only status reset and no focus stealing');
+}
+async function statusMigrationCheck() {
+  const url=(name:string)=>`https://chatgpt.com/c/legacy-${name}`;
+  const eventKey=(sequence:number)=>`chatgpt-journal:event:${String(sequence).padStart(12,'0')}`;
+  const statusKey=(name:string)=>`chatgpt-status:${url(name)}`;
+  const storage:Record<string,any>={},rows:any[]=[];
+  const push=(row:any)=>{const sequence=rows.length+1;const value={schema:1,sequence,recordedAt:1000,...row};rows.push(value);storage[eventKey(sequence)]=value;};
+  const notice=(tabId:number,name:string,response:string,isError=true)=>push({kind:isError?'notification.requested':'response.complete',sourceUrl:url(name),tabId,title:`${name} - ChatGPT`,response});
+  const result=(tabId:number,name:string,id:string,message:string,isError=true)=>push({kind:'notification.result',sourceUrl:url(name),tabId,notificationId:id,notification:'fulfilled',isError,title:`${isError?'❌ ':''}${name}`,message});
+  const a1='chatgpt-prompt-bound:7:legacy-a-1',a2='chatgpt-prompt-bound:7:legacy-a-2',b='chatgpt-prompt-bound:8:legacy-b';
+  const bodyMismatch='chatgpt-prompt-bound:9:unmatched-body',urlMismatch='chatgpt-prompt-bound:10:unmatched-url',unknown='chatgpt-prompt-bound:99:unknown',delayed='chatgpt-prompt-bound:20:delayed-a';
+  notice(7,'a','First alert');result(7,'a',a1,'First alert');
+  notice(8,'b','Completed',false);result(8,'b',b,'Completed',false);
+  notice(9,'c','Captured error');result(9,'c',bodyMismatch,'Another error');
+  notice(10,'d','Error with captured URL');
+  push({kind:'notification.result',sourceUrl:'',tabId:10,notificationId:urlMismatch,notification:'fulfilled',isError:true,title:'❌ d',message:'Error with captured URL'});
+  notice(11,'e','Enter alone');push({kind:'retry.manual_reset',sourceUrl:url('e'),tabId:11,eventAt:2000});
+  notice(12,'f','Manual request');push({kind:'retry.manual_reset',sourceUrl:url('f'),tabId:12,eventAt:2000});
+  push({kind:'request.started',sourceUrl:url('f'),tabId:12,eventAt:2500,automatic:false});
+  notice(13,'g','Automatic request');push({kind:'retry.manual_reset',sourceUrl:url('g'),tabId:13,eventAt:2000});
+  push({kind:'request.started',sourceUrl:url('g'),tabId:13,eventAt:2500,automatic:true});
+  notice(14,'h','Expired intent');push({kind:'retry.manual_reset',sourceUrl:url('h'),tabId:14,eventAt:2000});
+  push({kind:'request.started',sourceUrl:url('h'),tabId:14,eventAt:14000,automatic:false});
+  notice(15,'i','Different destination');push({kind:'retry.manual_reset',sourceUrl:url('i'),tabId:15,eventAt:2000});
+  push({kind:'request.started',sourceUrl:url('another'),tabId:15,eventAt:2500,automatic:false});
+  notice(16,'k','Older than existing status');
+  push({kind:'notification.requested',sourceUrl:url('spa-a'),tabId:20,title:'Same - ChatGPT',response:'Identical response'});
+  push({kind:'tab.updated',sourceUrl:url('spa-b'),observedTabUrl:url('spa-b'),tabId:20,changes:{url:url('spa-b')}});
+  push({kind:'notification.requested',sourceUrl:url('spa-b'),tabId:20,title:'Same - ChatGPT',response:'Identical response'});
+  push({kind:'notification.result',sourceUrl:url('spa-b'),tabId:20,notificationId:delayed,notification:'fulfilled',isError:true,title:'❌ Same',message:'Identical response'});
+  while(rows.length<125)push({kind:'handoff.navigating',sourceUrl:url('private'),text:'Private synthetic history\n'.repeat(100)});
+  notice(7,'a','Latest alert');result(7,'a',a2,'Latest alert');
+  storage['chatgpt-journal:meta']={sequence:rows.length,retrySchema:1,retryByChat:{}};
+  const existing={url:url('k'),revision:999,sequence:999,returnedThrough:0,status:{kind:'success',eventAt:9000,sequence:999},notifications:[]};
+  storage[statusKey('k')]=structuredClone(existing);
+  const immutable=structuredClone(rows),active=new Set([a1,a2,b,bodyMismatch,urlMismatch,unknown,delayed]);
+  const reads:(string|string[]|null)[]=[],writes:Record<string,any>[]=[],cleared:string[]=[];
+  let getAllCalls=0,createCalls=0;
+  function boot() {
+    const callbacks:Record<string,any>={};
+    const event=(name:string)=>({addListener:(fn:any)=>{callbacks[name]=fn;}});
+    const tab={id:7,url:url('a'),active:true,windowId:1};
+    const chrome={
+      storage:{local:{get:async(key:string|string[]|null)=>{reads.push(key);assert.notEqual(key,null,'migration must never load all storage');return structuredClone(Object.fromEntries((Array.isArray(key)?key:[key as string]).map(name=>[name,storage[name]])));},
+        set:async(value:Record<string,any>)=>{writes.push(structuredClone(value));Object.assign(storage,structuredClone(value));}}},
+      runtime:{id:'test-extension',onMessage:event('message'),onInstalled:event('installed'),onStartup:event('startup'),getManifest:()=>({version:'test'}),getURL:(path:string)=>path,getContexts:async()=>[{}],sendMessage:async()=>{}},
+      webRequest:{onBeforeRequest:event('before'),onCompleted:event('complete'),onErrorOccurred:event('error')},
+      tabs:{get:async()=>tab,query:async()=>[tab],sendMessage:async()=>{},onRemoved:event('removed')},windows:{get:async()=>({focused:true})},
+      notifications:{getAll:async()=>{getAllCalls++;return Object.fromEntries(Array.from(active,id=>[id,{}]));},clear:async(id:string)=>{cleared.push(id);return active.delete(id);},create:async()=>{createCalls++;throw new Error('Migration must not renotify');},onClicked:event('clicked')}
+    };
+    const ctx=createContext({chrome,console,URL,setTimeout,clearTimeout});
+    Object.assign(ctx,{importScripts:(name:string)=>runInContext(readFileSync(`extension/${name}`,'utf8'),ctx)});
+    runInContext(worker,ctx);
+    return {ctx,tab,visit:()=>new Promise<any>(resolve=>callbacks.message({type:'CHATGPT_PAGE_RETURNED',url:tab.url},{frameId:0,tab},resolve))};
+  }
+  let h=boot();await pause();
+  const first=runInContext(`readChatStatus(${JSON.stringify(url('a'))})`,h.ctx);
+  const second=runInContext(`readChatStatus(${JSON.stringify(url('b'))})`,h.ctx);
+  const live=runInContext(`reserveChatNotification(${JSON.stringify(url('a'))},7,'success',9000,statusReceipt())`,h.ctx);
+  assert.equal((await first).status.kind,'error');assert.equal((await second).status.kind,'success');
+  const reservation=await live;
+  Object.assign(h.ctx,{ticket:reservation.ticket});await runInContext('completeChatNotification(ticket,false)',h.ctx);
+  assert.equal(storage[statusKey('a')].status.kind,'success','a live update queued during migration cannot be overwritten by its seed');
+  assert.equal(storage[statusKey('a')].notifications.length,2,'all proven active legacy IDs are imported');
+  assert.equal(storage[statusKey('c')].notifications.length,0);assert.equal(storage[statusKey('d')].notifications.length,0);
+  assert.equal(storage[statusKey('spa-a')].status.kind,'error');assert.equal(storage[statusKey('spa-b')].status.kind,'error');
+  assert.equal(storage[statusKey('spa-b')].notifications.length,0,'a delayed legacy result cannot borrow the later SPA chat identity even with identical title/body');
+  assert.equal(storage[statusKey('e')].status.kind,'error','an Enter reset without a request preserves the indicator');
+  assert.equal(storage[statusKey('f')].status,null,'a matching actual manual request clears the seed');
+  for(const name of ['g','h','i'])assert.equal(storage[statusKey(name)].status.kind,'error');
+  assert.deepEqual(storage[statusKey('k')],existing,'existing live records are never replaced');
+  const migrated=writes.filter(value=>value['chatgpt-status:migration']);
+  assert.equal(migrated.length,1,'concurrent effects share one migration');
+  assert.equal(migrated[0]['chatgpt-status:migration'].schema,1);
+  assert.ok(migrated[0][statusKey('a')]&&migrated[0][statusKey('b')],'seeds and marker commit in one write');
+  assert.ok(!Object.hasOwn(migrated[0],statusKey('k')));
+  assert.equal(getAllCalls,1);assert.equal(createCalls,0);assert.equal(cleared.length,0,'migration itself only binds existing notifications');
+  assert.ok(reads.some(value=>Array.isArray(value)&&value.length===50));
+  assert.ok(reads.every(value=>!Array.isArray(value)||value.length<=50),'journal and status reads are bounded');
+  await h.visit();
+  assert.ok(!active.has(a1)&&!active.has(a2),'a genuine visit clears every proven imported notification for its chat');
+  assert.ok(active.has(b),'another chat retains its notification');
+  assert.ok(active.has(bodyMismatch)&&active.has(urlMismatch)&&active.has(unknown),'uncertain IDs remain untracked and untouched');
+  assert.equal(storage[statusKey('a')].status.kind,'success','a visit does not clear imported or newer status');
+  h.tab.url=url('spa-b');await h.visit();assert.ok(active.has(delayed),'visiting B never clears the delayed alert from A');
+  for(let index=0;index<immutable.length;index++)assert.deepEqual(storage[eventKey(index+1)],immutable[index],'immutable journal rows never change');
+  const batchReads=reads.filter(value=>Array.isArray(value)).length;
+  h=boot();await pause();await runInContext(`readChatStatus(${JSON.stringify(url('a'))})`,h.ctx);
+  assert.equal(getAllCalls,1);assert.equal(reads.filter(value=>Array.isArray(value)).length,batchReads,'restart sees the durable migration marker and does not rescan');
+  console.log('PASS: one atomic bounded journal status migration, exact active legacy notification binding, manual-request proof, existing state protection, live race and immutable history');
+}
 if(process.argv[2]!=='worker') await domCheck();
 await workerCheck();
 await popupRecoveryCheck();
+await notificationStatusCheck();
+await statusMigrationCheck();
