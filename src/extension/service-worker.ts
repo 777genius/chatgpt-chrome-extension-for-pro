@@ -193,6 +193,20 @@ declare function inspectChatAttachment(fileName:string):SWProof;
 declare function inspectHandoffAcceptance(...args:unknown[]):SWProof;
 declare function controlChatComposer(...args:unknown[]):SWProof;
 declare function inspectCompletedTurn(url:string):SWProof;
+function workerErrorMessage(cause:unknown):string {
+  if(cause && (typeof cause==='object'||typeof cause==='function')) {
+    const message=Reflect.get(cause,'message');
+    if(message)return String(message);
+  }
+  return String(cause);
+}
+function workerErrorCode(cause:unknown):string|undefined {
+  if(cause && (typeof cause==='object'||typeof cause==='function')) {
+    const code=Reflect.get(cause,'code');
+    return typeof code==='string'?code:undefined;
+  }
+  return undefined;
+}
 importScripts('page-probe.js');
 importScripts('completion-probe.js');
 importScripts('completion-checkpoint.js');
@@ -281,7 +295,7 @@ async function playCompletionSound():Promise<void> {
     } catch (error) {
       // The offscreen document can exist before its listener is ready after
       // an extension update. Retry only when no receiver handled the message.
-      if (attempt === 3 || !/receiving end does not exist|could not establish connection/i.test(String(error?.message || error))) throw error;
+      if (attempt === 3 || !/receiving end does not exist|could not establish connection/i.test(workerErrorMessage(error))) throw error;
       await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
     }
   }
@@ -434,7 +448,7 @@ async function installErrorWatchers():Promise<void> {
       // must replace invalidated listeners, even if its isolated global remains.
       await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>{try{globalThis.__chatgptNotifierDispose?.();}catch{}globalThis.__chatgptNotifierDispose=null;globalThis.__chatgptNotifierVersion=null;}});
       await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','content-script.js']}); }
-    catch (error) { journalInBackground({kind:'watcher.unavailable',reason:String(error.message || error)},tab); }
+    catch (error) { journalInBackground({kind:'watcher.unavailable',reason:workerErrorMessage(error)},tab); }
   }));
 }
 const watcherBootstrap=chrome.storage.session?ChatGPTWatcherBootstrap.create({session:chrome.storage.session,version:chrome.runtime.getManifest().version,install:installErrorWatchers}):null;
@@ -531,7 +545,7 @@ async function handleHandoffMessage(message:SWMessage,tabId:number):Promise<SWPr
         // replace the original preparation error with a misleading exception.
         const [failedRecordSaved]=await Promise.allSettled([
           chrome.storage.local.set({[key]:{...record,stage:'failed',
-            reason:'Goal handoff could not be prepared: '+String(error?.message||error)}}),
+            reason:'Goal handoff could not be prepared: '+workerErrorMessage(error)}}),
           chrome.storage.local.remove(marker)
         ]);
         // Only after the terminal failed record is durable can we drop the
@@ -623,7 +637,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(message.action==='start')return goalController.start({url,tabId:tab.id,goal:message.goal,rules:message.rules,
         maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
       return goalController.control({action:message.action,url,tabId:tab.id});
-    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:workerErrorMessage(error)}));
     return true;
   }
   if(['CHATGPT_GOAL_CONTEXT','CHATGPT_GOAL_CHECK','CHATGPT_GOAL_INTENT',
@@ -647,7 +661,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         url,tabId,id:message.goalId,operationId:message.operationId,status:message.status,
         reason:message.reason,newPromptKey:message.newPromptKey});
       return goalController.manual({url,tabId});
-    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:workerErrorMessage(error)}));
     return true;
   }
   if (['CHATGPT_HANDOFF_TITLE_INFO','CHATGPT_HANDOFF_RENAME_RECOVER'].includes(message?.type)) {
@@ -681,12 +695,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return {ok:false,reason:'Чат или название изменились; откройте меню расширения заново'};
       }
       return renameSavedHandoff(tab.id,record.id,{recoverTemporaryTarget:true});
-    })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message||error)}));
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type==='CHATGPT_RETRY_STATE') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId>0 || !message.url?.startsWith('https://chatgpt.com/')) return;
-    readRetryState(message.url).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:String(error.message||error)}));
+    readRetryState(message.url).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:workerErrorMessage(error)}));
     return true;
   }
   if(['CHATGPT_RETRY_DRAFT_GET','CHATGPT_RETRY_DRAFT_CLAIM'].includes(message?.type)) {
@@ -701,7 +715,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type==='CHATGPT_HANDOFF_RENAME') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId>0) return;
-    renameSavedHandoff(sender.tab.id,message.id).then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message||error)}));
+    renameSavedHandoff(sender.tab.id,message.id).then(sendResponse).catch(error=>sendResponse({ok:false,reason:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_WAIT') {
@@ -730,7 +744,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const result=results[0]?.result || {ok:false,reason:'Нет подтверждения остановки'};
       await appendJournal({kind:result.ok&&(result.stopped===true||result.idle===true)?'recovery.stop_result':'recovery.stop_refused',operationId:message.operationId,attemptId:message.attemptId,requestId:message.requestId,stopped:result.stopped,idle:result.idle,proof:result.proof,recoveryBinding:result.recoveryBinding,reason:result.reason},sender.tab);
       return result;
-    })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message || error)}));
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_COMPOSER_CONTROL') {
@@ -790,12 +804,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         sendResponse(result);
       })
-      .catch(error=>sendResponse({ok:false,unknown:pageDispatchStarted,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),reason:String(error.message || error)}));
+      .catch(error=>sendResponse({ok:false,unknown:pageDispatchStarted,...(workerErrorCode(error)==='RETRY_DUPLICATE'?{duplicate:true}:{}),reason:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_JOURNAL_READ') {
     if (sender.tab?.url?.startsWith('https://chatgpt.com/')) return;
-    readJournal().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error.message || error)}));
+    readJournal().then(sendResponse).catch(error=>sendResponse({ok:false,error:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_LOG_EVENT') {
@@ -807,7 +821,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
           promptKey:event.newPromptKey,goalHandoff:event.goalHandoff===true});
       sendResponse(result);
-    }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
+    }).catch(error=>sendResponse({ok:false,...(workerErrorCode(error)==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_INSPECT_ATTACHMENT') {
@@ -830,7 +844,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (['CHATGPT_HANDOFF_GET', 'CHATGPT_HANDOFF_BEGIN', 'CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(message?.type)) {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     handleHandoffMessage(message, sender.tab.id).then(sendResponse)
-      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+      .catch((error) => sendResponse({ ok: false, error: workerErrorMessage(error) }));
     return true;
   }
   if (message?.type === 'CHATGPT_HANDOFF_DOWNLOAD') {
@@ -1073,7 +1087,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       await visitVisibleChat(sender.tab.id,url,receipt);
       return {ok:true,...await readChatStatus(url)};
-    })().then(result=>sendResponse?.(result)).catch(error=>sendResponse?.({ok:false,reason:String(error.message||error)}));
+    })().then(result=>sendResponse?.(result)).catch(error=>sendResponse?.({ok:false,reason:workerErrorMessage(error)}));
     return true;
   }
 
@@ -1082,7 +1096,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       isTest: true,
       message: 'If you heard the chime and saw this notification, both output channels work.'
     }).then(() => sendResponse({ ok: true }))
-      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+      .catch((error) => sendResponse({ ok: false, error: workerErrorMessage(error) }));
     return true;
   }
 });
