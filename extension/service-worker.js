@@ -12,6 +12,9 @@ importScripts('status-animation.js');
 importScripts('deferred-task-status.js');
 importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
+importScripts('goal-policy.js');
+importScripts('goal-store.js');
+const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});
 
 initializeJournal('worker-start').catch(console.error);
 
@@ -283,7 +286,20 @@ const handoffWrites = new Map();
 function handoffKey(tabId) { return `chatgpt-handoff:${tabId}`; }
 async function handleHandoffMessage(message, tabId) {
   const key = handoffKey(tabId);
-  if (message.type === 'CHATGPT_HANDOFF_GET') return { ok: true, record: (await chrome.storage.local.get(key))[key] || null };
+  if (message.type === 'CHATGPT_HANDOFF_GET') {
+    // A persisted navigating/sending handoff may precede the Goal's phase
+    // write if MV3 suspended the worker between durable storage operations.
+    // Complete the exact same transition before allowing the content script
+    // to resume its native handoff. Never redeliver a send intent.
+    const pending=handoffWrites.get(tabId);
+    if(pending)await pending.catch(()=>{});
+    const saved=(await chrome.storage.local.get(key))[key]||null;
+    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation','sent'].includes(saved.stage))
+      await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
+    if(saved?.stage==='sent'&&saved.targetUrl)
+      await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId,acceptedUserId:saved.acceptance?.messageId});
+    return {ok:true,record:saved};
+  }
   const previous = handoffWrites.get(tabId) || Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     const current = (await chrome.storage.local.get(key))[key];
@@ -297,11 +313,38 @@ async function handleHandoffMessage(message, tabId) {
       const lineage=(await chrome.storage.local.get(lineageKey))[lineageKey];
       const naming=ChatGPTHandoffTitle.planNext({sourceUrl:record.sourceUrl,sourceTitle:record.sourceTitle,lineage});
       record={...record,naming};
+      // Persist the full handoff and its idempotent marker before moving the
+      // Goal into the handoff phase. A failed journal/storage write must not
+      // strand the Goal waiting on a transfer that never started.
       await appendJournal({kind:'handoff.navigating', operationId:record.id, sourceUrl:record.sourceUrl,
         text:record.text, prompt:record.prompt, asFile:record.asFile, fileName:record.fileName,
         draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,naming}, {id:tabId});
       // Save the full text BEFORE navigating away from the source page.
       await chrome.storage.local.set({ [key]: { ...record, stage: 'navigating' }, [marker]: record.id });
+      try {
+        await goalController.handoffBegin({sourceUrl:record.sourceUrl,handoffId:record.id,tabId});
+      } catch(error) {
+        // No native navigation has been issued yet. Mark the saved handoff
+        // failed and keep the user-facing recovery copy instead of a phantom
+        // handoff that the Goal cannot follow.
+        // Both cleanup steps must be attempted. Neither cleanup failure may
+        // replace the original preparation error with a misleading exception.
+        const [failedRecordSaved]=await Promise.allSettled([
+          chrome.storage.local.set({[key]:{...record,stage:'failed',
+            reason:'Goal handoff could not be prepared: '+String(error?.message||error)}}),
+          chrome.storage.local.remove(marker)
+        ]);
+        // Only after the terminal failed record is durable can we drop the
+        // shared source claim: no native navigation/click was attempted.
+        // If the failed-record write was uncertain, leave the claim fenced.
+        if(failedRecordSaved.status==='fulfilled') {
+          try {
+            await appendJournal({kind:'handoff.pre_navigation_cancelled',
+              operationId:record.id,sourceUrl:record.sourceUrl},{id:tabId,url:record.sourceUrl});
+          } catch {}
+        }
+        throw error;
+      }
       return { ok: true, record: { ...record, stage: 'navigating' } };
     }
     if (!current || current.id !== message.id) throw new Error('Handoff changed');
@@ -321,7 +364,10 @@ async function handleHandoffMessage(message, tabId) {
     }
     let acceptance=null;
     if(message.type==='CHATGPT_HANDOFF_RECONCILE'||message.stage==='sent') {
-      if(current.stage==='sent')return {ok:true,record:current,confirmed:true};
+      if(current.stage==='sent'){
+        await goalController.handoffConfirm({sourceUrl:current.sourceUrl,targetUrl:current.targetUrl,handoffId:current.id,tabId,acceptedUserId:current.acceptance?.messageId});
+        return {ok:true,record:current,confirmed:true};
+      }
       if(!['sending','awaiting-confirmation'].includes(current.stage))return {ok:true,record:current,confirmed:false};
       const receipt=current.sendReceipt;
       if(receipt?.operationId===current.id&&typeof receipt.submittedText==='string'&&receipt.submittedText&&Number.isFinite(receipt.clickedAt)) {
@@ -353,6 +399,8 @@ async function handleHandoffMessage(message, tabId) {
     const lineageUrl=message.stage==='sent'&&record.naming?ChatGPTHandoffTitle.chatUrl(record.targetUrl):'';
     await chrome.storage.local.set({ [key]: record,
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
+    if(message.stage==='sent')
+      await goalController.handoffConfirm({sourceUrl:record.sourceUrl,targetUrl:record.targetUrl,handoffId:record.id,tabId,acceptedUserId:record.acceptance?.messageId});
     return { ok: true, record, notifyAwaiting:message.stage==='awaiting-confirmation'&&!current.awaitingNotifiedAt };
   });
   handoffWrites.set(tabId, write);
@@ -360,6 +408,48 @@ async function handleHandoffMessage(message, tabId) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if(message?.type==='CHATGPT_GOAL_CONTROL') {
+    if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('popup.html')) {
+      sendResponse?.({ok:false,error:'Goal управляется только из popup расширения'});
+      return false;
+    }
+    (async()=>{
+      const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+      const url=ChatGPTGoalPolicy.canonical(tab?.url);
+      if(typeof tab?.id!=='number'||!url)throw Error('Откройте сохранённый чат ChatGPT');
+      if(message.action==='get')return {ok:true,record:await goalController.get(url),tabId:tab.id,url};
+      if(message.expectedTabId!==tab.id||message.expectedUrl!==url)
+        throw Error('Активный чат изменился после открытия popup; откройте меню расширения ещё раз');
+      if(message.action==='start')return goalController.start({url,tabId:tab.id,goal:message.goal,rules:message.rules,
+        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
+      return goalController.control({action:message.action,url,tabId:tab.id});
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    return true;
+  }
+  if(['CHATGPT_GOAL_CONTEXT','CHATGPT_GOAL_CHECK','CHATGPT_GOAL_INTENT',
+      'CHATGPT_GOAL_STATUS','CHATGPT_GOAL_MANUAL','CHATGPT_GOAL_RECOVER'].includes(message?.type)) {
+    const tabId=sender.tab?.id,url=ChatGPTGoalPolicy.canonical(sender.tab?.url);
+    if(sender.frameId>0||typeof tabId!=='number'||!url||
+        ChatGPTGoalPolicy.canonical(message.url)!==url) {
+      sendResponse?.({ok:false,error:'Goal chat binding mismatch'});
+      return false;
+    }
+    (async()=>{
+      if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+      if(message.type==='CHATGPT_GOAL_RECOVER')
+        return goalController.recoverTab({id:tabId,url});
+      if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:await goalController.context(url)};
+      if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
+        url,tabId,id:message.goalId,operationId:message.operationId});
+      if(message.type==='CHATGPT_GOAL_INTENT')return goalController.intent({
+        url,tabId,id:message.goalId,operationId:message.operationId,text:message.text,baselineKey:message.baselineKey});
+      if(message.type==='CHATGPT_GOAL_STATUS')return goalController.report({
+        url,tabId,id:message.goalId,operationId:message.operationId,status:message.status,
+        reason:message.reason,newPromptKey:message.newPromptKey});
+      return goalController.manual({url,tabId});
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    return true;
+  }
   if (['CHATGPT_HANDOFF_TITLE_INFO','CHATGPT_HANDOFF_RENAME_RECOVER'].includes(message?.type)) {
     if (sender.id!==chrome.runtime.id || sender.url!==chrome.runtime.getURL('popup.html')) {
       sendResponse({ok:false,reason:'Восстановление доступно только из меню расширения'});
@@ -458,6 +548,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (options.text !== 'доделай е2е' || options.fileName) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
           if(!active.sourceUrl||active.sourceUrl!==retryDraftUrl(options.url)||typeof active.promptKey!=='string'||!active.promptKey)throw new Error('Исходный запрос автоповтора не подтверждён');
           retryBinding={sourceUrl:active.sourceUrl,promptKey:active.promptKey};
+        } else if (active.kind === 'goal.send_intent') {
+          if(options.requireMax||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
+          const grant=await goalController.authorize({url:options.url,tabId:sender.tab.id,
+            id:active.goalId,operationId:options.operationId,text:options.text});
+          if(!grant?.ok)throw new Error('Goal более не разрешает отправку');
         } else if (active.kind === 'handoff.sending') {
           const key = handoffKey(sender.tab.id);
           const record = (await chrome.storage.local.get(key))[key];
@@ -465,6 +560,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               (options.fileName || null) !== (record.asFile ? record.fileName : null)) throw new Error('Текст не совпадает с сохранённой передачей');
         } else throw new Error('Отправка пользовательского черновика запрещена');
         await appendJournal({kind:'send.authorized',operationId:options.operationId,text:options.text,sourceUrl:options.url},sender.tab);
+        if(active.kind==='goal.send_intent'){
+          const fresh=await goalController.authorize({url:options.url,tabId:sender.tab.id,
+            id:active.goalId,operationId:options.operationId,text:options.text});
+          if(!fresh?.ok)throw new Error('Goal приостановлен перед отправкой');
+        }
       }
       pageDispatchStarted=options.action==='send';
       return chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:controlChatComposer,args:[options]});
@@ -502,7 +602,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
-    appendJournal(event,sender.tab).then(result=>{
+    appendJournal(event,sender.tab).then(async result=>{
+      if(['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
+        await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
+          promptKey:event.newPromptKey,goalHandoff:event.goalHandoff===true});
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
     return true;
@@ -649,6 +752,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isError&&!isWarning && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
     if (!isError&&!isWarning && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
+    if(!isError&&!isWarning) {
+      const goalAnswer={url:sourceUrl,tabId,completionKey:rawCompletionKey,
+        promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
+        rawExact:message.goalRawExact,userId:message.goalNativeUserId};
+      try {
+        const handoff=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
+        if(handoff?.id&&['sending','awaiting-confirmation','sent'].includes(handoff.stage)&&
+            ChatGPTGoalPolicy.canonical(handoff.sourceUrl)!==sourceUrl&&
+            ChatGPTGoalPolicy.canonical(sourceUrl)) {
+          await goalController.stageHandoffCompletion({sourceUrl:handoff.sourceUrl,
+            targetUrl:sourceUrl,handoffId:handoff.id,...goalAnswer});
+          if(handoff.stage==='sent')await goalController.handoffConfirm({sourceUrl:handoff.sourceUrl,
+            targetUrl:sourceUrl,handoffId:handoff.id,tabId,acceptedUserId:handoff.acceptance?.messageId});
+        }
+        await goalController.completion(goalAnswer);
+      } catch(error) { console.error('Goal completion reconciliation failed',error); }
+    }
     journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
       sourceUrl,warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
     const notification={tabId,title:`${isWarning?'⚠️ ':isError?'❌ ':''}${cleanSessionTitle(message.sessionTitle)}`,
