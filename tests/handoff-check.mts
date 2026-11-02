@@ -69,19 +69,23 @@ function probeCheck(){
  assert.deepEqual(result.messages.map((m:any)=>m.id),['a1','u1','u2','a2']);
  assert.equal(result.messages[3].text,'Full answer\nwith code');
  const unknown=document.createElement('span');unknown.textContent='Unknown error';document.querySelector('aside')!.prepend(unknown);
- assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry','Unknown error must override a generic Start new chat CTA');
- assert.equal(runInContext('inspectChatError(0,true).messages.length',ctx),0,'Unknown error must not capture a handoff payload');
+ assert.equal(runInContext('inspectChatError(0,true).action',ctx),'new-chat','Unknown error follows the explicit native Start new chat action');
+ assert.deepEqual(JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true).messages',ctx))),result.messages,'Unknown error reuses the same exact chronological last two user and assistant messages');
  unknown.textContent='Maximum conversation length reached';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'new-chat','a real length-limit CTA still uses handoff');unknown.remove();
 
  fiber.memoizedProps.children.props.id='chatgptConversations.responseError.retry';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry');
+ document.querySelector('aside')!.prepend(unknown);unknown.textContent='Unknown error';
+ assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry','Unknown with the native Retry action remains in the same chat');
+ fiber.memoizedProps.children.props.id='unknown';
+ assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry','a native Unknown fallback without Start new chat retains its same-chat policy');unknown.remove();
  fiber.memoizedProps.children.props.id='unknown';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'unknown');
  const delivery=document.createElement('aside') as any;delivery.setAttribute('role','alert');delivery.className='text-danger';delivery.textContent='配信がタイムアウトしました';
- const entry={isMostRecentTurn:true,isReadOnly:false,showRequestUserInputStatus:true,showPendingLoadingMessage:false,
+ const entry={id:'fallback-delivery',isMostRecentTurn:true,isReadOnly:false,showRequestUserInputStatus:true,showPendingLoadingMessage:false,
   turn:{status:'in_progress'},errorMessage:delivery.textContent};
- delivery.__reactFiber$test={memoizedProps:{entry},return:null};document.append(delivery);
+ delivery.__reactFiber$test={memoizedProps:{entry},return:null};const deliveryContainer=document.createElement('div');deliveryContainer.setAttribute('data-content-search-turn-key','fallback-delivery');deliveryContainer.append(delivery);document.append(deliveryContainer);
  assert.equal(runInContext('inspectChatError(1).action',ctx),'retry','native input delivery error works without a retry button');
  entry.isMostRecentTurn=false;assert.equal(runInContext('inspectChatError(1).action',ctx),'unknown');entry.isMostRecentTurn=true;
  entry.isReadOnly=true;assert.equal(runInContext('inspectChatError(1).action',ctx),'unknown');entry.isReadOnly=false;
@@ -100,12 +104,14 @@ function probeCheck(){
  assert.equal(runInContext('inspectChatError(1,true).action',ctx),'unknown','unrelated status must not authorize a retry');
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
-async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false){
+async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
  const loc={href:originalURL,pathname:'/c/source'};
  const notices:any[]=[],sends:string[]=[],updates:string[]=[];
+ const logs:any[]=[];
+ let begins=0;
  let stored:any=null;
  const storage:Record<string,any>={};
  const clock=testClock();
@@ -114,14 +120,17 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  Object.assign(window,{getSelection:()=>({removeAllRanges(){},addRange(){}})});
  class Transfer { items={add:(file:any)=>{this.files.push(file)}}; files:any[]=[]; }
  const runtime:any={id:'test-extension',onMessage:{addListener(){}},sendMessage:async(m:any)=>{
-   if(m.type==='CHATGPT_RETRY_STATE')return {ok:true,state:null};
+   if(m.type==='CHATGPT_RETRY_STATE')return {ok:true,state:restoredUnknown?{failures:[clock.now(),clock.now(),clock.now(),clock.now()],blocked:true,terminal:false,lastPromptKey:'/c/source|conversation-turn-0',lastAttemptId:'old-failed-request',reason:'4 retries exhausted'}:null};
    if(m.type==='CHATGPT_WAIT'){await new Promise<void>(resolve=>clock.setTimeout(resolve,m.delayMs));return {ok:true};}
    if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='send'){const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
-   if(m.type==='CHATGPT_LOG_EVENT')return {ok:true};
+   if(m.type==='CHATGPT_LOG_EVENT'){logs.push(m.event);return {ok:true};}
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?'ready':'missing'};
-   if(m.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'new-chat',messages,incomplete:false};
+   if(m.type==='CHATGPT_INSPECT_ERROR'){
+    if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
+    return {ok:true,action:'new-chat',messages,incomplete:false};
+   }
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
-    if(m.type==='CHATGPT_HANDOFF_BEGIN')assert.equal(loc.href,originalURL,'backup must precede navigation');
+    if(m.type==='CHATGPT_HANDOFF_BEGIN'){begins++;assert.equal(loc.href,originalURL,'backup must precede navigation');}
     if(m.type==='CHATGPT_HANDOFF_UPDATE')updates.push(m.stage);
     (context as any).handoffMessage=m;return runInContext('handleHandoffMessage(handoffMessage,7)',context);
    }
@@ -147,7 +156,8 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    }else{loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';}
  });
  runInContext(probe+'\n'+handoffWorker+'\n'+source,context);
- const alert=document.createElement('aside');alert.setAttribute('role','alert');alert.className='text-danger';alert.innerHTML='<div>最大長</div><button>新しいチャット</button>';
+ const alert=document.createElement('aside');alert.setAttribute('role','alert');alert.className='text-danger';alert.innerHTML=`<div>${restoredUnknown?'Unknown error':'最大長'}</div><button>新しいチャット</button>`;
+ if(restoredUnknown)(alert.querySelector('button')! as any).__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries:messages.map(m=>({id:m.id,turn:{items:[m.role==='user'?{type:'user-message',messageId:m.id,message:m.text}:{type:'assistant-message',phase:'final_answer',messageId:m.id,content:m.text}]}}))},return:null}};
  alert.querySelector('button')!.addEventListener('click',()=>{
    assert.ok(stored.text.includes('Earlier answer'),'source copy must be durable');
    loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';
@@ -176,6 +186,12 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,1,'only the source response error may set terminal error status');
  assert.equal(notices.filter(n=>n.type==='CHATGPT_OPERATION_WARNING').length,ambiguous||lateTarget?1:0,'uncertain transfer notifies once as operational metadata, never as a failed response');
  assert.equal(sends.length,1,'handoff sends once');assert.notEqual(sends[0],'доделай е2е');
+ if(restoredUnknown){
+   assert.equal(begins,1,'a restored failed prompt with exhausted retry budget starts one existing protected handoff');
+   assert.equal(logs.filter(event=>event.kind==='retry.planned').length,0,'terminal native CTA never resets or spends another same-chat retry');
+   assert.equal(logs.filter(event=>event.kind==='retry.suppressed').length,0,'restored prompt suppression cannot swallow an explicit new-chat action');
+   assert.ok(stored.text.includes('Unknown error'));assert.equal(stored.draft,'Saved draft\nsecond line');
+ }
  assert.equal(stored.stage,ambiguous?'awaiting-confirmation':'sent');
  assert.ok(stored.text.indexOf('Earlier answer')<stored.text.indexOf('First request'));
  assert.ok(stored.text.indexOf('First request')<stored.text.indexOf('Last request'));
@@ -201,4 +217,4 @@ const rich=parseHTML('<div id="e"><p>URL <span><span aria-hidden="true">icon</sp
 const richContext=createContext({document:rich.document,Node:rich.window.Node});runInContext(rawFunction,richContext);
 assert.equal(runInContext("rawEditorText(document.querySelector('#e'))",richContext),'URL https://example.com\n\nCode   spacing');
 console.log('PASS: exact draft serialization despite rich URL widgets and paragraph layout');
-probeCheck();await transferCheck();await transferCheck(true);await transferCheck(false,true);await transferCheck(false,false,true);await transferCheck(false,false,false,true);await transferCheck(false,false,false,false,true);
+probeCheck();await transferCheck();await transferCheck(true);await transferCheck(false,true);await transferCheck(false,false,true);await transferCheck(false,false,false,true);await transferCheck(false,false,false,false,true);await transferCheck(false,false,false,false,false,true);

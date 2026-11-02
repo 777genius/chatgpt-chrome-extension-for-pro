@@ -486,15 +486,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async()=>{
       const initial=await latestRequestReceipt(sender.tab.id);
       if(!matches(initial))return refuse('Запрос перед остановкой изменился');
-      await appendJournal({kind:'recovery.stop_intent',operationId:message.operationId,sourceUrl:url,attemptId:message.attemptId,requestId:message.requestId,promptKey:message.promptKey},sender.tab);
+      await appendJournal({kind:'recovery.stop_intent',operationId:message.operationId,sourceUrl:url,attemptId:message.attemptId,requestId:message.requestId,promptKey:message.promptKey,recoveryBinding:message.recoveryBinding||null},sender.tab);
       const [runtime]=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'ISOLATED',func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
       const tab=await chrome.tabs.get(sender.tab.id),current=manualRequestReceiptsByTab.get(sender.tab.id)||null;
       if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url||current!==initial||!matches(current)||
           runtime?.result?.attemptId!==message.attemptId||(runtime.result.requestId||null)!==(message.requestId||null))return refuse('Запрос перед остановкой изменился');
       const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectChatError,
-        args:[message.alertIndex,false,'stop-recovery',message.url,message.promptKey]});
+        args:[message.alertIndex,false,'stop-recovery',message.url,message.promptKey,message.recoveryBinding||null]});
       const result=results[0]?.result || {ok:false,reason:'Нет подтверждения остановки'};
-      await appendJournal({kind:result.ok&&result.stopped===true?'recovery.stop_result':'recovery.stop_refused',operationId:message.operationId,attemptId:message.attemptId,requestId:message.requestId,stopped:result.stopped,reason:result.reason},sender.tab);
+      await appendJournal({kind:result.ok&&(result.stopped===true||result.idle===true)?'recovery.stop_result':'recovery.stop_refused',operationId:message.operationId,attemptId:message.attemptId,requestId:message.requestId,stopped:result.stopped,idle:result.idle,proof:result.proof,recoveryBinding:result.recoveryBinding,reason:result.reason},sender.tab);
       return result;
     })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message || error)}));
     return true;
