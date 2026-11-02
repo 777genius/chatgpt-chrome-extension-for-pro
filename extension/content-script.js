@@ -411,6 +411,79 @@
     throw new Error('Редактор ChatGPT не подтвердил точный текст для отправки');
   }
 
+  // Dedicated Goal coordinator calls this once per persisted operation. The
+  // only actual click is still controlChatComposer in MAIN, behind the worker's
+  // consumed, journaled authorization. No draft is replaced by automation.
+  async function dispatchGoal(message) {
+    const url=message.url,operationId=message.operationId,text=message.text,id=message.goalId;
+    const sameChat=()=>runtimeAvailable()&&ChatGPTHandoffTitle.chatUrl(location.href)===url;
+    const status=(value,extra={})=>runtimeMessage({type:'CHATGPT_GOAL_STATUS',url,goalId:id,
+      operationId,status:value,...extra});
+    let editor=null,inserted=false,clicked=false,confirmed=false;
+    try {
+      if(!sameChat()||typeof text!=='string'||!text||!id||!operationId)throw Error('Goal изменил чат или операцию');
+      let grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
+      if(!grant?.ok)throw Error('Отправка Goal уже отменена');
+      if(isGenerating()||replacingDraft||pendingDrafts.has(location.pathname)||
+          handoffBusy||['sending','awaiting-confirmation','preparing','navigating'].includes(handoffRecord?.stage)||
+          currentErrors().length)throw Error('Чат занят или другой механизм восстановления активен');
+      editor=composer();
+      if(!editor||!isElementVisible(editor))throw Error('Поле сообщения недоступно');
+      if(composerHasAttachments(editor)||rawEditorText(editor)!=='')
+        throw Error('Черновик или вложение пользователя имеют приоритет; Goal остановлен без изменения ввода');
+      const baselineKey=latestPromptSnapshot()?.promptKey||'';
+      const baselineAttempt=globalThis.__chatgptNotifierAttemptId||'';
+      if(!sameChat()||composer()!==editor||isGenerating())throw Error('Чат изменён до подготовки');
+      replaceEditorText(editor,text);
+      inserted=true;
+      await waitForExactComposer(text,()=>sameChat()&&composer()===editor&&
+        rawEditorText(editor)===text&&!isGenerating()&&!composerHasAttachments(editor));
+      grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
+      if(!grant?.ok||!sameChat()||composer()!==editor||rawEditorText(editor)!==text||
+          composerHasAttachments(editor)||isGenerating())throw Error('Goal отменён до клика');
+      const intent=await runtimeMessage({type:'CHATGPT_GOAL_INTENT',url,goalId:id,
+        operationId,text,baselineKey});
+      if(!intent?.ok)throw Error(intent?.error||'Не удалось сохранить разрешение Goal');
+      if(!sameChat()||composer()!==editor||rawEditorText(editor)!==text||
+          composerHasAttachments(editor)||isGenerating())throw Error('Чат изменился после разрешения Goal');
+      // Treat a lost click acknowledgement as an UNKNOWN outcome.
+      rememberCompletionSendIntent();
+      clicked=true;
+      const sent=await inspectComposer(text,'send',{operationId});
+      if(sent?.ok===false&&!sent.unknown)clicked=false;
+      if(!sent?.ok||!sent.clicked)throw Error(sent?.reason||'Нет подтверждения единственного клика');
+      if(!(await status('clicked'))?.ok)throw Error('Не удалось зафиксировать результат клика');
+      const deadline=Date.now()+15000;
+      while(Date.now()<deadline) {
+        if(!sameChat())throw Error('Чат изменился при подтверждении отправки');
+        const freshKey=latestPromptSnapshot()?.promptKey||'';
+        const latestUser=turnNodes().filter(turn=>roleOf(turn)==='user').at(-1);
+        const rawUser=latestUser?.querySelector('[data-message-author-role="user"]')?.textContent||
+          latestUser?.textContent||'';
+        if(freshKey&&freshKey!==baselineKey&&normalize(rawUser)===normalize(text)&&
+            (globalThis.__chatgptNotifierAttemptId||'')!==baselineAttempt&&
+            composer()===editor&&rawEditorText(editor)==='') {
+          const result=await status('confirmed',{newPromptKey:freshKey});
+          if(!result?.ok)throw Error(result?.error||'Goal не подтвердил новое сообщение');
+          confirmed=true;
+          return;
+        }
+        await sleepUntilNextCheck();
+      }
+      throw Error('Не подтверждено новое сообщение с точным текстом Goal');
+    } catch(error) {
+      const reason=(clicked?'Неизвестный исход клика: ':'Отправка отменена: ')+String(error?.message||error);
+      await status('blocked',{reason});
+      if(!clicked&&inserted&&sameChat()&&composer()===editor&&rawEditorText(editor)===text&&
+          !composerHasAttachments(editor)&&!isGenerating()) {
+        try {replaceEditorText(editor,'');}catch{}
+      }
+      void audit('goal.dispatch_failed',{operationId,sourceUrl:url,reason});
+    } finally {
+      goalDispatchBusy=false;
+    }
+  }
+
   async function ensureMaxReasoning(operationId) {
     const url = location.href;
     const trigger = () => Array.from(pageRoot().querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(isElementVisible);
@@ -1349,6 +1422,16 @@
 
   function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_GOAL_DISPATCH') {
+      if(!message.url||ChatGPTHandoffTitle.chatUrl(location.href)!==message.url||goalDispatchBusy){
+        sendResponse?.({ok:false});
+        return;
+      }
+      goalDispatchBusy=true;
+      sendResponse?.({ok:true});
+      void dispatchGoal(message);
+      return;
+    }
     if(message?.type==='CHATGPT_STATUS_TICK'){sendResponse?.({ok:statusIndicator?.tick(message)||false});return;}
     if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
