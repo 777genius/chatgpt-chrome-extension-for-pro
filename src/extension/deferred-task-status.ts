@@ -61,7 +61,7 @@ interface DeferredMeta {
   // automation IDs from native React props are available there.
   function inspect(options: DeferredInspectOptions & {includeRoot:true}): DeferredSnapshotWithRoot;
   function inspect(options?: DeferredInspectOptions): DeferredSnapshot;
-  function inspect(options: DeferredInspectOptions={}): DeferredSnapshot {
+  function inspect(options: DeferredInspectOptions={}): DeferredSnapshot | DeferredSnapshotWithRoot {
     const document=options.document||globalThis.document;
     const url=options.url??globalThis.location?.href??'';
     const page=document.querySelector('[data-app-shell-active-page="true"]')||document;
@@ -189,7 +189,8 @@ interface DeferredMeta {
       if(pending&&generating){revision++;metadata=null;const previous=pending;consume(previous);pending=null;initial=null;cancel();emit('resumed','generation-started',previous);lastSnapshot={...snapshot,signature};return;}
       if(pending) {
         const anchorAdvanced=snapshot.latestOrdinal!==null&&pending.ordinal!==null&&snapshot.latestOrdinal>pending.ordinal;
-        const retained=snapshot.cards.find(card=>card.cardKey===pending.cardKey);
+        const requestedPending=pending;
+        const retained=snapshot.cards.find(card=>card.cardKey===requestedPending.cardKey);
         if(anchorAdvanced||(retained&&!retained.current)){const previous=pending;consume(previous);pending=null;initial=null;cancel();emit('resumed','newer-turn',previous);}
         else if(retained?.enabled===false){const previous=pending;pending=null;initial=null;cancel();emit('none','task-disabled',previous);}
       }
@@ -202,7 +203,8 @@ interface DeferredMeta {
         }
       } else if(pending) {emit('unknown','card-unmounted',pending);arm();}
       else if(initial) {
-        const retained=snapshot.cards.find(card=>card.cardKey===initial.cardKey);
+        const requestedInitial=initial;
+        const retained=snapshot.cards.find(card=>card.cardKey===requestedInitial.cardKey);
         if(retained&&retained.enabled!==false&&retained.current){arm();}
         else {initial=null;cancel();}
       } else if(state.phase!=='resumed'){const disabled=snapshot.cards.find(card=>card.current&&card.enabled===false),historical=snapshot.cards.filter(card=>!card.current).at(-1);emit('none',disabled?'task-disabled':historical?'historical-card':'no-current-task',disabled||historical||null);}
