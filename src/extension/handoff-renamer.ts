@@ -155,7 +155,7 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
         const target=new URL(record.targetUrl);
         const path=target.pathname.match(/^\/c\/([^/]+)\/?$/);
         const alias=path?.[1] ? decodeURIComponent(path[1]) : null;
-        if(target.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(alias||''))targetAlias=alias;
+        if(target.origin==='https://chatgpt.com'&&typeof alias==='string'&&/^local-chatgpt:[a-z0-9-]+$/.test(alias))targetAlias=alias;
       } catch {}
     }
     const noSaveIntent=!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt');
