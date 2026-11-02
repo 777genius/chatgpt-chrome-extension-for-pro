@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.6.4';
+  const SCRIPT_VERSION = '1.6.5';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -1231,13 +1231,18 @@
     const retry=async()=>{
       completionRecoveryTimer=null;
       if(!runtimeAvailable()||id!==globalThis.__chatgptNotifierAttemptId||path!==location.pathname||token!==watchToken)return;
-      let recovered=false;
-      try{recovered=await recoverActiveCompletion()===true;}catch{}
+      let recovered=false,pendingRestore=false;
+      try{
+        if(!completionAttempt||completionAttempt.path!==location.pathname){
+          const restored=await restoreCompletionCheckpoint();recovered=restored===true;pendingRestore=restored==='pending';
+        }
+        if(!recovered)recovered=await recoverActiveCompletion()===true;
+      }catch{}
       const generating=isGenerating();
       observedGeneration ||= generating;
       // Keep observing a long-running request through temporary probe failures.
       // Before controls mount, allow only a short startup grace period.
-      if(!recovered&&!currentErrors().length&&(generating||!observedGeneration&&Date.now()-scheduledAt<30000))
+      if(!recovered&&!currentErrors().length&&(generating||pendingRestore&&!observedGeneration&&Date.now()-scheduledAt<30000))
         completionRecoveryTimer=setTimeout(retry,Date.now()-scheduledAt<5000?1000:5000);
     };
     void retry();
@@ -1271,6 +1276,7 @@
     const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
     const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
     if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||initial!==globalThis.__chatgptNotifierAttemptId||initialRequestId!==globalThis.__chatgptNotifierRequestId)return;
+    if(result?.pending)return 'pending';
     const record=result?.ok&&result.record;
     if(!record||record.url!==(ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/')||record.state!=='active'||typeof record.baselineKey!=='string'||
         !Number.isFinite(record.startedAt)||record.attemptId!==String(record.startedAt))return;
@@ -1281,13 +1287,14 @@
     globalThis.__chatgptNotifierRequestReceipt=record.receipt||null;
     armForCurrentPrompt({restored:record});
     void audit('completion.checkpoint_restored',{promptKey:record.promptKey,startedAt:record.startedAt,bound:Boolean(record.promptKey)});
+    return true;
   }
 
   function armForCurrentPrompt(options={}) {
     const id=globalThis.__chatgptNotifierAttemptId;
     const startedAt=globalThis.__chatgptNotifierRequestStartedAt;
     const requestId=globalThis.__chatgptNotifierRequestId||null;
-    if(completionAttempt&&completionAttempt.id===id&&completionAttempt.requestId===requestId&&completionAttempt.token===watchToken&&!options.resumed){
+    if(completionAttempt&&completionAttempt.id===id&&completionAttempt.requestId===requestId&&completionAttempt.token===watchToken&&completionAttempt.path===location.pathname&&!options.resumed){
       if(options.completed){completionAttempt.httpCompleted=true;persistCompletionAttempt(completionAttempt);}
       return;
     }
@@ -1344,12 +1351,12 @@
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
     const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&currentRequest){deferredObservedStart=0;deferredTaskObserver?.requestStarted(message.startedAt);armForCurrentPrompt();}
-    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
+    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest)armForCurrentPrompt();
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
   void restoreDraft(null,true).catch(()=>{});
-  void restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{if(!runtimeAvailable())return;void reconcileLegacyCompletionStatus().catch(()=>{});if(!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();});
+  void restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{if(!runtimeAvailable())return;void reconcileLegacyCompletionStatus().catch(()=>{});if(!completionAttempt)scheduleActiveCompletionRecovery();});
 })();

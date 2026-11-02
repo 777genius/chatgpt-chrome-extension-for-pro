@@ -39,6 +39,12 @@ try{
  const native=inspectCompletedTurn('https://chatgpt.com/c/exact');
  assert.equal(native.turnStatus,'complete');assert.equal(native.assistantCompleted,true);
  assert.equal(native.promptKey,'/c/exact|fallback-turn-2:0:user');
+ assert.equal(native.firstTurn,false);assert.equal(native.firstUserSentAtMs,null,'a later turn cannot masquerade as allocation evidence');
+ element.__reactFiber$fixture.memoizedProps.entries.splice(0,1);
+ Object.assign(last,{timestampTurns:[{role:'user',sentAtMs:100000}]});
+ const first=inspectCompletedTurn('https://chatgpt.com/c/exact');
+ assert.equal(first.firstTurn,true);assert.equal(first.firstUserSentAtMs,100000);
+
  last.turn.status='in_progress';
  const unfinished=inspectCompletedTurn('https://chatgpt.com/c/exact');
  assert.equal(unfinished.turnStatus,'in_progress');
