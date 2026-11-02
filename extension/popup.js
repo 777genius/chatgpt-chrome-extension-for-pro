@@ -72,6 +72,7 @@ const goalUi={
 };
 let goalBusy=false;
 let goalRecord=null;
+let goalBinding=null;
 const goalPhases={
   preparing:'Подготовка сообщения',sending:'Разрешённая отправка',
   clicked:'Ожидание подтверждения клика',waiting:'Ожидание полного ответа',
@@ -93,13 +94,14 @@ function showGoal(record) {
       record.continuations+' / '+record.maxContinuations+' продолжений',
       'до '+new Date(record.deadlineAt).toLocaleString()];
     if(record.reason)parts.push(record.reason);
+    if(record.operation&&['stopped','blocked'].includes(record.phase))parts.push('Предыдущая отправка не подтверждена: для новой цели откройте другой чат');
     if(record.phase==='blocked')parts.push('Проверьте журнал и нажмите «Остановить» перед новым запуском');
     goalUi.status.textContent=parts.join(' · ');
   } else goalUi.status.textContent='Задайте цель и нажмите «Начать Goal».';
-  goalUi.start.disabled=!editable||record?.phase==='blocked';
-  goalUi.pause.disabled=goalBusy||!active||record.phase==='paused'||record.phase==='handoff';
-  goalUi.resume.disabled=goalBusy||record?.phase!=='paused'||!!record?.operation;
-  goalUi.stop.disabled=goalBusy||(!active&&record?.phase!=='blocked');
+  goalUi.start.disabled=!editable||!goalBinding||!!record?.operation;
+  goalUi.pause.disabled=goalBusy||!active||!goalBinding||record.phase==='paused'||record.phase==='handoff';
+  goalUi.resume.disabled=goalBusy||record?.phase!=='paused'||!!record?.operation||!goalBinding;
+  goalUi.stop.disabled=goalBusy||(!active&&record?.phase!=='blocked')||!goalBinding;
 }
 async function goalAction(action) {
   if(goalBusy)return;
@@ -107,7 +109,9 @@ async function goalAction(action) {
   for(const key of ['start','pause','resume','stop'])goalUi[key].disabled=true;
   goalUi.status.textContent='Сохранение Goal…';
   try {
+    if(!goalBinding)throw Error('Сначала откройте меню расширения в нужном чате');
     const result=await chrome.runtime.sendMessage({type:'CHATGPT_GOAL_CONTROL',action,
+      expectedTabId:goalBinding.tabId,expectedUrl:goalBinding.url,
       ...(action==='start'?{goal:goalUi.text.value,rules:goalUi.rules.value,
         maxContinuations:Number(goalUi.max.value),maxMinutes:Number(goalUi.minutes.value)}:{})});
     if(!result?.ok)throw Error(result?.error||'Операция Goal не подтверждена');
@@ -123,5 +127,7 @@ for(const action of ['start','pause','resume','stop'])
   goalUi[action].addEventListener('click',()=>void goalAction(action));
 chrome.runtime.sendMessage({type:'CHATGPT_GOAL_CONTROL',action:'get'}).then(result=>{
   if(!result?.ok)throw Error(result?.error||'Нет доступа к чату');
+  if(typeof result.tabId!=='number'||!result.url)throw Error('Не удалось закрепить активный чат');
+  goalBinding={tabId:result.tabId,url:result.url};
   showGoal(result.record);
 }).catch(error=>{goalUi.status.textContent='Goal: '+String(error?.message||error);});
