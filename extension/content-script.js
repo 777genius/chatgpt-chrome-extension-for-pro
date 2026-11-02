@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.3.0';
+  const SCRIPT_VERSION = '1.3.1';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -794,12 +794,26 @@
     await submitHandoff();
   }
 
+  function notifySuppressedError(error,state,promptKey,attemptId) {
+    const reason=state.blocked
+      ? state.reason||'Автоповтор остановлен сохранённым запретом отправки'
+      : 'Запрос уже обрабатывался до обновления расширения; повторная отправка не выполняется';
+    const key=`${attemptId}|${promptKey}|${error.response}|${reason}`;
+    if(state.lastSuppressedNotice===key)return;
+    state.lastSuppressedNotice=key;
+    void audit('retry.suppressed',{reason,promptKey,attemptId,error:error.response,blocked:Boolean(state.blocked)});
+    notifyError(error,reason);
+  }
+
   async function routeError(error, promptKey, alert) {
     const sourcePath = location.pathname;
     const attemptId = globalThis.__chatgptNotifierAttemptId || '';
     // A pre-existing error already observed before an extension update is not
     // a new failed request. A real/manual request gets a new attempt or prompt.
-    if(!attemptId&&retryState().restoredPromptKey===promptKey)return;
+    if(!attemptId&&retryState().restoredPromptKey===promptKey){
+      notifySuppressedError(error,retryState(),promptKey,attemptId);
+      return;
+    }
     let info;
     try {
       info = await runtimeMessage({ type: 'CHATGPT_INSPECT_ERROR',
