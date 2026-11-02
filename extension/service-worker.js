@@ -327,8 +327,13 @@ async function handleHandoffMessage(message, tabId) {
         // No native navigation has been issued yet. Mark the saved handoff
         // failed and keep the user-facing recovery copy instead of a phantom
         // handoff that the Goal cannot follow.
-        await chrome.storage.local.set({[key]:{...record,stage:'failed',
-          reason:'Goal handoff could not be prepared: '+String(error?.message||error)}});
+        // Both cleanup steps must be attempted. Neither cleanup failure may
+        // replace the original preparation error with a misleading exception.
+        await Promise.allSettled([
+          chrome.storage.local.set({[key]:{...record,stage:'failed',
+            reason:'Goal handoff could not be prepared: '+String(error?.message||error)}}),
+          chrome.storage.local.remove(marker)
+        ]);
         throw error;
       }
       return { ok: true, record: { ...record, stage: 'navigating' } };
