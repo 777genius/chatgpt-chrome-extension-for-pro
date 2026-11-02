@@ -1450,6 +1450,11 @@
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
-  void restoreDraft(null,true).catch(()=>{});
-  void restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{if(runtimeAvailable()&&!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();});
+  const initialDraftRecovery=restoreDraft(null,true).catch(()=>{});
+  const initialCompletionRecovery=restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{
+    if(runtimeAvailable()&&!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();
+  });
+  void Promise.all([initialDraftRecovery,initialCompletionRecovery]).then(()=>{
+    if(runtimeAvailable())return runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
+  }).catch(()=>{});
 })();
