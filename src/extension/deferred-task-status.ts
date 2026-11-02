@@ -230,7 +230,15 @@ interface DeferredMeta {
     if(!window)throw new Error('Deferred status requires an attached document');
     const observer=new window.MutationObserver((records:MutationRecord[])=>{
       if(!active())return;
-      if(records.some(record=>record.target?.closest?.('[data-automation-card]')||(record.type==='attributes'&&record.target?.matches?.('[data-content-search-turn-key],[data-turn-key],[data-testid^="conversation-turn-"],[data-talvt-turn-state],[data-app-shell-active-page]'))||Array.from(record.addedNodes||[]).some(relevant)||Array.from(record.removedNodes||[]).some(relevant)))scan('dom');
+      const changed=records.some((record)=>{
+        const target=record.target as Element;
+        const inCard=typeof target.closest==='function'&&Boolean(target.closest('[data-automation-card]'));
+        const attribute=record.type==='attributes'&&typeof target.matches==='function'&&target.matches(
+          '[data-content-search-turn-key],[data-turn-key],[data-testid^="conversation-turn-"],[data-talvt-turn-state],[data-app-shell-active-page]');
+        return inCard||attribute||Array.from(record.addedNodes||[]).some(relevant)||
+          Array.from(record.removedNodes||[]).some(relevant);
+      });
+      if(changed)scan('dom');
     });
     window.addEventListener('popstate',refresh);
     refresh();
