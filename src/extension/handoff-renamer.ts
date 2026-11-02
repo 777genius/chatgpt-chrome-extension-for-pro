@@ -141,8 +141,9 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
   if (titleJobs.has(tabId)) return titleJobs.get(tabId);
   const job=(async()=>{
     const key=handoffKey(tabId);
-    let record=(await chrome.storage.local.get(key))[key];
-    if (!record || record.id!==id || record.stage!=='sent' || !record.naming || record.titleStatus==='confirmed') return {ok:true,skipped:true};
+    const original=(await chrome.storage.local.get(key))[key];
+    if (!original || original.id!==id || original.stage!=='sent' || !original.naming || original.titleStatus==='confirmed') return {ok:true,skipped:true};
+    let record: RenameRecord = original;
     if (record.titleStatus==='saving') return {ok:false,reason:'Предыдущая попытка переименования не подтверждена; повторная запись отключена'};
     let url=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
     // Old versions could persist a temporary route. Never infer its server
@@ -229,11 +230,11 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
       if(!snapshot?.ready || typeof snapshot.title !== 'string')throw notReady('Новый чат ещё не готов к переименованию');
       if(snapshot.title===pending.title)throw new Error('Название уже изменено без подтверждения журнала');
       const previousTitle=snapshot.title;
-      for(const action of ['open','select','fill']) {
+      for(const action of ['open','select','fill'] as const) {
         if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');
         let result;
         do {if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');result=await probe(action,{previousTitle});if(!result.ok&&result.retryable)await wait(250);} while(!result.ok&&result.retryable&&Date.now()<deadline);
-        if(!result.ok)throw result.retryable?notReady(result.reason):new Error(result.reason);
+        if(!result.ok)throw result.retryable?notReady(result.reason||'Не удалось подготовить переименование'):new Error(result.reason);
         await wait(250);
       }
       // Durable intent before one click. A lost reply never causes a second save.
