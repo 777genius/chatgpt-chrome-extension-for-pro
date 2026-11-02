@@ -111,3 +111,71 @@ test("typed animation emit keeps acknowledgement and disposal behavior", async (
   assert.deepEqual(migrated, baseline);
   assert.ok(migrated.includes("tick:1:0"));
 });
+
+
+type TitleLineage = {
+  version: 1; sourceUrl: string; baseTitle: string; part: number; title: string;
+  targetUrl: string; transferred: boolean; confirmed: boolean;
+};
+type TitleApi = {
+  chatUrl(value: string): string;
+  planNext(options: {sourceUrl: string; sourceTitle: string; lineage?: TitleLineage | null}):
+    {version: 1; sourceUrl: string; baseTitle: string; part: number; title: string};
+  confirm(naming: {version: 1; sourceUrl: string; baseTitle: string; part: number; title: string},
+    targetUrl: string): TitleLineage;
+};
+test("typed title policy retains lineage and rejects identical handoff targets", () => {
+  function observe(api: TitleApi): string[] {
+    const first = api.planNext({ sourceUrl: "https://chatgpt.com/c/one", sourceTitle: "Task" });
+    const confirmed = api.confirm(first, "https://chatgpt.com/c/two");
+    const next = api.planNext({
+      sourceUrl: confirmed.targetUrl, sourceTitle: confirmed.title, lineage: confirmed,
+    });
+    assert.throws(() => api.confirm(first, first.sourceUrl), /Invalid continuation/);
+    return [first.title, next.title, confirmed.targetUrl, api.chatUrl("https://evil.example/c/one")];
+  }
+  const baseline = observe(load<TitleApi>("extension", "handoff-title", "ChatGPTHandoffTitle"));
+  const migrated = observe(load<TitleApi>("dist/extension", "handoff-title", "ChatGPTHandoffTitle"));
+  assert.deepEqual(migrated, baseline);
+  assert.deepEqual(migrated, ["Task (1)", "Task (2)", "https://chatgpt.com/c/two", ""]);
+});
+
+type Attempt = {id: string; url: string; baselineKey: string; promptKey?: string};
+type Snapshot = {
+  url: string; attemptId: string; promptKey: string; assistantKey: string;
+  isLatest: boolean; isReadOnly: boolean; generating: boolean; hasError: boolean;
+  turnStatus: string; assistantCompleted: boolean; assistantPhase: string;
+};
+type CompletionPolicy = {
+  bindAttemptPrompt(attempt: Attempt | null, snapshot: Snapshot | null): Attempt | null;
+  completedAttemptEvidence(attempt: Attempt | null, snapshot: Snapshot | null):
+    {attemptId: string; promptKey: string; assistantKey: string} | null;
+};
+function loadCompletion(directory: "extension" | "dist/extension"): CompletionPolicy {
+  const content = readFileSync(new URL("../" + directory + "/completion-state.js", import.meta.url), "utf8");
+  const context: { module: { exports: Record<string, unknown> } } = { module: { exports: {} } };
+  runInNewContext(content, context);
+  assert.equal(typeof context.module.exports.bindAttemptPrompt, "function");
+  assert.equal(typeof context.module.exports.completedAttemptEvidence, "function");
+  return context.module.exports as CompletionPolicy;
+}
+test("typed completion policy cannot promote stale or generating turns", () => {
+  function observe(api: CompletionPolicy): string[] {
+    const raw: Attempt = {id: "attempt-1", url: "https://chatgpt.com/c/one", baselineKey: "old"};
+    const snapshot: Snapshot = {
+      url: raw.url, attemptId: raw.id, promptKey: "new", assistantKey: "answer-1",
+      isLatest: true, isReadOnly: false, generating: false, hasError: false,
+      turnStatus: "complete", assistantCompleted: true, assistantPhase: "final_answer",
+    };
+    const bound = api.bindAttemptPrompt(raw, snapshot);
+    assert.ok(bound);
+    const confirmed = api.completedAttemptEvidence(bound, snapshot);
+    const generating = api.completedAttemptEvidence(bound, {...snapshot, generating: true});
+    const stale = api.completedAttemptEvidence(bound, {...snapshot, assistantPhase: "analysis"});
+    return [confirmed?.assistantKey ?? "", String(generating), String(stale)];
+  }
+  const baseline = observe(loadCompletion("extension"));
+  const migrated = observe(loadCompletion("dist/extension"));
+  assert.deepEqual(migrated, baseline);
+  assert.deepEqual(migrated, ["answer-1", "null", "null"]);
+});
