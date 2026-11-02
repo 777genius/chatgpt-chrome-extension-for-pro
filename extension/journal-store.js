@@ -123,9 +123,16 @@ async function retryMetadata(meta) {
     for (const key of keys) if (batch[key]) {
       const event=batch[key];
       if(replayRetries)retryByChat = reduceRetrySummary(retryByChat,event);
-      if(meta.handoffSourceClaimSchema!==1&&['handoff.navigating','handoff.imported'].includes(event.kind)&&event.operationId) {
+      if(meta.handoffSourceClaimSchema!==1&&event.operationId) {
         const source=retryDraftUrl(event.sourceUrl);
-        if(source&&!Object.hasOwn(handoffSourceClaims,source))handoffSourceClaims[source]={operationId:event.operationId,tabId:event.tabId,at:event.recordedAt};
+        if(source&&['handoff.navigating','handoff.imported'].includes(event.kind)&&
+            !Object.hasOwn(handoffSourceClaims,source))
+          handoffSourceClaims[source]={operationId:event.operationId,tabId:event.tabId,at:event.recordedAt};
+        // A proven pre-navigation failure can release only its own source
+        // claim, even when replaying an immutable legacy journal after upgrade.
+        if(source&&event.kind==='handoff.pre_navigation_cancelled'&&
+            handoffSourceClaims[source]?.operationId===event.operationId&&
+            handoffSourceClaims[source].tabId===event.tabId)delete handoffSourceClaims[source];
       }
       if(replaySends&&event.operationId) {
         const source=retryDraftUrl(event.sourceUrl);
@@ -185,6 +192,18 @@ function appendJournal(event, tab = {}) {
       retrySendClaims[key]={operationId,tabId,at:claim?.at||Date.now(),phase:'reserved'};
       retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key};
     }
+    if(event.kind==='goal.started'&&retrySource&&(
+        retryPreparingByChat[retrySource]||
+        Object.entries(active).some(([owner,entry])=>entry&&
+          (entry.chatUrl||entry.sourceUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===retrySource)))
+      throw Object.assign(new Error('В этом чате уже готовится или выполняется автоматическая отправка'),{journalPolicy:true});
+    if(['retry.planned','retry.send_intent'].includes(event.kind)&&retrySource){
+      // The Goal's persisted reservation wins over legacy retry planning.
+      // Refuse before reserving a retry or touching the user's draft.
+      const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
+      if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
+        throw duplicate();
+    }
     if(event.kind==='retry.planned'||event.kind==='retry.send_intent')reserveRetry();
     if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft.operationId!==operationId||savedDraft.savedSequence!==event.savedSequence)) {
       throw Object.assign(new Error('Восстановление черновика уже выполнено или исход отправки неизвестен'),{journalPolicy:true});
@@ -197,14 +216,40 @@ function appendJournal(event, tab = {}) {
       requests[event.requestId] = {operationId,sourceUrl};
     }
     if (['request.completed','request.failed'].includes(event.kind)) operationId ||= requests[event.requestId]?.operationId || null;
-    if (['retry.send_intent','handoff.sending'].includes(event.kind)) active[tabId] = {operationId,kind:event.kind,at:Date.now(),
-      ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey}: {})};
-    if(['handoff.navigating','handoff.imported'].includes(event.kind)) {
-      const source=retryDraftUrl(sourceUrl);
-      if(event.kind==='handoff.navigating'&&(!source||!operationId||Object.hasOwn(handoffSourceClaims,source)))throw Object.assign(new Error('Передача этого чата уже запускалась'),{journalPolicy:true});
-      // Import every recovery copy, while the first source claim prevents a
-      // new navigation even when initialization already set the schema flag.
-      if(source&&operationId&&!Object.hasOwn(handoffSourceClaims,source))handoffSourceClaims[source]={operationId,tabId,at:Date.now()};
+    if (['retry.send_intent','handoff.sending','goal.send_intent'].includes(event.kind)) {
+      const chatUrl=retryDraftUrl(event.kind==='handoff.sending'?event.targetUrl||tab.url:sourceUrl);
+      // The Goal's intent state is saved BEFORE its journal grant. A crash
+      // between these two writes would leave no active journal entry, so
+      // competing retries must also consult that durable operation claim.
+      if(event.kind==='goal.send_intent'&&chatUrl&&retryPreparingByChat[chatUrl])
+        throw Object.assign(new Error('В чате уже подготавливается восстановление ошибки; Goal не может параллельно отправлять'),{journalPolicy:true});
+      if(chatUrl&&event.kind==='handoff.sending') {
+        const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
+        if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
+          throw Object.assign(new Error('Цель удерживает незавершённую отправку в этом чате'),{journalPolicy:true});
+      }
+      // All automatic senders share one canonical-chat lock, not just one tab
+      // slot. Unknown outcomes remain fenced after a tab closes or a worker
+      // restarts. Read legacy entries through their saved tab URL.
+      if(active[tabId] || chatUrl && Object.entries(active).some(([owner,entry])=>
+          Number(owner)!==tabId && entry &&
+          (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl))
+        throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
+      active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
+        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey}:{})};
+    }
+    if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
+      const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
+      if(event.kind==='handoff.navigating'&&(!source||!operationId||claim))throw Object.assign(new Error('Передача этого чата уже запускалась'),{journalPolicy:true});
+      if(source&&event.kind==='handoff.pre_navigation_cancelled'){
+        // Only the worker can report a failed preparation before a native
+        // click. A different tab or operation cannot release this fence.
+        if(!claim||claim.operationId!==operationId||claim.tabId!==tabId)
+          throw Object.assign(new Error('Нельзя снять запрет другой передачи'),{journalPolicy:true});
+        delete handoffSourceClaims[source];
+      } else if(source&&operationId&&!claim) {
+        handoffSourceClaims[source]={operationId,tabId,at:Date.now()};
+      }
     }
     if (event.kind === 'send.authorized') {
       if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
@@ -242,8 +287,20 @@ function appendJournal(event, tab = {}) {
       if(retrySendClaims[preparation.claimKey]?.phase==='reserved')delete retrySendClaims[preparation.claimKey];
       delete retryPreparingByChat[retrySource];
     }
-    if (['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset','handoff.sent','handoff.failed','tab.closed'].includes(event.kind) &&
-      (!operationId || active[tabId]?.operationId === operationId)) delete active[tabId];
+    const currentSend=active[tabId];
+    const exactGrant=Boolean(currentSend&&operationId&&currentSend.operationId===operationId);
+    const resetRetry=event.kind==='retry.manual_reset'&&currentSend?.kind==='retry.send_intent';
+    // An unknown Goal click remains an active, consumed fence. Neither a
+    // timeout nor clicking Stop gives another automatic sender a new grant.
+    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&event.kind==='goal.confirmed';
+    const clearsRetry=(exactGrant||resetRetry)&&currentSend?.kind==='retry.send_intent'&&
+      ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
+    const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&
+      ['handoff.sent','handoff.failed'].includes(event.kind);
+    // A closed tab is not evidence that its message was never clicked.
+    // Preserve unresolved Goal locks for other tabs opening the same chat.
+    if((event.kind==='tab.closed'&&currentSend?.kind!=='goal.send_intent')||
+        clearsGoal||clearsRetry||clearsHandoff)delete active[tabId];
     const requestSource = requests[event.requestId]?.sourceUrl;
     if (['request.completed','request.failed'].includes(event.kind)) delete requests[event.requestId];
     const entry = { ...event, schema: 1, sequence, recordedAt: Date.now(),

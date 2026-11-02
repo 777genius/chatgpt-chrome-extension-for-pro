@@ -2,7 +2,7 @@
 
 **Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Version **1.6.6** · Chrome / Chromium **116+** · No build required
+Version **1.7.0** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -13,6 +13,7 @@ Version **1.6.6** · Chrome / Chromium **116+** · No build required
 | **Scheduled-task clock** | Shows a clock for a native scheduled-task card. Watches for actual continuation with a five-minute fallback check; does not parse localized dates or refresh the page. |
 | **Red / green status icons** | Red for stopped errors, green for completed responses, in notifications and the tab favicon. |
 | **Unread result dot** | A blue dot marks unseen results. Viewing the chat removes the dot and its OS notifications; the green/red result stays until your next send. |
+| **Goal auto-continue** | Explicitly start an objective and stop conditions from the popup; each fully completed non-marker answer triggers one guarded continuation. The exact entire answer `GOAL_COMPLETE` stops the goal. Durable pause/resume/stop, continuation/time limits, unknown-send fencing, and confirmed-chat handoff. |
 | **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` follows the native action: retry here or transfer context when ChatGPT offers a new chat. Stops interrupted generation before retrying. Stops on exhausted limits or an unconfirmed send. A durable per-chat claim prevents duplicate retries from multiple tabs. |
 | **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. Concurrent edits and user attachments cancel handoff preparation; cancelled transfers do not resume later. |
 | **New-chat handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. A shared source-chat claim prevents duplicate handoffs from multiple tabs. |
@@ -23,7 +24,11 @@ Version **1.6.6** · Chrome / Chromium **116+** · No build required
 
 **Automatic retries and handoffs are enabled.** The extension can send continuation commands and create chats. Logs and recovery copies are stored locally and may contain messages and drafts.
 
-**Message queue and goal mode are not implemented yet.** See the [development brief](docs/queue-and-goal.md).
+**Goal is available through the extension popup** for a saved ChatGPT conversation URL (`/c/…`). Type the objective, optional stop criteria, a finite continuation count (1–100), and a time limit (1–1440 minutes); then click **Start Goal**. Pause/resume/stop are persisted across extension reloads. A user's draft, attachments and manual sends take precedence; automation stops rather than replacing them. If the outcome of a click is unknown, the goal is blocked rather than retried.
+
+`GOAL_COMPLETE` must be the **only content** of a fully completed assistant response, confirmed by the native turn state. An appearance inside a longer answer, Markdown or an incomplete/streaming answer does not count. **The marker is the model's declaration; the extension does not independently check CI, merge or GitHub state.** Goal messages and stop rules are stored locally and retained when a native handoff to a new chat is confirmed.
+
+**Message queue / Steer is not implemented.** It remains a separate proposal in the [development brief](docs/queue-and-goal.md). See the [Goal protocol and validation gates](docs/goal-protocol.md).
 
 ## Install
 

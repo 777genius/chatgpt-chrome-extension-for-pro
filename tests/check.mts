@@ -41,6 +41,8 @@ async function domCheck() {
         if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
         if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return {ok:false};
         if(message.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS')return {ok:true,changed:false};
+        if(message.type==='CHATGPT_GOAL_RECOVER')return {ok:false};
+        if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:''};
         if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
         if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
         if(message.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,message.delayMs));return {ok:true};}
@@ -85,18 +87,21 @@ async function domCheck() {
   await afterUpdate.fail('Existing error after update');
   assert.equal(afterUpdate.sends.length,0,'reload must not repeat a previously observed prompt without a new request');
   assert.equal(afterUpdate.logs.filter(e=>e.kind==='error.detected').length,0);
-  assert.equal(afterUpdate.messages.length,1,'an already-observed visible error must not vanish silently after reinjection');
-  assert.match(afterUpdate.messages[0].retryReason,/уже обрабатывался/);
+  assert.equal(afterUpdate.messages.filter(m=>m.type==='CHATGPT_RESPONSE_ERROR').length,1,
+    'an already-observed visible error must produce exactly one warning, got '+afterUpdate.messages.map(m=>m.type).join(', '));
+  assert.match(afterUpdate.messages.find(m=>m.type==='CHATGPT_RESPONSE_ERROR')?.retryReason,/уже обрабатывался/);
   assert.equal(afterUpdate.logs.filter(e=>e.kind==='retry.suppressed').length,1);
   const unknownAfterUpdate=setup('',true,true,'',{failures:[],lastPromptKey:'/c/example|conversation-turn-0',lastAttemptId:'',blocked:true,reason:'Не удалось подтвердить отправку'});
   await unknownAfterUpdate.fail('Время ожидания доставки сообщения истекло. Попробуйте снова.');
   assert.equal(unknownAfterUpdate.sends.length,0,'an unknown previous send must not be repeated');
-  assert.equal(unknownAfterUpdate.messages.length,1,'saved uncertainty still reports the current error and actual stop reason');
-  assert.match(unknownAfterUpdate.messages[0].retryReason,/Не удалось подтвердить отправку/);
+  assert.equal(unknownAfterUpdate.messages.filter(m=>m.type==='CHATGPT_RESPONSE_ERROR').length,1,
+    'saved uncertainty still reports one warning and the actual stop reason');
+  assert.match(unknownAfterUpdate.messages.find(m=>m.type==='CHATGPT_RESPONSE_ERROR')?.retryReason,/Не удалось подтвердить отправку/);
   assert.equal(unknownAfterUpdate.logs.filter(e=>e.kind==='retry.suppressed').length,1);
   unknownAfterUpdate.document.querySelector('aside')!.remove();await pause();
   await unknownAfterUpdate.fail('Delivery timed out. Please retry.');
-  assert.equal(unknownAfterUpdate.messages.length,1,'rewording a suppressed error for the same prompt must not spam alerts');
+  assert.equal(unknownAfterUpdate.messages.filter(m=>m.type==='CHATGPT_RESPONSE_ERROR').length,1,
+    'rewording a suppressed error for the same prompt must not spam alerts');
   assert.equal(unknownAfterUpdate.logs.filter(e=>e.kind==='retry.planned').length,0);
 
   const restoredBlock=setup('',true,true,'',{failures:[],blocked:true,reason:'Saved sticky stop'});
@@ -240,11 +245,11 @@ async function workerCheck() {
     runtime: { id:'test-extension',onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
       getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
-    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}} },
+    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}if(message.type==='CHATGPT_GOAL_DISPATCH')return {ok:true};} },
     scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
-  const workerContext = createContext({ chrome, console, URL, setTimeout, clearTimeout });
+  const workerContext = createContext({ chrome, console, URL, crypto:globalThis.crypto, setTimeout, clearTimeout });
   Object.assign(workerContext, {importScripts: (name: string) => runInContext(readFileSync(`extension/${name}`, 'utf8'), workerContext)});
   runInContext(worker, workerContext);
   callbacks.installed(); await pause();
@@ -315,6 +320,56 @@ async function workerCheck() {
   assert.equal((await sendGuard(options)).clicked,true);
   assert.equal((await sendGuard(options)).ok,false,'one operation may dispatch only once');
   assert.equal(injections.length,injectBefore+1);
+  // Goal E2E through the real worker message router, journal grants, native
+  // composer protection and exact native-final completion handling.
+  // No Chrome/browser access or network calls are used.
+  await runInContext("appendJournal({kind:'retry.confirmed',operationId:'only-once'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
+  activeTab={id:7,url:'https://chatgpt.com/c/example'};
+  const goalPopup={id:chrome.runtime.id,url:chrome.runtime.getURL('popup.html')};
+  const goalControl=(payload:any,origin:any=goalPopup)=>new Promise<any>(resolve=>
+    callbacks.message({type:'CHATGPT_GOAL_CONTROL',expectedTabId:7,
+      expectedUrl:'https://chatgpt.com/c/example',...payload},origin,resolve));
+  assert.equal((await goalControl({action:'start',goal:'Verify CI and merge safely',
+    rules:'Native answer must finish',maxContinuations:2,maxMinutes:30},{...goalPopup,id:'another-extension'})).ok,false);
+  const begunGoal=await goalControl({action:'start',goal:'Verify CI and merge safely',
+    rules:'Native answer must finish',maxContinuations:2,maxMinutes:30});
+  assert.equal(begunGoal.ok,true);
+  const goalUrl='https://chatgpt.com/c/example';
+  const goalKey='chatgpt-goal:'+goalUrl;
+  let goal=storage[goalKey];
+  assert.equal(goal.phase,'preparing');
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1);
+  const goalText=goal.operation.text,goalOperation=goal.operation.id,goalId=goal.id;
+  assert.ok(goalText.includes('GOAL_COMPLETE')&&goalText.includes('Verify CI and merge safely'));
+  const goalSender={tab:{id:7,url:goalUrl}};
+  const goalCall=(type:string,payload:any)=>new Promise<any>(resolve=>
+    callbacks.message({type,url:goalUrl,goalId,operationId:goalOperation,...payload},goalSender,resolve));
+  assert.equal((await goalCall('CHATGPT_GOAL_CHECK',{})).ok,true);
+  assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).ok,false,
+    'a reserved Goal without intent cannot bypass journal authorization');
+  assert.equal((await goalCall('CHATGPT_GOAL_INTENT',{text:goalText,baselineKey:'/c/example|previous-user'})).ok,true);
+  assert.equal((await sendGuard({action:'send',text:'User draft',url:goalUrl,operationId:goalOperation})).ok,false,
+    'Goal authorization cannot send user-draft substitution');
+  assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).clicked,true);
+  assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).ok,false,
+    'Goal has one persisted click grant even after a repeated worker message');
+  assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'clicked'})).ok,true);
+  assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'confirmed',newPromptKey:'/c/example|goal-user-1'})).ok,true);
+  goal=storage[goalKey];assert.equal(goal.phase,'waiting');
+  const goalCompletion={...success,response:'GOAL_COMPLETE',completionKey:'/c/example|goal-user-1|goal-assistant-1',
+    goalPromptKey:'/c/example|goal-user-1',goalNativeVerified:true,goalRawExact:true};
+  callbacks.message(goalCompletion,goalSender);await pause();
+  goal=storage[goalKey];
+  assert.equal(goal.phase,'completed','only the native-final, entire marker completes the Goal');
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1,
+    'exact marker cannot schedule a second continuation');
+  callbacks.message({...goalCompletion,completionKey:'/c/example|goal-user-1|goal-assistant-2',
+    response:'GOAL_COMPLETE is a word',goalRawExact:false},goalSender);
+  await pause();
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1,
+    'duplicate or later completion cannot restart Goal');
+  console.log('PASS: Goal popup -> journal -> native send gate -> confirmed answer -> exact marker');
+
   console.log('PASS: worker forbids user drafts, enforces persisted exact command and one-use send');
   console.log('PASS: durable handoff state, source deduplication, no resend after sending');
   console.log('PASS: error title/body, repeat attempts, success deduplication, existing-tab activation, request-start activation');
@@ -361,23 +416,57 @@ async function popupRecoveryCheck() {
   const messages:any[]=[];
   let finishRecovery:(result:any)=>void=()=>{};
   const info={ok:true,available:true,operationId:'legacy-op',tabId:7,targetUrl:'https://chatgpt.com/c/target',desiredTitle:'Saved title (2)'};
+  const goalUrl='https://chatgpt.com/c/popup-fixture';
+  const goalPhases:Record<string,string>={start:'preparing',pause:'paused',resume:'preparing',stop:'stopped'};
   const ctx=createContext({document,chrome:{runtime:{sendMessage:async(message:any)=>{
     messages.push(message);
     if(message.type==='CHATGPT_HANDOFF_TITLE_INFO')return info;
     if(message.type==='CHATGPT_HANDOFF_RENAME_RECOVER')return new Promise(resolve=>{finishRecovery=resolve;});
+    if(message.type==='CHATGPT_GOAL_CONTROL') {
+      if(message.action==='get')return {ok:true,tabId:7,url:goalUrl,record:null};
+      return {ok:true,record:{id:'popup-goal',phase:goalPhases[message.action],
+        goal:'Finalize popup goal',rules:'',maxContinuations:2,maxMinutes:15,
+        continuations:0,deadlineAt:Date.now()+60_000,operation:null}};
+    }
     return {ok:true};
   }},tabs:{create(){}}}});
   runInContext(readFileSync('extension/popup.js','utf8'),ctx);
   await Promise.resolve();await Promise.resolve();
   assert.equal(document.getElementById('title-recovery')!.hidden,false);
   assert.equal(document.getElementById('desired-title')!.textContent,'Saved title (2)');
-  assert.equal(messages.length,1,'opening the popup only reads recovery information');
+  assert.deepEqual(messages.map(item=>item.type).sort(),
+    ['CHATGPT_GOAL_CONTROL','CHATGPT_HANDOFF_TITLE_INFO'].sort(),
+    'opening the popup only reads Goal state and recovery information');
+  assert.equal(messages.find(item=>item.type==='CHATGPT_GOAL_CONTROL')?.action,'get');
+  await waitFor(()=>(document.getElementById('goal-start') as HTMLButtonElement).disabled===false);
+  (document.getElementById('goal-text') as HTMLTextAreaElement).value='Finalize popup goal';
+  const actions:[string,string,string|null][]=[
+    ['start','goal-start','goal-pause'],['pause','goal-pause','goal-resume'],
+    ['resume','goal-resume','goal-stop'],['stop','goal-stop',null]
+  ];
+  for(const [action,id,nextId] of actions) {
+    const control=document.getElementById(id) as HTMLButtonElement;
+    assert.equal(control.disabled,false,action+' control must be available');
+    control.dispatchEvent(new window.Event('click'));
+    await waitFor(()=>messages.some(item=>item.type==='CHATGPT_GOAL_CONTROL'&&item.action===action));
+    const sent=messages.filter(item=>item.type==='CHATGPT_GOAL_CONTROL'&&item.action===action);
+    assert.equal(sent.length,1,action+' must dispatch once');
+    assert.equal(sent[0].expectedTabId,7);
+    assert.equal(sent[0].expectedUrl,goalUrl,'actions remain bound to the initial chat');
+    if(action==='start')assert.equal(sent[0].goal,'Finalize popup goal');
+    if(nextId)await waitFor(()=>(document.getElementById(nextId) as HTMLButtonElement).disabled===false);
+    // The worker receives the message before popup's async continuation paints
+    // the saved result. Wait for the actual UI state, including terminal Stop.
+    if(action==='stop')await waitFor(()=>/Остановлено/.test(document.getElementById('goal-status')!.textContent||''));
+  }
+  assert.match(document.getElementById('goal-status')!.textContent||'',/Остановлено/);
   const button=document.getElementById('recover-title')!;
   button.dispatchEvent(new window.Event('click'));
   button.dispatchEvent(new window.Event('click'));
-  assert.equal(messages.length,2,'explicit duplicate clicks issue one recovery request');
-  assert.equal(messages[1].desiredTitle,'Saved title (2)');
-  assert.equal(messages[1].targetUrl,info.targetUrl);
+  const recoverRequests=messages.filter(item=>item.type==='CHATGPT_HANDOFF_RENAME_RECOVER');
+  assert.equal(recoverRequests.length,1,'explicit duplicate clicks issue one recovery request');
+  assert.equal(recoverRequests[0].desiredTitle,'Saved title (2)');
+  assert.equal(recoverRequests[0].targetUrl,info.targetUrl);
   finishRecovery({ok:true});await pause();
   assert.equal(document.getElementById('title-recovery')!.hidden,true);
   assert.equal(document.getElementById('status')!.textContent,'Название чата восстановлено.');

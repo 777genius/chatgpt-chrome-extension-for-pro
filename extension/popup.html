@@ -6,7 +6,7 @@
   <style>
     body {
       font-family: system-ui, sans-serif;
-      width: 250px;
+      width: 310px;
       margin: 0;
       padding: 14px;
       background: #151515;
@@ -24,7 +24,17 @@
       font-weight: 650;
       cursor: pointer;
     }
-    #status { min-height: 18px; margin-top: 9px; font-size: 12px; color: #d8d8d8; }
+    #status, #goal-status { min-height: 18px; margin-top: 9px; font-size: 12px; color: #d8d8d8; line-height: 1.5; }
+    #goal-panel { border-top: 1px solid #555; padding-top: 13px; margin-top: 14px; }
+    h2 { font-size: 14px; margin: 0 0 8px; }
+    label { display: block; margin: 9px 0 4px; font-size: 12px; }
+    textarea, input[type="number"] { box-sizing: border-box; width:100%; background:#242424; color:#f3f3f3; border:1px solid #777; border-radius:7px; padding:8px; font: 12px/1.45 system-ui,sans-serif; }
+    textarea { resize:vertical; min-height:55px; }
+    textarea:disabled, input:disabled { opacity:.7; }
+    .goal-limits { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    .goal-buttons { display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-top:10px; }
+    #goal-panel button { padding:8px; font-size:12px; }
+    #goal-panel button:disabled { cursor:not-allowed; opacity:.5; }
   </style>
 </head>
 <body>
@@ -37,6 +47,25 @@
     <button id="recover-title">Восстановить название чата</button>
   </section>
   <button id="journal" style="margin-top:8px">Журнал отправок и ошибок</button>
+  <section id="goal-panel" aria-labelledby="goal-heading">
+    <h2 id="goal-heading">Автономная цель (Goal)</h2>
+    <p>Завершается после полностью готового ответа <code>GOAL_COMPLETE</code>, дедлайна или лимита продолжений. Неизвестный исход отправки блокирует Goal. Маркер — заявление модели, не независимая проверка результата.</p>
+    <label for="goal-text">Цель</label>
+    <textarea id="goal-text" maxlength="10000" placeholder="Опиши результат, который нужно довести до конца"></textarea>
+    <label for="goal-rules">Условия завершения (необязательно)</label>
+    <textarea id="goal-rules" maxlength="5000" placeholder="Например: merge PR, зелёные CI и E2E"></textarea>
+    <div class="goal-limits">
+      <div><label for="goal-max">Максимум продолжений</label><input type="number" id="goal-max" min="1" max="100" step="1" value="20"></div>
+      <div><label for="goal-minutes">Максимум минут</label><input type="number" id="goal-minutes" min="1" max="1440" step="1" value="180"></div>
+    </div>
+    <div class="goal-buttons">
+      <button id="goal-start">Начать Goal</button>
+      <button id="goal-pause" disabled>Пауза</button>
+      <button id="goal-resume" disabled>Продолжить</button>
+      <button id="goal-stop" disabled>Остановить</button>
+    </div>
+    <div id="goal-status" role="status" aria-live="polite"></div>
+  </section>
   <div id="status"></div>
   <script src="popup.js"></script>
 </body>
