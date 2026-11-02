@@ -45,8 +45,9 @@ assert.equal((await log('goal.started','goal-after-retry',7,retryFirst,
 // journal grant was not. Another tab still must not obtain a retry grant.
 storage['chatgpt-goal:'+url]={id:'goal-fixture',phase:'sending',
   operation:{id:'unacknowledged',status:'intent'}};
-await assert.rejects(()=>log('retry.send_intent','race-after-crash',8),
-  /незавершённую/);
+await assert.rejects(()=>log('retry.send_intent','race-after-crash',8,url,
+  {promptKey:'/c/goal-fence|previous'}),
+  /Автоповтор/);
 delete storage['chatgpt-goal:'+url];
 
 await log('goal.send_intent','goal-1',7);
