@@ -34,6 +34,22 @@ jobs:
           bun-version: '1.4.3'
       - name: Install frozen Bun dependencies
         run: bun install --frozen-lockfile
+      # Temporary, opt-in draft diagnostic bundle. No credentials are added.
+      # Lets us run TS7/type and synthetic E2E offline while Actions is queued.
+      - name: Save offline draft toolchain candidate
+        if: github.event_name == 'push' && contains(github.event.head_commit.message, '[ci:test]')
+        shell: bash
+        run: |
+          tar --exclude=.git --exclude=dist --exclude=coverage \
+            -czf "$RUNNER_TEMP/draft-toolchain.tar.gz" .
+      - name: Upload draft offline candidate
+        if: github.event_name == 'push' && contains(github.event.head_commit.message, '[ci:test]')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: draft-toolchain-${{ github.sha }}
+          path: ${{ runner.temp }}/draft-toolchain.tar.gz
+          if-no-files-found: error
+          retention-days: 1
       - run: bun run check
       - name: Reject incomplete migration before ready/main
         if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
