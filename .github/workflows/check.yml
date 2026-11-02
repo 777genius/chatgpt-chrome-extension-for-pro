@@ -1,19 +1,16 @@
 name: Checks
 on:
   push:
-    # Temporary PR-specific CI while frequent main merges temporarily cause
-    # GitHub to suppress pull_request checks on the conflicting merge ref.
-    branches: [main, feat/goal-complete-autocontinue-20261102]
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 concurrency:
-  group: checks-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  group: checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   check:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
