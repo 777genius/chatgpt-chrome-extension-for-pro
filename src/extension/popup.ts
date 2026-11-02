@@ -26,18 +26,18 @@ function popupElement(id:string):HTMLElement {
 }
 function popupButton(id:string):HTMLButtonElement {
   const node=popupElement(id);
-  if(!(node instanceof HTMLButtonElement))throw new Error("Popup button missing: "+id);
-  return node;
+  if(node.tagName !== "BUTTON")throw new Error("Popup button missing: "+id);
+  return node as HTMLButtonElement;
 }
 function popupTextArea(id:string):HTMLTextAreaElement {
   const node=popupElement(id);
-  if(!(node instanceof HTMLTextAreaElement))throw new Error("Popup textarea missing: "+id);
-  return node;
+  if(node.tagName !== "TEXTAREA")throw new Error("Popup textarea missing: "+id);
+  return node as HTMLTextAreaElement;
 }
 function popupNumeric(id:string):HTMLInputElement {
   const node=popupElement(id);
-  if(!(node instanceof HTMLInputElement))throw new Error("Popup number field missing: "+id);
-  return node;
+  if(node.tagName !== "INPUT")throw new Error("Popup number field missing: "+id);
+  return node as HTMLInputElement;
 }
 function popupError(error:unknown):string {
   return error instanceof Error ? error.message : String(error);
