@@ -47,7 +47,9 @@ function inspect(directory: "extension" | "dist/extension", name: ProbeName): un
         ? [{ sourceUrl: location.href, submittedText: "synthetic text" }]
         : [{ action: "send", url: location.href, text: "synthetic text", requireMax: true }];
   const result: unknown = runInContext("probe(" + args.map(arg => JSON.stringify(arg)).join(",") + ")", isolated);
-  return JSON.parse(JSON.stringify(result)) as unknown;
+  const serialized = JSON.stringify(result);
+  assert.equal(typeof serialized, "string", "MAIN probe must always return structured evidence");
+  return JSON.parse(serialized) as unknown;
 }
 
 test("all MAIN-world probes remain standalone after strict TypeScript emission", () => {
