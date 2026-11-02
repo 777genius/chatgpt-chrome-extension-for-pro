@@ -18,7 +18,7 @@
     "test:handoff": "node tests/handoff-check.mts",
     "typecheck": "tsc --noEmit",
     "check:syntax": "node scripts/syntax.mts",
-    "check": "bun run build && bun run check:syntax && bun run check:built && bun run typecheck && bun run test && bun run foundation:check && bun run foundation:assert-dev-only && bun run foundation:assert-registry",
+    "check": "bun run build && bun run check:syntax && bun run check:built && bun run typecheck && bun run test && bun run test:distribution && bun run foundation:check && bun run foundation:assert-dev-only && bun run foundation:assert-registry",
     "foundation:check": "agent-teams-foundation check",
     "foundation:status": "agent-teams-foundation status",
     "foundation:attach": "agent-teams-foundation attach",
@@ -27,7 +27,8 @@
     "foundation:assert-registry": "agent-teams-foundation assert-registry",
     "check:built": "bun scripts/check-build.ts",
     "check:changed": "agent-teams-foundation agent-workflow check-changed --consumer .",
-    "check:fast": "bun run build && bun run check:built && bun run typecheck && bun run test"
+    "check:fast": "bun run build && bun run check:built && bun run typecheck && bun run test",
+    "test:distribution": "bun scripts/test-distribution.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
