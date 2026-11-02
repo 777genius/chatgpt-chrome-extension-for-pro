@@ -123,9 +123,16 @@ async function retryMetadata(meta) {
     for (const key of keys) if (batch[key]) {
       const event=batch[key];
       if(replayRetries)retryByChat = reduceRetrySummary(retryByChat,event);
-      if(meta.handoffSourceClaimSchema!==1&&['handoff.navigating','handoff.imported'].includes(event.kind)&&event.operationId) {
+      if(meta.handoffSourceClaimSchema!==1&&event.operationId) {
         const source=retryDraftUrl(event.sourceUrl);
-        if(source&&!Object.hasOwn(handoffSourceClaims,source))handoffSourceClaims[source]={operationId:event.operationId,tabId:event.tabId,at:event.recordedAt};
+        if(source&&['handoff.navigating','handoff.imported'].includes(event.kind)&&
+            !Object.hasOwn(handoffSourceClaims,source))
+          handoffSourceClaims[source]={operationId:event.operationId,tabId:event.tabId,at:event.recordedAt};
+        // A proven pre-navigation failure can release only its own source
+        // claim, even when replaying an immutable legacy journal after upgrade.
+        if(source&&event.kind==='handoff.pre_navigation_cancelled'&&
+            handoffSourceClaims[source]?.operationId===event.operationId&&
+            handoffSourceClaims[source].tabId===event.tabId)delete handoffSourceClaims[source];
       }
       if(replaySends&&event.operationId) {
         const source=retryDraftUrl(event.sourceUrl);
@@ -220,12 +227,18 @@ function appendJournal(event, tab = {}) {
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
         ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey}:{})};
     }
-    if(['handoff.navigating','handoff.imported'].includes(event.kind)) {
-      const source=retryDraftUrl(sourceUrl);
-      if(event.kind==='handoff.navigating'&&(!source||!operationId||Object.hasOwn(handoffSourceClaims,source)))throw Object.assign(new Error('Передача этого чата уже запускалась'),{journalPolicy:true});
-      // Import every recovery copy, while the first source claim prevents a
-      // new navigation even when initialization already set the schema flag.
-      if(source&&operationId&&!Object.hasOwn(handoffSourceClaims,source))handoffSourceClaims[source]={operationId,tabId,at:Date.now()};
+    if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
+      const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
+      if(event.kind==='handoff.navigating'&&(!source||!operationId||claim))throw Object.assign(new Error('Передача этого чата уже запускалась'),{journalPolicy:true});
+      if(source&&event.kind==='handoff.pre_navigation_cancelled'){
+        // Only the worker can report a failed preparation before a native
+        // click. A different tab or operation cannot release this fence.
+        if(!claim||claim.operationId!==operationId||claim.tabId!==tabId)
+          throw Object.assign(new Error('Нельзя снять запрет другой передачи'),{journalPolicy:true});
+        delete handoffSourceClaims[source];
+      } else if(source&&operationId&&!claim) {
+        handoffSourceClaims[source]={operationId,tabId,at:Date.now()};
+      }
     }
     if (event.kind === 'send.authorized') {
       if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
