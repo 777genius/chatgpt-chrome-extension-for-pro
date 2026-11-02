@@ -124,9 +124,15 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
   const nativeUser=nativeUsers.at(-1);
   const recoveryContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
   const recoveryContainerKey=recoveryContainer?.getAttribute('data-content-search-turn-key')||recoveryContainer?.getAttribute('data-testid');
-  const recoveryBinding:RecoveryBinding|null=Boolean(recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&nativeAssistant?.messageId&&(!nativeUser||nativeUser.messageId))?{
-    kind:nativeUsers.length?'user':'assistant-only',url:location.origin+location.pathname,entryId:recoveryEntry.id,
-    assistantId:nativeAssistant.messageId,userId:nativeUser?.messageId||null}:null;
+  let recoveryBinding: RecoveryBinding | null = null;
+  if (recoverySurface && recoveryEntry?.id && recoveryContainerKey===recoveryEntry.id &&
+      nativeAssistant?.messageId && (!nativeUser || nativeUser.messageId)) {
+    recoveryBinding = {
+      kind: nativeUsers.length ? 'user' : 'assistant-only',
+      url: location.origin+location.pathname, entryId: recoveryEntry.id,
+      assistantId: nativeAssistant.messageId, userId: nativeUser?.messageId||null,
+    };
+  }
   if (recoveryAction === 'stop-recovery'||recoveryAction==='inspect-recovery') {
     const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
     const chatRoute=(value:string):string=>{try{const u=new URL(value);return u.origin==='https://chatgpt.com'?u.origin+(u.pathname==='/'?'/':u.pathname.replace(/\/$/,'')):'';}catch{return '';}};
