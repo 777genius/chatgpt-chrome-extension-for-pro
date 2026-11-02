@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - main
+      # Temporary draft-only opt-in CI lane; removed before merge.
+      - refactor/typescript-bun-modular
   pull_request:
     types:
       - opened
@@ -17,9 +19,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   check:
-    # Draft PRs do not burn a full test runner. Ready PRs and main remain blocking.
-    # workflow_dispatch explicitly permits a requested verification during drafting.
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # Draft pushes run the expensive gate only with a deliberate [ci:test] commit.
+    # Ready PRs and main always run the complete gate; dispatch remains explicit.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && !github.event.pull_request.draft) || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || contains(github.event.head_commit.message, '[ci:test]')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
