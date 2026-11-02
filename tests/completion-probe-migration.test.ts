@@ -85,6 +85,7 @@ test("compiled MAIN probe is self-contained and preserves prompt-bound final evi
   assert.equal(ready?.ok, true);
   assert.equal(ready?.assistantKey, "assistant-key");
   assert.equal(ready?.userId, "u1");
+  assert.equal(ready?.assistantId, "a1", "probe must preserve the native assistant message ID");
   assert.equal(ready?.assistantCompleted, true);
   assert.equal(ready?.generating, false);
   assert.equal(wrong?.reason, "route-changed");
