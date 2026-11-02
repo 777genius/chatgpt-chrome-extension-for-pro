@@ -60,14 +60,14 @@
       return serialize(async()=>{
         let record=await read(url);
         if(!record)return null;
-        if(record.operation&&['preparing','sending','clicked'].includes(record.phase)&&
+        if(record.operation&&['sending','clicked'].includes(record.phase)&&
             now()-record.operation.createdAt>120000) {
           record={...record,phase:'blocked',
             reason:'Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён'};
           await event('blocked',record,record.operation.tabId);
           await save(record);
-        } else if(['waiting','paused','recovering'].includes(record.phase)&&now()>=record.deadlineAt) {
-          record={...record,phase:'stopped',reason:'Время Goal истекло'};
+        } else if(['preparing','waiting','paused','recovering'].includes(record.phase)&&now()>=record.deadlineAt) {
+          record={...record,phase:'stopped',operation:null,pendingSendKind:null,reason:'Время Goal истекло'};
           await event('stopped',record,null);
           await save(record);
         }
@@ -96,6 +96,27 @@
       return {ok:true,record:view(await getRaw(target))};
     }
     async function getRaw(url) {return serialize(()=>read(url));}
+    async function recoverTab(tab) {
+      const url=canonical(tab?.url);
+      if(!url||typeof tab?.id!=='number')return {ok:false};
+      const record=await serialize(async()=>{
+        const current=await read(url);
+        if(!current||current.phase!=='preparing'||current.operation?.status!=='reserved'||
+            current.operation.tabId!==tab.id||current.stopRequested||current.pauseRequested)return null;
+        if(now()>=current.deadlineAt) {
+          const expired={...current,phase:'stopped',operation:null,reason:'Время Goal истекло'};
+          await event('stopped',expired,tab.id);
+          await save(expired);
+          return null;
+        }
+        return current;
+      });
+      if(!record)return {ok:false};
+      // Same operation ID only, never a new intent. A second receiver will
+      // inspect the worker grant again and cannot repeat an already claimed send.
+      await deliver(record);
+      return {ok:true};
+    }
     async function control({action,url,tabId}) {
       const target=requireUrl(url);
       const outcome=await serialize(async()=>{
@@ -305,7 +326,7 @@
         await storage.set({[key(source)]:moved,[key(target)]:next});
       });
     }
-    return Object.freeze({get,start,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffConfirm,
+    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffConfirm,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
