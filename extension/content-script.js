@@ -1245,6 +1245,7 @@
                 !!completedAttemptEvidence(attempt,{...native,attemptId:attempt.id});
               if(nativeFinal||(attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
                 attempt.goalNativeVerified=nativeFinal;
+                attempt.goalNativeUserId=nativeFinal&&typeof native.userId==='string'?native.userId:'';
                 void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
                 finish(text);
               }
@@ -1314,7 +1315,7 @@
       sessionTitle: document.title,
       response: snapshot.response,
       goalPromptKey:snapshot.promptKey,goalNativeVerified:attempt.goalNativeVerified===true,
-      goalRawExact:snapshot.goalMarkerExact===true,
+      goalRawExact:snapshot.goalMarkerExact===true,goalNativeUserId:attempt.goalNativeUserId||'',
       fingerprint,
       completionKey: snapshot.assistantKey
         ? `${snapshot.promptKey}|${snapshot.assistantKey}`
