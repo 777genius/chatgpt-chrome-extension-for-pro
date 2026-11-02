@@ -78,7 +78,7 @@
       const target=requireUrl(url),config=policy.settings({goal,rules,maxContinuations,maxMinutes});
       const result=await serialize(async()=>{
         const previous=await read(target);
-        if(previous&&!['completed','stopped','blocked','moved'].includes(previous.phase))
+        if(previous&&!['completed','stopped','moved'].includes(previous.phase))
           throw Error('Для этого чата уже запущена цель. Сначала остановите её');
         const time=now();
         const record={schema:1,id:uuid(),url:target,originUrl:target,goal:config.goal,rules:config.rules,
@@ -116,7 +116,8 @@
           const inFlight=['sending','clicked'].includes(old.phase);
           const record={...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
             ...(old.phase==='preparing'?{operation:null,pendingSendKind:null}:{}),
-            reason:inFlight?'Остановка после исхода текущей отправки':'Остановлено пользователем'};
+            reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
+              'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
           await event('stopped',record,tabId);
           await save(record);
           return {record};
