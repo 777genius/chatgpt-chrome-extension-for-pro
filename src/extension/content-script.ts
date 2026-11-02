@@ -840,7 +840,7 @@ declare global {
     if (state.blocked || state.failures.length >= 5 || state.remainingRetries===0) {
       state.blocked = true;
       state.reason ||= state.remainingRetries===0?'Дополнительные автоповторы исчерпаны':'Автопродолжение остановлено: 4 автоповтора за 2 минуты';
-      void audit('retry.blocked',{reason:state.reason,failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,error:error.response});
+      void audit('retry.blocked',{reason:state.reason,promptKey,failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,error:error.response});
       notifyError(error, state.reason);
       return;
     }
@@ -1164,7 +1164,7 @@ declare global {
     if (state.terminalHandled) return;
     state.terminalHandled = true;
     state.blocked = true;
-    void audit('retry.blocked',{reason:info?.action === 'new-chat'?'Требуется новый чат':'Неизвестный тип ошибки',terminal:true,goalHandoff:info?.action==='new-chat'});
+    void audit('retry.blocked',{reason:info?.action === 'new-chat'?'Требуется новый чат':'Неизвестный тип ошибки',promptKey,terminal:true,goalHandoff:info?.action==='new-chat'});
     // A new-chat recovery action is terminal: never send a retry in this chat.
     notifyError(error, info?.action === 'new-chat' ? 'Требуется новый чат' : 'Автоповтор отключён: неизвестный тип ошибки');
     if (info?.ok && info.action === 'new-chat') {
