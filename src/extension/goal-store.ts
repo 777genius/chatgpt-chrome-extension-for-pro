@@ -1,4 +1,9 @@
 "use strict";
+function goalErrorLabel(value:unknown):string {
+  const message=value!=null&&(typeof value==="object"||typeof value==="function")
+    ? Reflect.get(value,"message"):undefined;
+  return String(message||value);
+}
 interface GoalOperation {id:string;kind:"initial"|"continuation";text:string;tabId:number;createdAt:number;status:string;baselineKey?:string}
 interface GoalCompletion {url:string;tabId:number;completionKey:string;promptKey:string;response:string;nativeVerified:boolean;rawExact:boolean;userId:string}
 interface GoalSettings {goal:string;rules:string;maxContinuations:number;maxMinutes:number}
@@ -97,7 +102,7 @@ declare const module:undefined|{exports:unknown};
         if(!result?.ok)throw Error('Обработчик Goal недоступен во вкладке');
       } catch(error) {
         await report({url:record.url,tabId:op.tabId,id:record.id,operationId:op.id,status:'blocked',
-          reason:'Goal dispatch: '+String(error instanceof Error?error.message:error)}).catch(()=>{});
+          reason:'Goal dispatch: '+goalErrorLabel(error)}).catch(()=>{});
       }
     }
     async function get(url:string):Promise<GoalView|null> {
