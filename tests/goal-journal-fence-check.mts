@@ -22,6 +22,25 @@ const other='https://chatgpt.com/c/unrelated';
 const log=(kind:string,operationId:string,tabId:number,sourceUrl=url,extra:Record<string,unknown>={})=>
   api.appendJournal({kind,operationId,sourceUrl,...extra},{id:tabId,url:sourceUrl});
 
+// Goal and retry share a chat-level preparation window. Neither mode may
+// begin while the other's durable claim is active.
+const goalFirst='https://chatgpt.com/c/goal-first';
+storage['chatgpt-goal:'+goalFirst]={id:'g-first',phase:'preparing',
+  operation:{id:'g-op',status:'reserved',tabId:7}};
+await assert.rejects(()=>log('retry.planned','legacy-after-goal',8,goalFirst,
+  {promptKey:'/c/goal-first|previous'}),/Автоповтор/);
+assert.equal(storage['chatgpt-journal:meta']?.retryPreparingByChat?.[goalFirst],undefined);
+delete storage['chatgpt-goal:'+goalFirst];
+
+const retryFirst='https://chatgpt.com/c/retry-first';
+await log('retry.planned','legacy-first',8,retryFirst,
+  {promptKey:'/c/retry-first|previous'});
+await assert.rejects(()=>log('goal.started','goal-after-retry',7,retryFirst,
+  {goalId:'pending-goal'}),/автоматическая отправка/);
+await log('retry.finished','legacy-first',8,retryFirst,{clicked:false,confirmed:false});
+assert.equal((await log('goal.started','goal-after-retry',7,retryFirst,
+  {goalId:'pending-goal'})).ok,true);
+
 // Simulate the intentional crash window: Goal state was persisted but its
 // journal grant was not. Another tab still must not obtain a retry grant.
 storage['chatgpt-goal:'+url]={id:'goal-fixture',phase:'sending',
