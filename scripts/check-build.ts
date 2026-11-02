@@ -10,6 +10,12 @@ const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as
   content_scripts: { js: string[] }[];
   icons: Record<string, string>;
 };
+// Node's ESM package scope must never silently reinterpret classic Chrome
+// scripts required by the historical and generated-distribution test suites.
+const scriptPackage = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { type?: string };
+if (scriptPackage.type !== "commonjs") {
+  throw new Error("Chrome classic-script compatibility requires extension/package.json type=commonjs");
+}
 const files = new Set<string>([
   manifest.background.service_worker,
   ...manifest.content_scripts.flatMap((script) => script.js),
