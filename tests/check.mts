@@ -405,10 +405,18 @@ async function popupRecoveryCheck() {
   const messages:any[]=[];
   let finishRecovery:(result:any)=>void=()=>{};
   const info={ok:true,available:true,operationId:'legacy-op',tabId:7,targetUrl:'https://chatgpt.com/c/target',desiredTitle:'Saved title (2)'};
+  const goalUrl='https://chatgpt.com/c/popup-fixture';
+  const goalPhases:Record<string,string>={start:'preparing',pause:'paused',resume:'preparing',stop:'stopped'};
   const ctx=createContext({document,chrome:{runtime:{sendMessage:async(message:any)=>{
     messages.push(message);
     if(message.type==='CHATGPT_HANDOFF_TITLE_INFO')return info;
     if(message.type==='CHATGPT_HANDOFF_RENAME_RECOVER')return new Promise(resolve=>{finishRecovery=resolve;});
+    if(message.type==='CHATGPT_GOAL_CONTROL') {
+      if(message.action==='get')return {ok:true,tabId:7,url:goalUrl,record:null};
+      return {ok:true,record:{id:'popup-goal',phase:goalPhases[message.action],
+        goal:'Finalize popup goal',rules:'',maxContinuations:2,maxMinutes:15,
+        continuations:0,deadlineAt:Date.now()+60_000,operation:null}};
+    }
     return {ok:true};
   }},tabs:{create(){}}}});
   runInContext(readFileSync('extension/popup.js','utf8'),ctx);
@@ -419,6 +427,25 @@ async function popupRecoveryCheck() {
     ['CHATGPT_GOAL_CONTROL','CHATGPT_HANDOFF_TITLE_INFO'].sort(),
     'opening the popup only reads Goal state and recovery information');
   assert.equal(messages.find(item=>item.type==='CHATGPT_GOAL_CONTROL')?.action,'get');
+  await waitFor(()=>document.getElementById('goal-start')!.disabled===false);
+  (document.getElementById('goal-text') as HTMLTextAreaElement).value='Finalize popup goal';
+  const actions:[string,string,string|null][]=[
+    ['start','goal-start','goal-pause'],['pause','goal-pause','goal-resume'],
+    ['resume','goal-resume','goal-stop'],['stop','goal-stop',null]
+  ];
+  for(const [action,id,nextId] of actions) {
+    const control=document.getElementById(id)!;
+    assert.equal(control.disabled,false,action+' control must be available');
+    control.dispatchEvent(new window.Event('click'));
+    await waitFor(()=>messages.some(item=>item.type==='CHATGPT_GOAL_CONTROL'&&item.action===action));
+    const sent=messages.filter(item=>item.type==='CHATGPT_GOAL_CONTROL'&&item.action===action);
+    assert.equal(sent.length,1,action+' must dispatch once');
+    assert.equal(sent[0].expectedTabId,7);
+    assert.equal(sent[0].expectedUrl,goalUrl,'actions remain bound to the initial chat');
+    if(action==='start')assert.equal(sent[0].goal,'Finalize popup goal');
+    if(nextId)await waitFor(()=>document.getElementById(nextId)!.disabled===false);
+  }
+  assert.match(document.getElementById('goal-status')!.textContent||'',/Остановлено/);
   const button=document.getElementById('recover-title')!;
   button.dispatchEvent(new window.Event('click'));
   button.dispatchEvent(new window.Event('click'));
