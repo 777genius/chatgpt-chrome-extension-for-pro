@@ -5,10 +5,15 @@ must first pass the complete nonbrowser gate and independent review on the
 final current commit. This checklist is for a **separate test browser
 profile and designated disposable ChatGPT test chat**, not working chats.
 
-1. Build exactly the reviewed SHA with frozen Bun dependencies. Load
-   `dist/extension/` using Chrome's **Load unpacked**. Verify version
+1. From the successful, current-head **Ready PR** GitHub Actions run,
+   download its `chrome-mv3-<run SHA>` artifact and extract the
+   `dist/extension/` contents. This is the preferred way to test precisely
+   the build that passed CI. If rebuilding locally instead, use the exact
+   reviewed PR head/base and `bun install --frozen-lockfile`. Load the
+   generated directory through Chrome's **Load unpacked**. Verify version
    matches `package.json` and Chrome requests no permissions beyond
-   `extension/manifest.json`.
+   `extension/manifest.json`. Record both the PR head SHA and the Actions
+   run SHA — PR checks may test a synthetic merge commit.
 2. Manually send a test prompt and confirm the completion notification,
    sound, response association, unread indicator, and tab-focus retirement.
    Test successful, failed, cancelled and restarted generation separately.
