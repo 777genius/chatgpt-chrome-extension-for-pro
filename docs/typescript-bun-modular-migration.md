@@ -201,3 +201,36 @@ parity checks, not the old 29-program baseline.
 
 The old draft checkpoints above are retained as historical snapshots only.
 They are not completion evidence for the current branch.
+
+## Draft 1.6.5 checkpoint (latest upstream reconciliation)
+
+Current protected baseline is main `319520a06c5dbf6aeb9818eef3989d9e43b96091` (version 1.6.5).
+This fixes first-turn allocation under native evidence and new-chat request
+timestamp gates. Its script changes and current tests are merged into this Draft;
+the typed completion checkpoint/probe overlays were updated from that release,
+not left on 1.6.4 semantics. The
+`tests/allocation-migration.test.ts` scenario compares original and emitted
+code for first-turn, time-window, read-only, mismatch, and error fences.
+
+**Current implementation:** 19 of 21 source runtime scripts have strict
+TypeScript counterparts. The remaining legacy entries are
+`extension/content-script.js` and `extension/service-worker.js`; they
+remain unchanged in the emitted distribution until safely ported. Chrome's
+synchronous event-registration requirements are still authoritative.
+
+The journal UI now exercises actual Get Modular Core/Assembly capability
+composition, Resources cleanup and Conformance, with an IIFE bundle that
+runs in the Chrome page and has a no-Node/no-Bun runtime smoke test.
+Observation is still not product-adopted. The unreleased Lifecycle Kernel is
+out of scope unless separately justified and qualified.
+
+The branch has a **release-only blocking `check:complete`** verifying every
+historical Chrome JS entry is typed and `bun.lock` exists. Draft feedback
+does not bypass this final gate; the full nonbrowser test matrix and Foundation
+qualification must also pass on the exact final PR head. A paused/queued GitHub
+Actions run is never completion evidence. Remove diagnostic workflow scaffolding
+and the historical npm lock after the authoritative Bun lock is frozen.
+
+Do not merge until all checks, independent review and owner Chrome smoke
+approval are complete. The owner-only checklist is
+`docs/browser-smoke-checklist.md`.
