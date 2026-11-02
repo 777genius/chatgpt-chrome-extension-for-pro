@@ -80,7 +80,7 @@ declare const module:undefined|{exports:unknown};
       return {id:uuid(),kind,text:kind==='initial'?policy.initialText(record):policy.continuationText(record),
         tabId,createdAt:time,status:'reserved'};
     }
-    function canSend(record:GoalRecord|null,tabId:number,id:string,operationId:string,phase:string):boolean {
+    function canSend(record:GoalRecord|null,tabId:number,id:string,operationId:string,phase:string):record is GoalRecord & {operation:GoalOperation} {
       return !!record&&record.id===id&&record.url&&record.operation?.id===operationId&&
         record.operation.tabId===tabId&&record.phase===phase&&!record.pauseRequested&&!record.stopRequested;
     }
@@ -227,7 +227,7 @@ declare const module:undefined|{exports:unknown};
         }
         throw Error('Неизвестное действие Goal');
       });
-      if(outcome.dispatch)await deliver(outcome.record);
+      if('dispatch' in outcome&&outcome.dispatch)await deliver(outcome.record);
       return {ok:true,record:view(await getRaw(target))};
     }
     async function check({url,tabId,id,operationId,phase='preparing'}:GoalOperationRef & {phase?:string}) {
@@ -301,8 +301,11 @@ declare const module:undefined|{exports:unknown};
       // A fast answer may finish before the asynchronous send-ack arrives. Keep
       // the response durably bound to the operation, then process after the
       // confirmed new user turn. Recovery can replay the same record safely.
-      if(result.replay)await completion(result.replay);
-      return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason};
+      const replay='replay' in result&&result.replay?result.replay:null;
+      if(replay)await completion(replay);
+      const recorded='record' in result?result.record:undefined;
+      const reason='reason' in result?result.reason:undefined;
+      return {ok:result.ok,record:replay?await get(url):recorded,reason};
     }
     async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}:GoalCompletion) {
       const target=canonical(url);
@@ -342,7 +345,7 @@ declare const module:undefined|{exports:unknown};
         await save(next);
         return {ok:true,record:next,dispatch:next.phase==='preparing'};
       });
-      if(result.dispatch)await deliver(result.record);
+      if('dispatch' in result&&result.dispatch&&'record' in result&&result.record)await deliver(result.record);
       return {ok:result.ok,record:view(await getRaw(target))};
     }
     async function manual({url,tabId}:{url:string;tabId:number}) {
