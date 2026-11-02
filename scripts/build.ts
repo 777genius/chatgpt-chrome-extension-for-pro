@@ -20,7 +20,7 @@ const transpiler = new Bun.Transpiler({ loader: "ts", target: "browser" });
 
 let migrated = 0;
 if (existsSync(typed)) {
-  for (const name of readdirSync(typed).filter((file) => file.endsWith(".ts"))) {
+  for (const name of readdirSync(typed).filter((file) => file.endsWith(".ts") && file !== "journal-modular.ts")) {
     const from = join(typed, name);
     const to = join(destination, name.replace(/\.ts$/, ".js"));
     const input = readFileSync(from, "utf8");
