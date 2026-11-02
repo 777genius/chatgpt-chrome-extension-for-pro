@@ -118,7 +118,15 @@ function render(): void {
 }
 async function refresh(): Promise<void> {
   try {
-    journal = asJournalView(await chrome.runtime.sendMessage({ type: "CHATGPT_JOURNAL_READ" }));
+    const composed = (globalThis as typeof globalThis & {
+      ChatGPTJournalModular?: { read(transport: {
+        sendMessage(message: { type: "CHATGPT_JOURNAL_READ" }): Promise<unknown>;
+      }): Promise<unknown> };
+    }).ChatGPTJournalModular;
+    if (!composed) throw new Error("Journal composition has not been loaded");
+    journal = asJournalView(await composed.read({
+      sendMessage: (message) => chrome.runtime.sendMessage(message),
+    }));
     render();
   } catch (error: unknown) {
     element("status").textContent = "Не удалось прочитать журнал: " +
