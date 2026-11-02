@@ -243,7 +243,7 @@
         return {ok:false,reason:'Неподдерживаемый результат Goal'};
       });
     }
-    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact}) {
+    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
       const target=canonical(url);
       if(!target||typeof completionKey!=='string'||!completionKey||typeof promptKey!=='string'||
           !completionKey.startsWith(promptKey+'|')||typeof response!=='string')return {ok:false};
@@ -251,7 +251,9 @@
         const record=await read(target);
         if(!record||!['waiting','paused'].includes(record.phase)||record.operation||
             record.lastCompletionKey===completionKey||
-            (!record.handoffPending&&record.expectedPromptKey!==promptKey))return {ok:false};
+            (!record.handoffPending&&record.expectedPromptKey!==promptKey)||
+            (record.handoffPending&&(!record.handoffAcceptedUserId||userId!==record.handoffAcceptedUserId)))
+          return {ok:false};
         const outcome=policy.decision(record,response,rawExact,nativeVerified,now());
         let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,handoffPending:false};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
@@ -316,7 +318,7 @@
         await save(next);
       });
     }
-    async function handoffConfirm({sourceUrl,targetUrl,handoffId,tabId}) {
+    async function handoffConfirm({sourceUrl,targetUrl,handoffId,tabId,acceptedUserId}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target)return;
       await serialize(async()=>{
@@ -325,11 +327,13 @@
         if(existing?.id===old?.id&&old?.phase==='moved')return;
         if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)
           return;
+        if(typeof acceptedUserId!=='string'||!acceptedUserId)
+          throw Error('Нативный ID перенесённого пользовательского сообщения не подтверждён');
         if(existing&&!['completed','stopped','blocked','moved'].includes(existing.phase))
           throw Error('В новом чате уже есть другая активная цель');
         const moved={...old,phase:'moved',reason:'Цель перенесена в '+target,operation:null};
         const next={...old,url:target,phase:old.preHandoffPhase==='paused'?'paused':'waiting',
-          reason:'',expectedPromptKey:null,handoffPending:true,operation:null,pendingCompletion:null};
+          reason:'',expectedPromptKey:null,handoffPending:true,handoffAcceptedUserId:acceptedUserId,operation:null,pendingCompletion:null};
         await event('handoff_confirmed',next,tabId,{sourceUrl:source,targetUrl:target,handoffId});
         await storage.set({[key(source)]:moved,[key(target)]:next});
       });
