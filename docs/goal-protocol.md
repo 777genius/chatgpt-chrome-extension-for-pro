@@ -13,7 +13,7 @@ Implement **Goal** only. Message queue / Steer is out of scope and remains unimp
 
 ## State machine
 
-`idle → preparing → sending → waiting → (complete | preparing | paused | stopped | blocked)`; `handoff` waits for independently confirmed destination. On restart, `preparing`/`sending` cannot automatically retry because an already-clicked send may be unacknowledged; acknowledge `unknown` instead. Persist one operation and one bound completion key.
+`idle → preparing → sending → waiting → (complete | preparing | paused | stopped | blocked)`; `handoff` waits for independently confirmed destination. On restart, a persisted but unclaimed `preparing` operation may be redelivered with its **same operation ID**. Once `intent` exists, `sending` cannot automatically retry: a click may have occurred without acknowledgement, so the outcome is `unknown` and automatic resending stops. Persist one operation and one bound completion key.
 
 ## Verification requirements
 
