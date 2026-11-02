@@ -4,9 +4,13 @@
 // journal authorization; typed ports cannot grant a send or infer an ACK.
 interface SWReceipt { epoch:string; order:number }
 interface SWTab {id:number;url?:string;windowId?:number;title?:string;active?:boolean;discarded?:boolean;frozen?:boolean;status?:string}
-interface SWEvent<T extends readonly unknown[]> { addListener(listener:(...args:T)=>void|boolean):void; removeListener?(listener:(...args:T)=>void|boolean):void }
+interface SWEvent<T extends readonly unknown[]> { addListener(listener:(...args:T)=>unknown):void; removeListener?(listener:(...args:T)=>unknown):void }
 interface SWRequest {tabId:number;method:string;url:string;documentUrl?:string;initiator?:string;requestId:string;timeStamp:number;statusCode:number;error?:string}
 interface SWMessage {
+  at?:number;boundPromptKey?:string;captureHistory?:boolean;completionStartedAt?:number;
+  fingerprint?:string;goalNativeUserId?:string;goalNativeVerified?:boolean;goalPromptKey?:string;
+  goalRawExact?:boolean;httpCompleted?:boolean;savedSequence?:number;sessionTitle?:string;
+  startReceipt?:SWReceipt;warningKind?:string;context?:string;automatic?:boolean;
   type?:string;url?:string;status?:string;stage?:string;id?:string;operationId?:string;
   goalId?:string;attemptId?:string;promptKey?:string;newPromptKey?:string;requestId?:string;
   startedAt?:number;delayMs?:number;alertIndex?:number;recoveryBinding?:unknown;
@@ -25,6 +29,8 @@ interface SWComposerOptions {
   requireMax?:boolean;fileName?:string;[key:string]:unknown;
 }
 interface SWProof {
+  auditError?:boolean;receiptError?:boolean;proof?:string;recoveryBinding?:unknown;
+  startedAt?:number;durationMs?:number;titleStatus?:string;state?:unknown;record?:SWStorageDocument|null;
   ok?:boolean;accepted?:boolean;clicked?:boolean;unknown?:boolean;
   confirmed?:boolean;stopped?:boolean;idle?:boolean;needsStop?:boolean;
   ready?:boolean;nativeVerified?:boolean;rawExact?:boolean;duplicate?:boolean;
@@ -40,6 +46,8 @@ interface SWStatusValue {kind?:string;eventAt?:number;receipt?:SWReceipt;unread?
 interface SWStatusView {url:string;revision:number;status?:SWStatusValue|null;seenChanged?:boolean}
 interface SWHandoffNaming {version:number;sourceUrl:string;baseTitle:string;part:number;title:string}
 interface SWHandoffRecord extends Record<string,unknown> {
+  reason?:string;url?:string;attemptId?:string;baselineKey?:string;promptKey?:string;
+  requestId?:string;startedAt?:number;state?:string;
   id:string;stage:string;sourceUrl:string;sourceTitle?:string;targetUrl?:string;
   text?:string;prompt?:string;fileName?:string;asFile?:boolean;
   draft?:string;naming?:SWHandoffNaming;title?:string;
@@ -128,6 +136,14 @@ interface SWGoalAPI {
 }
 interface SWGoalPolicy {canonical(url:string|undefined):string}
 declare const chrome:SWChrome;
+declare global {
+  var __chatgptNotifierDispose:(()=>void)|null|undefined;
+  var __chatgptNotifierVersion:string|null|undefined;
+  var __chatgptNotifierRequestReceipt:SWReceipt|null|undefined;
+  var __chatgptNotifierRequestStartedAt:number|null|undefined;
+  var __chatgptNotifierAttemptId:string|null|undefined;
+  var __chatgptNotifierRequestId:string|null|undefined;
+}
 declare const ChatGPTGoalStore:{create(options:Record<string,unknown>):SWGoalAPI};
 declare const ChatGPTGoalPolicy:SWGoalPolicy;
 declare const ChatGPTHandoffTitle:{
