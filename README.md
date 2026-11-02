@@ -48,6 +48,29 @@ Requires Node.js 26+ and an existing local debugging connection. An existing aut
 
 Strict mode refuses collection when another page's shared heap identity is unknown. `--collect --include-active --allow-unmeasured-peers` is an explicit alternative for measurable heaps; shared activity with unreachable pages remains unverified. Private macOS shortcuts can provide separate **Inspect** and **Clean available memory** actions, using the same private ledger at `$HOME/.local/state/chatgpt-chrome-memory`. [Shortcut behavior and reports](docs/memory-cleanup.md#daily-use-on-macos).
 
+## Draft TypeScript migration (PR #4)
+
+This branch is **not release-ready**. It incrementally replaces the classic
+extension JavaScript with strict TypeScript and generates browser-compatible
+classic scripts into `dist/extension/` using Bun. The original `extension/`
+remains an intentional behavior reference until full parity is qualified.
+Install and test **`dist/extension/`**, not `extension/`, when validating
+the migration build. Do not load the draft into a real work profile or real
+ChatGPT conversations.
+
+After `bun.lock` is frozen, the required build and nonbrowser checks are:
+
+```sh
+bun install --frozen-lockfile
+bun run check
+```
+
+This includes tests executed against both the original and generated runtime.
+It **does not** prove live Chrome/ChatGPT behavior; the owner will run a
+dedicated test-chat smoke test before merge. Read the
+[migration contract](docs/typescript-bun-modular-migration.md) for the checklist
+and current blockers.
+
 ## Development
 
 Node.js **26+**:
