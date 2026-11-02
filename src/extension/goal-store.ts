@@ -2,6 +2,7 @@
 interface GoalOperation {id:string;kind:"initial"|"continuation";text:string;tabId:number;createdAt:number;status:string;baselineKey?:string}
 interface GoalCompletion {url:string;tabId:number;completionKey:string;promptKey:string;response:string;nativeVerified:boolean;rawExact:boolean;userId:string}
 interface GoalSettings {goal:string;rules:string;maxContinuations:number;maxMinutes:number}
+interface GoalRecovery { operationId:string; sourcePromptKey:string; tabId:number }
 interface GoalRecord extends GoalSettings {
  schema:number;id:string;url:string;originUrl:string;deadlineAt:number;startedAt:number;phase:string;reason:string;continuations:number;
  expectedPromptKey:string|null;lastCompletionKey:string;pendingCompletion:{key:string;promptKey:string}|null;
@@ -9,6 +10,7 @@ interface GoalRecord extends GoalSettings {
  pendingSendKind?:GoalOperation["kind"]|null;earlyCompletion?:GoalCompletion|null;earlyCompletions?:GoalCompletion[];
  handoffEarlyCompletion?:GoalCompletion|null;handoffEarlyCompletions?:GoalCompletion[];
  handoffAcceptedUserId?:string;preHandoffPhase?:string;manualOverride?:boolean;
+ lastSendTabId?:number;recovery?:GoalRecovery|null;
 }
 type GoalView=Omit<GoalRecord,"operation"> & {operation:Pick<GoalOperation,"id"|"kind"|"status"|"createdAt">|null};
 interface GoalHost {
@@ -31,7 +33,7 @@ interface GoalStore {
  authorize(input:GoalOperationRef & {text:string}):Promise<unknown>;
  report(input:GoalOperationRef & {status:string;reason?:string;newPromptKey?:string}):Promise<unknown>;
  completion(input:GoalCompletion):Promise<unknown>;manual(input:{url:string;tabId:number}):Promise<unknown>;
- retry(input:{url:string;tabId:number;kind:string;promptKey?:string;goalHandoff?:boolean}):Promise<unknown>;
+ retry(input:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;goalHandoff?:boolean}):Promise<unknown>;
  handoffBegin(input:{sourceUrl:string;handoffId:string;tabId:number}):Promise<unknown>;
  handoffConfirm(input:{sourceUrl:string;targetUrl:string;handoffId:string;tabId:number;acceptedUserId:string}):Promise<unknown>;
  stageHandoffCompletion(input:GoalCompletion & {sourceUrl:string;targetUrl:string;handoffId:string}):Promise<unknown>;
@@ -289,7 +291,7 @@ declare const module:undefined|{exports:unknown};
             .find(item=>item.promptKey===newPromptKey)||null;
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
-            expectedPromptKey:newPromptKey,handoffPending:false,operation:null,
+            expectedPromptKey:newPromptKey,lastSendTabId:tabId,recovery:null,handoffPending:false,operation:null,
             earlyCompletion:stop?null:early,earlyCompletions:[],
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
@@ -373,21 +375,44 @@ declare const module:undefined|{exports:unknown};
         return {ok:true};
       });
     }
-    async function retry({url,tabId,kind,promptKey,goalHandoff=false}:{url:string;tabId:number;kind:string;promptKey?:string;goalHandoff?:boolean}) {
+    async function retry({url,tabId,kind,promptKey,sourcePromptKey,operationId,goalHandoff=false}:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;goalHandoff?:boolean}) {
       const target=canonical(url);
       if(!target)return;
       await serialize(async()=>{
         const record=await read(target);
         if(!record||!['waiting','recovering','paused'].includes(record.phase))return;
         if(kind==='retry.blocked'&&goalHandoff)return; // new-chat recovery is not a failed Goal
+        if(typeof record.lastSendTabId==='number'&&record.lastSendTabId!==tabId)return;
         let next=record;
-        if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
-        if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
-          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey};
-        if(['retry.failed','retry.blocked'].includes(kind))
-          next={...record,phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'};
+        if(kind==='retry.planned') {
+          // Match the failed Goal turn. The same chat URL is insufficient:
+          // unrelated turns and tabs must never replace Goal's answer identity.
+          if(!operationId||!record.expectedPromptKey||sourcePromptKey!==record.expectedPromptKey||
+              (record.recovery&&record.recovery.operationId!==operationId))return;
+          next={...record,phase:record.phase==='paused'?'paused':'recovering',
+            recovery:{operationId,sourcePromptKey,tabId}};
+        }
+        if(kind==='retry.confirmed') {
+          const owner=record.recovery;
+          if(!owner||owner.operationId!==operationId||owner.tabId!==tabId||
+              owner.sourcePromptKey!==record.expectedPromptKey||
+              typeof promptKey!=='string'||!promptKey.startsWith(new URL(target).pathname+'|')||
+              promptKey===record.expectedPromptKey)return;
+          next={...record,phase:record.phase==='paused'?'paused':'waiting',
+            expectedPromptKey:promptKey,recovery:null};
+        }
+        if(['retry.failed','retry.blocked'].includes(kind)) {
+          const owner=record.recovery;
+          const belongs=owner?.operationId===operationId&&owner.tabId===tabId&&
+            owner.sourcePromptKey===record.expectedPromptKey;
+          const terminalTurn=kind==='retry.blocked'&&!operationId&&
+            sourcePromptKey===record.expectedPromptKey;
+          if(!belongs&&!terminalTurn)return;
+          next={...record,phase:'blocked',recovery:null,
+            reason:'Восстановление запроса завершилось ошибкой'};
+        }
         if(next===record)return;
-        await event('recovery',next,tabId,{recoveryKind:kind});
+        await event('recovery',next,tabId,{recoveryKind:kind,operationId:operationId||''});
         await save(next);
       });
     }
@@ -455,7 +480,7 @@ declare const module:undefined|{exports:unknown};
         const moved={...old,phase:'moved',reason:'Цель перенесена в '+target,
           operation:null,handoffEarlyCompletion:null,handoffEarlyCompletions:[]};
         const next={...old,url:target,phase:old.preHandoffPhase==='paused'?'paused':'waiting',
-          reason:'',expectedPromptKey:null,handoffPending:true,handoffAcceptedUserId:acceptedUserId,
+          reason:'',expectedPromptKey:null,lastSendTabId:tabId,recovery:null,handoffPending:true,handoffAcceptedUserId:acceptedUserId,
           operation:null,pendingCompletion:null,earlyCompletion:retained,earlyCompletions:[],
           handoffEarlyCompletion:null,handoffEarlyCompletions:[]};
         await event('handoff_confirmed',next,tabId,{sourceUrl:source,targetUrl:target,handoffId});
