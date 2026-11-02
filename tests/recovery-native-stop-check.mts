@@ -16,6 +16,6 @@ assert.equal(inspect().stopped,true);assert.equal(stops,1,'only exact native Sto
 runInContext("location.href='https://chatgpt.com/c/test/?query=1#latest';location.pathname='/c/test/'",context);
 assert.equal(inspect('/c/test/|fallback-turn-0:0:user').stopped,true,'URL normalization preserves the exact current prompt key for a trailing path');
 runInContext("location.pathname='/c/test'",context);
-stop.remove();const absent=inspect();assert.equal(absent.ok,false);assert.equal(absent.stopped,false);assert.match(absent.reason,/остановки/);
+stop.remove();const absent=inspect();assert.equal(absent.ok,false);assert.equal(absent.stopped,false);assert.match(absent.reason,/не подтверждены/);
 assert.equal(stops,2,'a missing Stop is a refusal, never an authorization to send');
 console.log('Native recovery Stop: locale-independent banner, exact prompt, disabled control and missing-control refusal passed.');
