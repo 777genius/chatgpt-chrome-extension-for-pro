@@ -4,7 +4,7 @@ import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
 const source=['memory-maintenance.js','handoff-title.js','content-script.js'].map(name=>readFileSync(`extension/${name}`,'utf8')).join('\n');
-type Mode='delayed'|'timeout'|'manual-edit'|'generation-resumed';
+type Mode='delayed'|'timeout'|'manual-edit'|'generation-resumed'|'missing-stop'|'selector-miss'|'assistant-idle';
 type Message=Record<string,any>;
 const originalDraft='Owner draft\n  exact whitespace';
 
@@ -33,9 +33,11 @@ async function check(mode:Mode) {
       if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
       if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
       if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
-      if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
+      if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry',recoveryBinding:mode==='assistant-idle'?{kind:'assistant-only',url:'https://chatgpt.com/c/recovery-fixture',entryId:'conversation-turn-partial',assistantId:'assistant-id',userId:null}:null};
       if(message.type==='CHATGPT_STOP_RECOVERY'){
         stops++;assert.equal(editor.textContent,originalDraft,'native stop must precede changing the owner draft');
+        if(mode==='missing-stop')return {ok:false,stopped:false,reason:'Нативная кнопка остановки не найдена; автопродолжение отменено'};
+        if(mode==='assistant-idle'){assert.equal(message.recoveryBinding?.assistantId,'assistant-id');stoppedAt=time;return {ok:true,stopped:false,idle:true,proof:'native-voice-idle'};}
         stoppedAt=time;editor.textContent='';document.querySelector('[data-testid="stop-button"]')!.remove();document.querySelector('[role="status"]')!.remove();
         return {ok:true,stopped:true};
       }
@@ -64,6 +66,9 @@ async function check(mode:Mode) {
       if(['CHATGPT_RESPONSE_COMPLETE','CHATGPT_RESPONSE_ERROR'].includes(message.type))notifications.push(message);
       return {ok:true};
     }}}});
+  if(mode==='missing-stop'||mode==='assistant-idle')document.querySelector('[data-testid=stop-button]')!.remove();
+  if(mode==='assistant-idle')document.querySelector('[data-turn=user]')!.remove();
+  if(mode==='selector-miss'){const original=document.querySelectorAll.bind(document);document.querySelectorAll=((selector:string)=>selector.includes('fruitjuice-stop-button')?[]:original(selector)) as typeof document.querySelectorAll;}
   runInContext(readFileSync('extension/journal-store.js','utf8'),context);
   runInContext(source,context);
   // A watcher for the original interrupted request must be retired when its
@@ -73,8 +78,14 @@ async function check(mode:Mode) {
   for(let i=0;i<1000&&!logs.some(event=>event.kind==='draft.restored');i++)await new Promise<void>(resolve=>setImmediate(resolve));
   context.__chatgptNotifierDispose();
   assert.equal(stops,1);assert.equal(notifications.filter(item=>item.type==='CHATGPT_RESPONSE_COMPLETE').length,0,'stopping recovery must not announce the existing partial answer as success');
+  if(mode==='missing-stop'){
+    assert.equal(sends.length,0);assert.equal(editor.textContent,originalDraft);
+    assert.ok(notifications.some(item=>item.type==='CHATGPT_RESPONSE_ERROR'&&item.retryReason?.includes('Нативная кнопка остановки не найдена')));
+    assert.equal(logs.filter(event=>event.kind==='retry.send_intent').length,0);
+    return;
+  }
   assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.timeoutMs===60000),'a successful recovery stop grants one bounded 60-second readiness budget');
-  if(mode==='delayed'){
+  if(mode==='delayed'||mode==='selector-miss'||mode==='assistant-idle'){
     assert.deepEqual(sends,['доделай е2е']);assert.ok(sendAt-stoppedAt>10000);assert.ok(nativeInspects>1);
     assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.phase==='send-button'));
     assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.phase==='native-ready'));
@@ -92,5 +103,5 @@ async function check(mode:Mode) {
   }
 }
 
-for(const mode of ['delayed','timeout','manual-edit','generation-resumed'] as const)await check(mode);
+for(const mode of ['delayed','timeout','manual-edit','generation-resumed','missing-stop','selector-miss','assistant-idle'] as const)await check(mode);
 console.log('PASS: hidden recovery readiness beyond 10s, native model settling, one intent/click, bounded 60s failure, manual edit/generation cancellation, draft preservation and no partial-answer success');
