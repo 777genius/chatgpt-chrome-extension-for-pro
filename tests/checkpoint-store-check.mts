@@ -20,3 +20,16 @@ assert.equal((await run('completionCheckpointRead(7)')).requestId,'request-b','d
 assert.equal(await run("completionCheckpointFinish(7,200,'complete','request-b')"),true);
 assert.equal(await run("completionCheckpointFinish(7,200,'complete','request-b')"),false,'terminal completion is claimed at most once');
 console.log('Checkpoint store: protected baseline, bound prompt, route, stop, newer request and terminal fences passed.');
+
+const allocating={state:'active',url:'https://chatgpt.com/',startedAt:100000,baselineKey:'',promptKey:''};
+const native={ok:true,url:'https://chatgpt.com/c/new',firstTurn:true,firstUserSentAtMs:99990,isLatest:true,isReadOnly:false,hasError:false,userId:'user',promptKey:'/c/new|user',turnStatus:'complete',generating:false,assistantCompleted:true,assistantPhase:'final_answer',assistantId:'answer',assistantKey:'answer-key'};
+context.allocating=allocating;context.native=native;
+assert.equal((await run("completionAllocationEvidence(allocating,native.url,native)")).promptKey,native.promptKey);
+for(const patch of [{firstTurn:false},{firstUserSentAtMs:null},{firstUserSentAtMs:80000},{hasError:true},{isReadOnly:true},{assistantCompleted:false},{generating:true}]){
+ context.native={...native,...patch};assert.equal(await run('completionAllocationEvidence(allocating,native.url,native)'),null,'unbound history/error cannot adopt the request');
+}
+context.native=native;
+for(const patch of [{baselineKey:'/|old'},{baselineKey:null},{state:'stopped'},{promptKey:'/c/other|user'},{url:'https://chatgpt.com/c/other'},{startedAt:NaN}]){
+ context.allocating={...allocating,...patch};assert.equal(await run('completionAllocationEvidence(allocating,native.url,native)'),null);
+}
+console.log('New-chat allocation: first native user timing, empty baseline, completed evidence and route fences passed.');

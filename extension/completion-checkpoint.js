@@ -54,3 +54,18 @@ function completionCheckpointFinish(tabId,startedAt,state,requestId=null){
     return {record:{...metadata,state},value:true};
   });
 }
+
+// Only a first prompt sent from a proven empty new-chat composer can adopt
+// its permanent URL. A matching loading record and request fences are checked
+// by the worker before this observation-only update.
+function completionAllocationEvidence(record,url,native){
+  if(record?.state!=='active'||record.url!=='https://chatgpt.com/'||record.baselineKey!==''||record.promptKey||!Number.isFinite(record.startedAt)||
+      !/^https:\/\/chatgpt\.com\/c\/[a-z0-9-]+$/.test(url)||!native?.ok||native.url!==url||
+      native.firstTurn!==true||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||
+      !native.userId||!native.promptKey||!Number.isFinite(native.firstUserSentAtMs)||
+      Math.abs(native.firstUserSentAtMs-record.startedAt)>10000)return null;
+  const progress=native.turnStatus==='in_progress'&&native.generating===true;
+  const final=native.turnStatus==='complete'&&native.generating===false&&native.assistantCompleted===true&&
+    native.assistantPhase==='final_answer'&&native.assistantId&&native.assistantKey;
+  return progress||final?{url,promptKey:native.promptKey}:null;
+}

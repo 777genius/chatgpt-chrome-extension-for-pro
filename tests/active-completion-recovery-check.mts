@@ -4,10 +4,11 @@ import {createContext,runInContext} from 'node:vm';
 const source=readFileSync('extension/content-script.js','utf8');
 const recovery=source.slice(source.indexOf('  function scheduleActiveCompletionRecovery()'),source.indexOf('  async function recoverActiveCompletion()'));
 assert.ok(recovery.length>100);
-function setup(){
-  let now=0,probes=0,next=0,generating=true,alive=true,acceptAt=40;
+function setup(pending=false){
+  let now=0,probes=0,next=0,generating=!pending,alive=true,acceptAt=40,restores=0;
   const timers=new Map<number,()=>Promise<void>>();
   const world=createContext({__chatgptNotifierAttemptId:'request',location:{pathname:'/c/test'},watchToken:1,completionRecoveryTimer:null,
+    completionAttempt:null,restoreCompletionCheckpoint:async()=>pending?(++restores>=3?true:'pending'):undefined,
     Date:{now:()=>now},runtimeAvailable:()=>alive,isGenerating:()=>generating,currentErrors:()=>[],
     recoverActiveCompletion:async()=>++probes>=acceptAt,
     setTimeout:(fn:()=>Promise<void>,delay:number)=>{assert.ok(delay>=1000&&delay<=5000);const id=++next;timers.set(id,fn);return id;},
@@ -33,3 +34,10 @@ for(const reason of ['stop','dispose','route','attempt','token'] as const){
   await h.step();assert.equal(h.timers.size,0,`${reason} retires the recovery loop`);
 }
 console.log('Active completion recovery: >30 transient failures, bounded single timer, success and lifecycle cancellation passed.');
+
+{
+ const h=setup(true);await h.settle();
+ assert.equal(h.timers.size,1,'a native first-turn mount pending after route change is retried');
+ await h.step();await h.step();
+ assert.equal(h.timers.size,0,'restored allocation retires the same bounded timer');
+}
