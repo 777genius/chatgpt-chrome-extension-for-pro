@@ -36,7 +36,7 @@ function inspectSource(dir: string): void {
     if (!entry.name.endsWith(".ts")) continue;
     const source=readFileSync(file,"utf8");
     // Review-ready production must not bypass compiler checks.
-    if (/@ts-nocheck|@ts-ignore|\\bas\\s+any\\b/.test(source)) {
+    if (/@ts-nocheck|@ts-ignore|\bas\s+any\b/.test(source)) {
       throw new Error("Unsafe compiler suppression in: "+file);
     }
   }
