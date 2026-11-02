@@ -65,7 +65,7 @@ for (const file of js) {
   if (scanned.imports.length > 0 || scanned.exports.length > 0) {
     throw new Error("Import/export or module require found in classic Chrome script: " + file);
   }
-  const check = spawnSync(process.execPath, ["--check", join(dir, file)], { stdio: "inherit" });
+  const check = spawnSync("node", ["--check", join(dir, file)], { stdio: "inherit" });
   if (check.error || check.status !== 0) throw new Error("Generated script failed syntax: " + file);
 }
 console.log("Generated Chrome MV3 resources and syntax verified (" + js.length + " scripts).");
