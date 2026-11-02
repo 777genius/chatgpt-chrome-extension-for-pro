@@ -93,12 +93,13 @@ function showGoal(record) {
       record.continuations+' / '+record.maxContinuations+' продолжений',
       'до '+new Date(record.deadlineAt).toLocaleString()];
     if(record.reason)parts.push(record.reason);
+    if(record.phase==='blocked')parts.push('Проверьте журнал и нажмите «Остановить» перед новым запуском');
     goalUi.status.textContent=parts.join(' · ');
   } else goalUi.status.textContent='Задайте цель и нажмите «Начать Goal».';
-  goalUi.start.disabled=!editable;
+  goalUi.start.disabled=!editable||record?.phase==='blocked';
   goalUi.pause.disabled=goalBusy||!active||record.phase==='paused'||record.phase==='handoff';
   goalUi.resume.disabled=goalBusy||record?.phase!=='paused'||!!record?.operation;
-  goalUi.stop.disabled=goalBusy||!active;
+  goalUi.stop.disabled=goalBusy||(!active&&record?.phase!=='blocked');
 }
 async function goalAction(action) {
   if(goalBusy)return;
