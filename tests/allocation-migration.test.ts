@@ -59,4 +59,7 @@ test("typed new-chat allocation proof preserves fail-closed native and timestamp
     url, promptKey: native.promptKey,
   });
   assert.equal(run("dist/extension", record, url, {...native, firstTurn: false}), null);
+  assert.equal(run("dist/extension", record, url,
+    {...native, url: "https://chatgpt.com/c/other-chat"}), null,
+    "native evidence from another chat must not allocate a checkpoint");
 });
