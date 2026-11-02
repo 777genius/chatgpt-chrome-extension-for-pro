@@ -38,11 +38,11 @@ interface CSHandoffRecord {
   lastUserText?:string;stopProven?:boolean;replacementProven?:boolean;
   id:string;stage:string;sourceUrl:string;sourceTitle?:string;
   targetUrl?:string;url?:string;prompt?:string;text?:string;
-  lastUserText?:string;draft?:string;fileName?:string;asFile?:boolean;
+  draft?:string;fileName?:string;asFile?:boolean;
   receipt?:CSReceipt;requestId?:string|null;attemptId?:string;
   baselineKey?:string;promptKey?:string;startedAt?:number;createdAt?:number;
   titleStatus?:string;titleRetryPaused?:boolean;
-  draftRestoreClaimedAt?:number;replacementProven?:boolean;stopProven?:boolean;
+  draftRestoreClaimedAt?:number;
   awaitingNotifiedAt?:number;sentAt?:number;
   naming?:{title:string;baseTitle:string;part:number};
   [field:string]:unknown;
@@ -58,7 +58,7 @@ interface CSReply extends Record<string,unknown>{
   url?:string;promptKey?:string;assistantKey?:string;
   matches?:boolean;plainMatches?:boolean;promptMatches?:boolean;ready?:boolean;
   clicked?:boolean;unknown?:boolean;conversationAlias?:string;
-  submittedText?:string;clickedAt?:number;requestId?:string;
+  submittedText?:string;clickedAt?:number;
 }
 interface CSMessage extends Record<string,unknown> {
   frame?:number;revision?:number;receipt?:CSReceipt;goalNativeUserId?:string;
@@ -66,8 +66,7 @@ interface CSMessage extends Record<string,unknown> {
   type?:string;url?:string;operationId?:string;goalId?:string;
   startedAt?:number;requestId?:string;text?:string;status?:string;
   stage?:string;phase?:string;kind?:string;id?:string;reason?:string;
-  token?:number;revision?:number;frame?:number;
-  receipt?:CSReceipt;
+  token?:number;
 }
 interface CSChrome {
   runtime:{
