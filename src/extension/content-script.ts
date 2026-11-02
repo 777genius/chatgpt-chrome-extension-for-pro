@@ -17,6 +17,7 @@ interface CSSnapshot {
   promptKey:string;assistantKey:string;response:string;goalMarkerExact:boolean;
 }
 interface CSError {
+  requestId?:string|null;attemptId?:string;
   message?:string;response?:string;sourceUrl?:string;sessionTitle?:string;
   durationMs?:number|null;detected?:boolean;recovery?:string;recoveryBinding?:unknown;
 }
@@ -29,7 +30,7 @@ interface CSRetryState {
   blocked:boolean;terminalHandled?:boolean;reason:string;
   remainingRetries?:number;failures:number[];
   lastAttempt?:string;restoredPromptKey?:string;
-  lastSuppressedNotice?:number;matches?:boolean;ready?:boolean;ok?:boolean;
+  lastSuppressedNotice?:string;matches?:boolean;ready?:boolean;ok?:boolean;
 }
 interface CSHandoffRecord {
   operationId?:string;savedSequence?:number;claimedAt?:number;phase?:string;
@@ -138,6 +139,13 @@ declare global {
   let returnedPageUrl = '';
   const listeners = new AbortController();
   const answerWaitSlot = ChatGPTNotifierMemory.createLatestTaskSlot();
+  function contentErrorMessage(cause:unknown):string {
+    if(cause && (typeof cause==='object'||typeof cause==='function')) {
+      const message=Reflect.get(cause,'message');
+      if(message)return String(message);
+    }
+    return String(cause);
+  }
   const recoveryFirstSeen = new Map<string,number>();
   let visibleErrors = new Set<string>();
   let errorScanTimer:ReturnType<typeof setTimeout>|null = null;
@@ -606,7 +614,7 @@ declare global {
       }
       throw Error('Не подтверждено новое сообщение с точным текстом Goal');
     } catch(error) {
-      const reason=(clicked?'Неизвестный исход клика: ':'Отправка отменена: ')+String(error?.message||error);
+      const reason=(clicked?'Неизвестный исход клика: ':'Отправка отменена: ')+contentErrorMessage(error);
       const stillReserved=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
       if(clicked||intentRequested||stillReserved?.ok)await status('blocked',{reason});
       if(!clicked&&inserted&&sameChat()&&composer()===editor&&rawEditorText(editor)===text&&
@@ -784,9 +792,9 @@ declare global {
         await logRetry('retry.duplicate_suppressed',{operationId});
         return;
       }
-      await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:String(cause.message || cause)});
+      await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:contentErrorMessage(cause)});
       state.blocked = true;
-      state.reason = `Автопродолжение остановлено: ${cause.message}`;
+      state.reason = `Автопродолжение остановлено: ${contentErrorMessage(cause)}`;
       notifyError(error, state.reason);
     } finally {
       if (!clicked) {
@@ -809,7 +817,7 @@ declare global {
             replaceEditorText(insertedEditor, '');
           }
         } catch (cause) {
-          void logRetry('draft.restore_failed',{operationId,error:String(cause.message || cause)});
+          void logRetry('draft.restore_failed',{operationId,error:contentErrorMessage(cause)});
           state.blocked = true;
           state.reason = 'Не удалось восстановить черновик; копия сохранена до восстановления поля';
           notifyError(error, state.reason);
@@ -1063,10 +1071,10 @@ declare global {
     } catch (cause) {
       if(handoffRecord?.stage==='sent')return;
       if(clicked) {
-        try {await awaitHandoffConfirmation(String(cause.message||cause));}catch{}
+        try {await awaitHandoffConfirmation(contentErrorMessage(cause));}catch{}
       } else {
-        try { await updateHandoff('failed', { reason: String(cause.message || cause) }); } catch {}
-        notifyOperationWarning({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
+        try { await updateHandoff('failed', { reason: contentErrorMessage(cause) }); } catch {}
+        notifyOperationWarning({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${contentErrorMessage(cause)}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
       }
     } finally {
       handoffBusy = false;
@@ -1109,7 +1117,7 @@ declare global {
       }
     } catch (cause) {
       // Cancellation before the native click must also survive reinjection.
-      await updateHandoff('failed', { reason: String(cause.message || cause) });
+      await updateHandoff('failed', { reason: contentErrorMessage(cause) });
       throw cause;
     }
     // Use the real page action to preserve its mode/model behavior.
@@ -1162,7 +1170,7 @@ declare global {
     notifyError(error, info?.action === 'new-chat' ? 'Требуется новый чат' : 'Автоповтор отключён: неизвестный тип ошибки');
     if (info?.ok && info.action === 'new-chat') {
       try { await beginHandoff(error, info, alert); }
-      catch (cause) { notifyOperationWarning(error, String(cause.message || cause)); }
+      catch (cause) { notifyOperationWarning(error, contentErrorMessage(cause)); }
     }
   }
 
