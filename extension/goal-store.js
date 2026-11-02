@@ -35,7 +35,7 @@
         {id:tabId,url:record.url});
     }
     function operation(record,kind,tabId,time) {
-      return {id:uuid(),kind,text:kind==='initial'?policy.initialText(record):policy.CONTINUATION,
+      return {id:uuid(),kind,text:kind==='initial'?policy.initialText(record):policy.continuationText(record),
         tabId,createdAt:time,status:'reserved'};
     }
     function canSend(record,tabId,id,operationId,phase) {
@@ -56,7 +56,24 @@
           reason:'Goal dispatch: '+String(error?.message||error)}).catch(()=>{});
       }
     }
-    async function get(url) {return view(await serialize(()=>read(url)));}
+    async function get(url) {
+      return serialize(async()=>{
+        let record=await read(url);
+        if(!record)return null;
+        if(record.operation&&['preparing','sending','clicked'].includes(record.phase)&&
+            now()-record.operation.createdAt>120000) {
+          record={...record,phase:'blocked',
+            reason:'Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён'};
+          await event('blocked',record,record.operation.tabId);
+          await save(record);
+        } else if(['waiting','paused','recovering'].includes(record.phase)&&now()>=record.deadlineAt) {
+          record={...record,phase:'stopped',reason:'Время Goal истекло'};
+          await event('stopped',record,null);
+          await save(record);
+        }
+        return view(record);
+      });
+    }
     async function start({url,tabId,goal,rules,maxContinuations,maxMinutes}) {
       const target=requireUrl(url),config=policy.settings({goal,rules,maxContinuations,maxMinutes});
       const result=await serialize(async()=>{
@@ -86,7 +103,9 @@
         if(action==='pause') {
           if(['completed','stopped','blocked','moved'].includes(old.phase))throw Error('Goal уже завершён');
           const inFlight=['sending','clicked'].includes(old.phase);
+          const ready=old.phase==='preparing'&&old.operation?.status==='reserved';
           const record={...old,phase:inFlight?old.phase:'paused',pauseRequested:inFlight,
+            ...(ready?{pendingSendKind:old.operation.kind,operation:null}:{}),
             reason:inFlight?'Пауза после подтверждения текущей отправки':'Приостановлено пользователем'};
           await event('paused',record,tabId);
           await save(record);
@@ -96,6 +115,7 @@
           if(old.phase==='moved')throw Error('Остановите цель в новом чате');
           const inFlight=['sending','clicked'].includes(old.phase);
           const record={...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
+            ...(old.phase==='preparing'?{operation:null,pendingSendKind:null}:{}),
             reason:inFlight?'Остановка после исхода текущей отправки':'Остановлено пользователем'};
           await event('stopped',record,tabId);
           await save(record);
@@ -106,7 +126,10 @@
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
           let record={...old,phase:'waiting',pauseRequested:false,reason:''};
-          if(old.pendingCompletion) {
+          if(old.pendingSendKind) {
+            record={...record,phase:'preparing',pendingSendKind:null,
+              operation:operation(record,old.pendingSendKind,tabId,now())};
+          } else if(old.pendingCompletion) {
             const pending=old.pendingCompletion;
             record={...record,pendingCompletion:null};
             if(record.continuations>=record.maxContinuations) {
