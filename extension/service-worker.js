@@ -392,7 +392,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if(['CHATGPT_GOAL_CONTEXT','CHATGPT_GOAL_CHECK','CHATGPT_GOAL_INTENT',
-      'CHATGPT_GOAL_STATUS','CHATGPT_GOAL_MANUAL'].includes(message?.type)) {
+      'CHATGPT_GOAL_STATUS','CHATGPT_GOAL_MANUAL','CHATGPT_GOAL_RECOVER'].includes(message?.type)) {
     const tabId=sender.tab?.id,url=ChatGPTGoalPolicy.canonical(sender.tab?.url);
     if(sender.frameId>0||typeof tabId!=='number'||!url||
         ChatGPTGoalPolicy.canonical(message.url)!==url) {
@@ -401,6 +401,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     (async()=>{
       if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+      if(message.type==='CHATGPT_GOAL_RECOVER')
+        return goalController.recoverTab({id:tabId,url});
       if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:await goalController.context(url)};
       if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
         url,tabId,id:message.goalId,operationId:message.operationId});
