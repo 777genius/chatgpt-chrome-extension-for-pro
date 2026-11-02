@@ -147,11 +147,15 @@
     const roleNode=turn.matches?.('[data-message-author-role="assistant"]')?turn:
       turn.querySelector('[data-message-author-role="assistant"]')||turn;
     const rendered=roleNode.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
-    // Only one entire plain response. Code fences, formatting, other text
-    // or tool cards cannot accidentally satisfy the completion protocol.
-    return !!rendered&&rendered.textContent==='GOAL_COMPLETE'&&
-      roleNode.textContent==='GOAL_COMPLETE'&&
-      !roleNode.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img');
+    // Examine the actual rendered answer, not ChatGPT's surrounding Copy,
+    // Share and feedback controls. Marker inside a code block, link or styled
+    // passage is not a plain final answer. Any other assistant content still
+    // disqualifies the marker, even when it is outside the first Markdown node.
+    if(!rendered||rendered.textContent!=='GOAL_COMPLETE'||
+        rendered.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img'))return false;
+    const semantic=roleNode.cloneNode(true);
+    semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"]').forEach(node=>node.remove());
+    return semantic.textContent.trim()==='GOAL_COMPLETE';
   }
 
   function assistantText(turn) {
