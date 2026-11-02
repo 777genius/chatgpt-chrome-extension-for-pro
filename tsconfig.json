@@ -14,9 +14,7 @@
   },
   "include": [
     "scripts/**/*.ts",
-    "scripts/**/*.mts",
     "src/**/*.ts",
-    "tests/**/*.ts",
-    "tests/**/*.mts"
+    "tests/**/*.ts"
   ]
 }

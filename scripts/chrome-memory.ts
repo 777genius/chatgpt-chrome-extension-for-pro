@@ -304,7 +304,7 @@ export async function runMemory(options:Options,raw:Call,now=Date.now):Promise<R
   return report;
 }
 
-export const HELP=`Usage: node scripts/chrome-memory.mts [--collect] [options]
+export const HELP=`Usage: node scripts/chrome-memory.ts [--collect] [options]
 Default: inspect only; no garbage collection or browser settings changes.
   --bridge-config FILE   Private regular 0600 JSON {port,token} for an existing localhost bridge
   --cdp HTTP_URL         Existing localhost CDP endpoint; no browser launch or debugging changes

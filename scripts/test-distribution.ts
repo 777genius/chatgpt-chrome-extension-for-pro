@@ -31,7 +31,7 @@ try {
   }
 
   const tests = readdirSync(join(fixture, "tests"))
-    .filter((name) => name.endsWith(".mts")).sort();
+    .filter((name) => name === "check.ts" || name.endsWith("-check.ts")).sort();
   for (const name of tests) {
     console.log("\n[compiled MV3] " + name);
     const outcome = spawnSync(process.execPath, ["tests/" + name], {

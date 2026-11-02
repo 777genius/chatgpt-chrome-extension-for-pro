@@ -1,6 +1,6 @@
 # Development contract
 
-Read README.md and docs/queue-and-goal.md before changing behavior. This is a Chrome Manifest V3 extension with no build step. Production scripts are classic JavaScript; handwritten Node test/tooling is TypeScript `.mts`, run by Node 26.
+Read README.md and docs/queue-and-goal.md before changing behavior. This is a Chrome Manifest V3 extension with no build step. Production scripts are classic JavaScript; handwritten Node test/tooling is TypeScript `.ts`, run by Node 26.
 
 ## Invariants
 
