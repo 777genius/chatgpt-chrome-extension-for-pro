@@ -99,7 +99,8 @@ function renameErrorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
-const titleJobs = new Map<number, Promise<RenameOutcome>>();
+interface RenameJob { id: string; promise: Promise<RenameOutcome> }
+const titleJobs = new Map<number, RenameJob>();
 const pendingTitles = new Map<number, RenamePending>();
 const titleRequests = new Map<string, RenamePending>();
 const TITLE_REQUEST_FILTER = {urls:['https://chatgpt.com/backend-api/*']};
@@ -139,7 +140,13 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{
 
 function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=false}: { recoverTemporaryTarget?: boolean }={}): Promise<RenameOutcome> {
   const activeTitleJob=titleJobs.get(tabId);
-  if (activeTitleJob) return activeTitleJob;
+  if (activeTitleJob) {
+    if (activeTitleJob.id===id) return activeTitleJob.promise;
+    // Never alias another handoff's result. Once that job settles, inspect
+    // the new handoff's own durable record before doing any title effects.
+    const retry=()=>renameSavedHandoff(tabId,id,{recoverTemporaryTarget});
+    return activeTitleJob.promise.then(retry,retry);
+  }
   const job=(async()=>{
     const key=handoffKey(tabId);
     const original=(await chrome.storage.local.get(key))[key];
@@ -271,7 +278,8 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
       for(const [requestId,value]of titleRequests)if(value===pending)titleRequests.delete(requestId);
     }
   })();
-  titleJobs.set(tabId,job);
-  void job.finally(()=>{if(titleJobs.get(tabId)===job)titleJobs.delete(tabId);}).catch(()=>{});
+  const trackedJob:RenameJob={id,promise:job};
+  titleJobs.set(tabId,trackedJob);
+  void job.finally(()=>{if(titleJobs.get(tabId)===trackedJob)titleJobs.delete(tabId);}).catch(()=>{});
   return job;
 }
