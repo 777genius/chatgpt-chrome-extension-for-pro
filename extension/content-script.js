@@ -1425,6 +1425,16 @@
 
   function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_GOAL_READINESS') {
+      const editor=composer();
+      const idle=ChatGPTHandoffTitle.chatUrl(location.href)===message.url&&
+        !isGenerating()&&!currentErrors().length&&!replacingDraft&&
+        !pendingDrafts.has(location.pathname)&&
+        !handoffBusy&&!['navigating','preparing','sending','awaiting-confirmation'].includes(handoffRecord?.stage)&&
+        !!editor&&isElementVisible(editor)&&rawEditorText(editor)===''&&!composerHasAttachments(editor);
+      sendResponse?.({ok:true,idle,reason:idle?'':'Чат занят, не завершён ручной ответ или имеется черновик/вложение'});
+      return;
+    }
     if(message?.type==='CHATGPT_GOAL_DISPATCH') {
       if(!message.url||ChatGPTHandoffTitle.chatUrl(location.href)!==message.url){
         sendResponse?.({ok:false});
