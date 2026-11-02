@@ -53,6 +53,7 @@ if (!(filterField instanceof HTMLInputElement)) throw new Error("Invalid journal
 const journalFilter: HTMLInputElement = filterField;
 
 let journal: JournalView | null = null;
+let journalRefreshVersion = 0;
 let limit = 200;
 const labels: Record<string, string> = {
   'tab.snapshot':'Состояние вкладки при запуске', 'watcher.unavailable':'Наблюдение недоступно (вкладка выгружена или недоступна)', 'attachment.status':'Состояние вложения',
@@ -118,6 +119,7 @@ function render(): void {
   element("more").hidden = entries.length <= limit;
 }
 async function refresh(): Promise<boolean> {
+  const currentRefresh = ++journalRefreshVersion;
   try {
     const composed = (globalThis as typeof globalThis & {
       ChatGPTJournalModular?: { read(transport: {
@@ -125,12 +127,15 @@ async function refresh(): Promise<boolean> {
       }): Promise<unknown> };
     }).ChatGPTJournalModular;
     if (!composed) throw new Error("Journal composition has not been loaded");
-    journal = asJournalView(await composed.read({
+    const latest = asJournalView(await composed.read({
       sendMessage: (message) => chrome.runtime.sendMessage(message),
     }));
+    if (currentRefresh !== journalRefreshVersion) return false;
+    journal = latest;
     render();
     return true;
   } catch (error: unknown) {
+    if (currentRefresh !== journalRefreshVersion) return false;
     // A failed refresh must not let Export hand out a previously loaded
     // snapshot as though it were the current durable journal.
     journal = null;
