@@ -58,7 +58,7 @@ interface JournalEvent extends Record<string, unknown> {
   kind: string;
   operationId?: string | null;
   requestId?: string;
-  tabId?: number;
+  tabId?: number | null;
   sourceUrl?: string;
   observedTabUrl?: string;
   targetUrl?: string;
@@ -168,7 +168,7 @@ function retryDraftClaimable(record: RetryDraft | null | undefined): boolean {
   return Boolean(record&&!record.claimedAt&&['saved','intent','not-clicked','confirmed'].includes(record.phase));
 }
 async function indexedRetryDraft(meta: JournalMeta | null,url: string): Promise<(RetryDraft & {draft:string}) | null> {
-  const record=meta?.retryDraftSchema===1?meta.retryDraftByChat?.[retryDraftUrl(url)]:null;
+  const record=meta?.retryDraftSchema===1?meta.retryDraftByChat?.[retryDraftUrl(url)||'']:null;
   if(!record||typeof record.savedSequence!=='number'||!Number.isInteger(record.savedSequence)||record.savedSequence<1)return null;
   const key=`${JOURNAL_PREFIX}${String(record.savedSequence).padStart(12,'0')}`;
   const entry=journalEvent((await chrome.storage.local.get(key))[key]);
@@ -292,7 +292,7 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId||'']:sequence}:meta.retryDraftClaims } });
     journalFailure = '';
     return { ok: true, sequence, sourceUrl:entry.sourceUrl,
-      ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)||''],draft:claimedDraft.draft}}:{}) };
+      ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)||''],draft:claimedDraft!.draft}}:{}) };
   });
   journalQueue = write;
   return write.catch((error: unknown) => { if (!journalObject(error)||error.journalPolicy!==true) {journalFailure = journalMessage(error); console.error('Journal write failed', journalFailure);} throw error; });
