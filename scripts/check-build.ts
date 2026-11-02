@@ -44,6 +44,19 @@ const scanner = new Bun.Transpiler({ loader: "js", target: "browser" });
 const js = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
 const legacy = join(root, "extension");
 const typed = join(root, "src", "extension");
+// The worker loads classic helpers into one shared execution environment.
+// A TypeScript refactor must not reorder those globals, even when every
+// individual resource exists and parses successfully.
+function loadedClassicScripts(source: string): string[] {
+  return Array.from(source.matchAll(/\bimportScripts\(\s*['"]([^'"]+)['"]\s*\)/g),
+    match => match[1] ?? "");
+}
+const originalWorker = readFileSync(join(legacy, manifest.background.service_worker), "utf8");
+const emittedWorker = readFileSync(join(dir, manifest.background.service_worker), "utf8");
+if (JSON.stringify(loadedClassicScripts(originalWorker)) !==
+    JSON.stringify(loadedClassicScripts(emittedWorker))) {
+  throw new Error("MV3 service worker importScripts load order changed");
+}
 for (const name of js) {
   if (name === "journal-modular.js") continue; // independently bundled IIFE
   if (!existsSync(join(typed, name.replace(/\.js$/, ".ts")))) {
