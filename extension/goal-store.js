@@ -152,7 +152,7 @@
           if(old.phase==='moved')throw Error('Остановите цель в новом чате');
           const inFlight=['sending','clicked'].includes(old.phase);
           const record={...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
-            ...(old.phase==='preparing'?{operation:null,pendingSendKind:null}:{}),
+            ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
             reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
               'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
           await event(inFlight||old.operation?'stop_requested':'stopped',record,tabId);
