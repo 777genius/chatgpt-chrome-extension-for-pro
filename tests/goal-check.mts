@@ -169,7 +169,7 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   await env.store.intent({url:URL_A,tabId:7,id:record.id,operationId:op.id,text:op.text,
     baselineKey:'/c/goal-fixture-a|old-user'});
   await env.store.control({action:'pause',url:URL_A,tabId:7});
-  assert.equal((await env.store.authorize({url:URL_A,tabId:7,id:record.id,operationId:op.id,text:op.text})).ok,false);
+  await assert.rejects(()=>env.store.authorize({url:URL_A,tabId:7,id:record.id,operationId:op.id,text:op.text}),/не разрешена/);
   await env.store.report({url:URL_A,tabId:7,id:record.id,operationId:op.id,
     status:'blocked',reason:'Lost click acknowledgement'});
   assert.equal(state(env).phase,'blocked');
@@ -248,10 +248,12 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
     maxContinuations:2,maxMinutes:60}),/не подтверждена/);
 }
 
-// On resume or viewing the popup after suspension, expired or unknown
-// operations fail closed. No background re-dispatch happens.
+// On resume or viewing the popup after suspension, an unknown-click
+// operation fails closed; an unclaimed reserved operation has separate safe recovery. No background re-dispatch happens.
 {
   const env=fixture();await begin(env);
+  const current=state(env),op=current.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:current.id,operationId:op.id,text:op.text});
   env.time+=120001;
   const recovered=await env.fresh().get(URL_A);
   assert.equal(recovered.phase,'blocked');
