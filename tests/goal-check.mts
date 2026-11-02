@@ -78,7 +78,7 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(record.phase,'preparing');
   assert.equal((await env.fresh().get(URL_A))?.goal,record.goal);
   await assert.rejects(()=>env.store.start({url:URL_A,tabId:8,goal:'duplicate',rules:'',
-    maxContinuations:2,maxMinutes:60}),/уже запущена/);
+    maxContinuations:2,maxMinutes:60}),/(не подтверждена|уже запущена)/);
   assert.equal(env.messages.length,1);
   await confirm(env);
   assert.equal(state(env).continuations,0);
@@ -155,6 +155,65 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(state(env).phase,'blocked');
   assert.equal(env.messages.length,1);
   await assert.rejects(()=>env.store.control({action:'resume',url:URL_A,tabId:7}));
+}
+
+// Pausing a reserved (not yet clicked) send releases its claim. Resume gets
+// a fresh ID and a queued old dispatcher cannot authorize itself.
+{
+  const env=fixture();await begin(env);
+  const first=state(env).operation.id;
+  await env.store.control({action:'pause',url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'paused');
+  assert.equal(state(env).operation,null);
+  assert.equal(state(env).pendingSendKind,'initial');
+  assert.equal((await env.store.check({url:URL_A,tabId:7,id:state(env).id,operationId:first})).ok,false);
+  await env.store.control({action:'resume',url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'preparing');
+  assert.notEqual(state(env).operation.id,first);
+  assert.equal(env.messages.length,2);
+  assert.equal(state(env).operation.kind,'initial');
+}
+
+// A trusted manual send in the preparation window must not strand Goal in
+// paused-with-operation or allow stale content dispatch to click.
+{
+  const env=fixture();await begin(env);
+  const first=state(env).operation.id;
+  await env.store.manual({url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'paused');
+  assert.equal(state(env).operation,null);
+  await env.store.control({action:'resume',url:URL_A,tabId:7});
+  assert.notEqual(state(env).operation.id,first);
+  assert.equal(env.messages.length,2);
+}
+
+// A missing click acknowledgement is not proof of no click. Explicit Stop
+// cannot silently give another automatic attempt a fresh operation grant.
+{
+  const env=fixture();await begin(env);
+  const current=state(env),op=current.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:current.id,operationId:op.id,text:op.text});
+  await env.store.control({action:'stop',url:URL_A,tabId:7});
+  assert.equal(state(env).stopRequested,true);
+  assert.equal(state(env).phase,'sending');
+  assert.equal(env.events.at(-1)?.kind,'goal.stop_requested');
+  await env.store.report({url:URL_A,tabId:7,id:current.id,operationId:op.id,
+    status:'blocked',reason:'Synthetic lost acknowledgement'});
+  assert.equal(state(env).phase,'blocked');
+  await env.store.control({action:'stop',url:URL_A,tabId:7});
+  await assert.rejects(()=>env.store.start({url:URL_A,tabId:7,goal:'unsafe reset',rules:'',
+    maxContinuations:2,maxMinutes:60}),/не подтверждена/);
+}
+
+// On resume or viewing the popup after suspension, expired or unknown
+// operations fail closed. No background re-dispatch happens.
+{
+  const env=fixture();await begin(env);
+  env.time+=120001;
+  const recovered=await env.fresh().get(URL_A);
+  assert.equal(recovered.phase,'blocked');
+  assert.match(recovered.reason,/Неподтверждённая/);
+  assert.equal(env.messages.length,1);
 }
 
 // Deadlines survive restart, never reset due to handoff.
