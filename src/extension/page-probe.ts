@@ -172,7 +172,7 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
         const observed:unknown=key?Reflect.get(node,key):null;
         for(let current:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;current&&i<16;i++,current=current.return??null){
           const candidate=current.memoizedProps?.composerController;
-          if(candidate?.view?.dom===editor&&typeof candidate.getChatGptPrompt==='function'){controller=candidate;break;}
+          if(candidate&&candidate.view?.dom===editor&&typeof candidate.getChatGptPrompt==='function'){controller=candidate;break;}
         }
       }
       if(sameRecovery&&voice&&nativeVoiceIdle&&controller&&controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')return {ok:true,stopped:false,idle:true,proof:'native-voice-idle',recoveryBinding};
@@ -231,7 +231,8 @@ function inspectChatAttachment(fileName:string):{status:string} {
 // empty or a route changing is insufficient: require the exact native payload
 // in the active conversation's React entries and a permanent destination.
 function inspectHandoffAcceptance(options:HandoffOptions) {
-  function canonical(value:string):string {
+  function canonical(value:string|undefined):string {
+    if(typeof value!=='string')return '';
     try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)
       ? `${url.origin}${url.pathname.replace(/\/$/,'')}`:'';} catch {return '';}
   }
@@ -281,22 +282,23 @@ function controlChatComposer(options:ComposerOptions) {
   const visible = (node:Element) => Boolean(node?.isConnected && node.getClientRects().length);
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
+  const confirmedEditor: Element = editor;
   let controller:ComposerController|null = null;
   for (let node: Element|null|undefined = editor; node && !controller; node = node.parentElement) {
     const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
     const observed:unknown=key?Reflect.get(node,key):null;
     for (let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null, depth = 0; fiber && depth < 16; fiber = fiber.return??null, depth += 1) {
       const candidate = fiber.memoizedProps?.composerController;
-      if (candidate?.view?.dom === editor && typeof candidate.getChatGptPrompt === 'function') { controller = candidate; break; }
+      if (candidate && candidate.view?.dom === editor && typeof candidate.getChatGptPrompt === 'function') { controller = candidate; break; }
     }
   }
   if (!controller) return { ok: false, reason: 'Не удалось проверить состояние редактора ChatGPT' };
   const confirmedController=controller;
   function visibleText():string {
-    const directValue:unknown=Reflect.get(editor,'value');
+    const directValue:unknown=Reflect.get(confirmedEditor,'value');
     if (directValue !== undefined) return typeof directValue==='string'?directValue:'';
-    if (!editor.querySelector('p, div, br, li')) return editor.textContent || '';
-    const copy = editor.cloneNode(true) as Element;
+    if (!confirmedEditor.querySelector('p, div, br, li')) return confirmedEditor.textContent || '';
+    const copy = confirmedEditor.cloneNode(true) as Element;
     copy.querySelectorAll('[aria-hidden="true"], .ProseMirror-widget, svg, button').forEach(node=>node.remove());
     function text(node:Node):string {
       if (node.nodeType === 3) return node.textContent || '';
