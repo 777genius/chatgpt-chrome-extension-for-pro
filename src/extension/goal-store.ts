@@ -50,7 +50,7 @@ declare const module:undefined|{exports:unknown};
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     let writes:Promise<unknown>=Promise.resolve();
-    const serialize=<T>(fn:()=>Promise<T>|T):Promise<T>=>{
+    const serialize=<T>(fn:()=>Promise<T>):Promise<T>=>{
       const task=writes.catch(()=>{}).then(fn);
       writes=task;
       return task;
