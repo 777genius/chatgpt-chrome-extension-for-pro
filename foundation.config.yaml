@@ -1,0 +1,6 @@
+schemaVersion: 2
+project:
+  id: chatgpt-chrome-extension-for-pro
+capabilities:
+  repository.agent-workflow:
+    configPath: architecture/foundation/repository-agent-workflow.yaml
