@@ -1,7 +1,9 @@
 name: Checks
 on:
   push:
-    branches: [main]
+    # Temporary PR-specific CI while frequent main merges temporarily cause
+    # GitHub to suppress pull_request checks on the conflicting merge ref.
+    branches: [main, feat/goal-complete-autocontinue-20261102]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 concurrency:
