@@ -129,6 +129,11 @@ async function refresh(): Promise<void> {
     }));
     render();
   } catch (error: unknown) {
+    // A failed refresh must not let Export hand out a previously loaded
+    // snapshot as though it were the current durable journal.
+    journal = null;
+    element("events").replaceChildren();
+    element("more").hidden = true;
     element("status").textContent = "Не удалось прочитать журнал: " +
       (error instanceof Error ? error.message : String(error));
   }
