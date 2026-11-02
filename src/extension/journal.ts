@@ -31,7 +31,7 @@ function asJournalView(value: unknown): JournalView {
   if (value.ok !== true) {
     throw new Error(typeof value.error === "string" ? value.error : "Журнал недоступен");
   }
-  const entries = Array.isArray(value.events) ? value.events : [];
+  const entries: unknown[] = Array.isArray(value.events) ? value.events : [];
   const events = entries.filter((entry): entry is JournalEntry =>
     isRecord(entry) && typeof entry.kind === "string");
   const meta = isRecord(value.meta) ? value.meta : undefined;
