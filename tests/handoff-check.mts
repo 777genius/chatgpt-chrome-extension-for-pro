@@ -6,7 +6,46 @@ const source=readFileSync('extension/memory-maintenance.js','utf8')+'\n'+readFil
 const probe=readFileSync('extension/page-probe.js','utf8');
 const workerSource=readFileSync('extension/service-worker.js','utf8');
 const handoffWorker=workerSource.slice(workerSource.indexOf('const handoffWrites ='),workerSource.indexOf('chrome.runtime.onMessage.addListener'));
-const pause=()=>new Promise(r=>setTimeout(r,500));
+function testClock() {
+ let now=1000000,nextId=0;
+ type Timer={at:number;callback:()=>void;period:number|null};
+ const timers=new Map<number,Timer>();
+ const drain=()=>new Promise<void>(resolve=>setImmediate(resolve));
+ function schedule(callback:()=>void,delay:number,period:number|null=null) {
+  const id=++nextId;
+  // Node truncates fractional timer delays; preserve this behavior so the
+  // late-route case can exercise the exact production throttle boundary.
+  timers.set(id,{at:now+Math.max(1,Math.trunc(delay)),callback,period});return id;
+ }
+ function next(){return [...timers].sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0];}
+ function fire([id,timer]:[number,Timer]) {
+  now=timer.at;
+  if(timer.period===null)timers.delete(id);else timer.at+=timer.period;
+  timer.callback();
+ }
+ return {
+  now:()=>now,drain,
+  setTimeout:(callback:()=>void,delay=0)=>schedule(callback,delay),
+  clearTimeout:(id:number)=>{timers.delete(id);},
+  setInterval:(callback:()=>void,delay:number)=>schedule(callback,delay,Math.max(1,Math.trunc(delay))),
+  clearInterval:(id:number)=>{timers.delete(id);},
+  async advance(ms:number) {
+   const end=now+ms;await drain();
+   for(let timer=next();timer&&timer[1].at<=end;timer=next()){fire(timer);await drain();}
+   now=end;await drain();
+  },
+  async until(check:()=>boolean,label:string,budgetMs=70000) {
+   const end=now+budgetMs;
+   for(let steps=0;steps<10000;steps++) {
+    await drain();if(check())return;
+    const timer=next();
+    assert.ok(timer&&timer[1].at<=end,`${label}: no scheduled event can complete the transition within ${budgetMs}ms`);
+    fire(timer);
+   }
+   assert.fail(`${label}: scheduled events did not settle`);
+  }
+ };
+}
 const originalURL='https://chatgpt.com/c/source';
 const history=[
  {role:'assistant',id:'a1',text:'Earlier answer\n```ts\nconst x = 1;\n```'},
@@ -69,15 +108,15 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  const notices:any[]=[],sends:string[]=[],updates:string[]=[];
  let stored:any=null;
  const storage:Record<string,any>={};
- let clock=1000000;
+ const clock=testClock();
  const messages=history.map(m=>({...m}));if(long)messages[3].text='Large context\n'.repeat(1500);
  Object.assign(document,{createRange:()=>({selectNodeContents(){}}),execCommand:(_:any,__:any,text:string)=>{document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent=text;return true;}});
  Object.assign(window,{getSelection:()=>({removeAllRanges(){},addRange(){}})});
  class Transfer { items={add:(file:any)=>{this.files.push(file)}}; files:any[]=[]; }
  const runtime:any={id:'test-extension',onMessage:{addListener(){}},sendMessage:async(m:any)=>{
    if(m.type==='CHATGPT_RETRY_STATE')return {ok:true,state:null};
-   if(m.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,m.delayMs));return {ok:true};}
-   if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='send'){const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock};}return {ok:true,matches:true,ready:true,effort:'max'};}
+   if(m.type==='CHATGPT_WAIT'){await new Promise<void>(resolve=>clock.setTimeout(resolve,m.delayMs));return {ok:true};}
+   if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='send'){const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
    if(m.type==='CHATGPT_LOG_EVENT')return {ok:true};
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?'ready':'missing'};
    if(m.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'new-chat',messages,incomplete:false};
@@ -90,22 +129,21 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  }};
  const context=createContext({URL,window,document,location:loc,chrome:{runtime,storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>{Object.assign(storage,structuredClone(value));stored=storage['chatgpt-handoff:7'];}}},tabs:{get:async()=>({id:7,url:loc.href})},scripting:{executeScript:async({func,args}:any)=>[{result:func(...args)}]}},appendJournal:async()=>({ok:true}),MutationObserver:window.MutationObserver,Node:window.Node,Element:window.Element,Event:window.Event,
  HTMLTextAreaElement:window.HTMLTextAreaElement,AbortController,crypto:globalThis.crypto,File,DataTransfer:Transfer,
- Date:class extends Date{static now(){return clock;}},performance,setTimeout,clearTimeout,setInterval,clearInterval});
+ Date:class extends Date{static now(){return clock.now();}},performance:{now:clock.now},setTimeout:clock.setTimeout,clearTimeout:clock.clearTimeout,setInterval:clock.setInterval,clearInterval:clock.clearInterval});
  document.querySelector('input')!.addEventListener('change',()=>{
    const file=(document.querySelector('input')! as any).files[0];
    const chip=document.createElement('div');chip.textContent=file.name;document.body.append(chip);
  });
  document.querySelector('button[type=submit]')!.addEventListener('click',()=>{
    sends.push(document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent!);
-   if(ambiguous){setTimeout(()=>{clock+=61000},50);return;}
+   if(ambiguous)return;
    document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent='';
    document.querySelector('main')!.innerHTML=hiddenFirstPrompt ? '<article data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">Working</article>' : '<article data-testid="conversation-turn-new" data-turn="user">Transferred history</article>';
    (context as any).__chatgptNotifierAttemptId='new-request-observed';
    (document.querySelector('[data-app-shell-active-page="true"] [data-composer-body]') as any).__reactFiber$accepted={memoizedProps:{entries:[{id:'accepted-turn',turn:{items:[{type:'user-message',messageId:'accepted-message',message:sends.at(-1)}]}}]},return:null};
    if(temporaryTarget||lateTarget){
      loc.href='https://chatgpt.com/c/local-chatgpt%3Afixture-id';loc.pathname='/c/local-chatgpt%3Afixture-id';
-     if(lateTarget)setTimeout(()=>{clock+=61000;},50);
-     if(!lateTarget)setTimeout(()=>{loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';},300);
+     if(!lateTarget)clock.setTimeout(()=>{loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';},300);
    }else{loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';}
  });
  runInContext(probe+'\n'+handoffWorker+'\n'+source,context);
@@ -118,16 +156,22 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  const effort=document.createElement('button');effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort','max');document.querySelector('[data-app-shell-active-page="true"]')!.append(effort);
  document.querySelector('main')!.append(alert);
  const expectedStage=ambiguous||lateTarget?'awaiting-confirmation':'sent';
- for(let i=0;i<20&&stored?.stage!==expectedStage;i++)await pause();
+ const lineageKey='chatgpt-handoff-title:https://chatgpt.com/c/target';
+ const activeEditor=()=>document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!;
+ const transferred=()=>stored?.stage==='sent'&&storage[lineageKey]?.part===1&&Boolean(stored.draftRestoreClaimedAt)&&activeEditor().textContent==='Saved draft\nsecond line';
+ await clock.until(()=>expectedStage==='sent'?transferred():stored?.stage===expectedStage,'initial handoff transition');
  if(lateTarget){
    assert.equal(stored.stage,'awaiting-confirmation','a late permanent route remains recoverable after the 60s observation deadline');
    assert.ok(stored.sendReceipt.submittedText,'native click receipt survives the observation deadline');
-   (context as any).__chatgptNotifierDispose();runInContext(source,context);await pause();
+   (context as any).__chatgptNotifierDispose();runInContext(source,context);await clock.drain();
    assert.equal(stored.stage,'awaiting-confirmation');
+   // Deliver one route event halfway between whole milliseconds. A fractional
+   // worker wait truncated below the 2s throttle loses this only wake-up.
+   await clock.advance(500.5);
    loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';
    document.querySelector('main')!.append(document.createElement('span'));
-   for(let i=0;i<20&&stored.stage!=='sent';i++)await pause();
-   assert.equal(storage['chatgpt-handoff-title:https://chatgpt.com/c/target'].part,1,'late reconciliation persists continuation lineage');
+   await clock.until(transferred,'late route must durably confirm transfer, lineage and draft restoration',5000);
+   assert.equal(storage[lineageKey].part,1,'late reconciliation persists continuation lineage');
  }
  assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,ambiguous||lateTarget?2:1,'unknown send notifies only once in addition to the terminal source error');
  assert.equal(sends.length,1,'handoff sends once');assert.notEqual(sends[0],'доделай е2е');
@@ -139,17 +183,17 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  if(!ambiguous)assert.equal(document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent,'Saved draft\nsecond line');
  if(lateTarget){
    document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent='Owner new draft';
-   (context as any).__chatgptNotifierDispose();runInContext(source,context);await pause();
+   (context as any).__chatgptNotifierDispose();runInContext(source,context);await clock.drain();
    assert.equal(document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent,'Owner new draft','content restart preserves newer owner edits after one draft restoration');
    assert.equal(sends.length,1);assert.equal(stored.draft,'Saved draft\nsecond line');
  }
- if(ambiguous){runInContext(source,context);await pause();assert.equal(sends.length,1,'reinjection must not repeat ambiguous send');}
+ if(ambiguous){runInContext(source,context);await clock.advance(500);assert.equal(sends.length,1,'reinjection must not repeat ambiguous send');}
  console.log(`PASS: ${long?'large file':'inline'} handoff, durable backup before navigation, ${ambiguous?'uncertain send stops':'draft restored'}, one send, immediate error notification`);
  // Invalidate runtime: old observers/listeners must not throw or send anything.
  runtime.sendMessage=()=>{throw new Error('Extension context invalidated.');};
  document.dispatchEvent(new window.Event('pointerdown'));
- await pause();
- const before=sends.length;document.querySelector('main')!.append(document.createElement('span'));await pause();assert.equal(sends.length,before);
+ await clock.drain();
+ const before=sends.length;document.querySelector('main')!.append(document.createElement('span'));await clock.advance(1000);assert.equal(sends.length,before);
 }
 const rawFunction=source.slice(source.indexOf('  function rawEditorText'),source.indexOf('  function replaceEditorText'));
 const rich=parseHTML('<div id="e"><p>URL <span><span aria-hidden="true">icon</span>https://example.com</span></p><p><br class="ProseMirror-trailingBreak"></p><p>Code   spacing</p></div>');

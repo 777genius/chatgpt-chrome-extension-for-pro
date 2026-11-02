@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.2.11';
+  const SCRIPT_VERSION = '1.2.12';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -622,7 +622,7 @@
   function scheduleHandoffCheck() {
     if(handoffCheckScheduled||!['sending','awaiting-confirmation'].includes(handoffRecord?.stage))return;
     handoffCheckScheduled=true;
-    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,2000-(performance.now()-handoffLastCheckAt))}).then(async result=>{
+    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,Math.ceil(2000-(performance.now()-handoffLastCheckAt)))}).then(async result=>{
       handoffCheckScheduled=false;
       if(result?.ok&&runtimeAvailable()) {
         try {await reconcileHandoff();}catch{}
