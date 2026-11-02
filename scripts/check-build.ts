@@ -44,9 +44,6 @@ for (const file of js) {
       throw new Error("ES module syntax is forbidden in MV3 classic script: " + file);
     }
   }
-  if (parsed.parseDiagnostics.length) {
-    throw new Error("Emitted classic script parse failed: " + file);
-  }
   const check = spawnSync(process.execPath, ["--check", join(dir, file)], { stdio: "inherit" });
   if (check.error || check.status !== 0) throw new Error("Generated script failed syntax: " + file);
 }
