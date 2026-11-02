@@ -18,13 +18,14 @@
     "test:handoff": "node tests/handoff-check.mts",
     "typecheck": "tsc --noEmit",
     "check:syntax": "node scripts/syntax.mts",
-    "check": "bun run build && bun run check:syntax && bun run typecheck && bun run test",
+    "check": "bun run build && bun run check:syntax && bun run check:built && bun run typecheck && bun run test",
     "foundation:check": "agent-teams-foundation check",
     "foundation:status": "agent-teams-foundation status",
     "foundation:attach": "agent-teams-foundation attach",
     "foundation:detach": "agent-teams-foundation detach",
     "foundation:assert-dev-only": "agent-teams-foundation assert-dev-only",
-    "foundation:assert-registry": "agent-teams-foundation assert-registry"
+    "foundation:assert-registry": "agent-teams-foundation assert-registry",
+    "check:built": "bun scripts/check-build.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
