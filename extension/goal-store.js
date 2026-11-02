@@ -341,6 +341,9 @@
       await serialize(async()=>{
         const record=await read(source);
         if(!record||['completed','stopped','blocked','moved'].includes(record.phase))return;
+        // The handoff record is persisted before the Goal phase. A worker can
+        // stop in between; GET must be able to replay this exact transition.
+        if(record.phase==='handoff'&&record.handoffId===handoffId)return;
         if(!['waiting','paused','recovering'].includes(record.phase))throw Error('Goal отправляет сообщение; handoff остановлен');
         const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId};
         await event('handoff_begin',next,tabId,{handoffId});
