@@ -48,6 +48,15 @@ jobs:
           name: bun-lock-candidate
           path: bun.lock
           if-no-files-found: error
+      # Temporary draft-only bridge: capture registry-resolved Bun lock text
+      # so the owner can commit the exact bytes via the GitHub connector.
+      - name: Export Bun lock candidate for pinning
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          echo '__BUN_LOCK_START__'
+          cat bun.lock
+          echo '__BUN_LOCK_END__'
       - name: Capture draft source for isolated non-browser review
         if: github.event_name == 'push' && github.ref != 'refs/heads/main'
         shell: bash
