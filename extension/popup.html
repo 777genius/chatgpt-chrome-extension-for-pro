@@ -49,7 +49,7 @@
   <button id="journal" style="margin-top:8px">Журнал отправок и ошибок</button>
   <section id="goal-panel" aria-labelledby="goal-heading">
     <h2 id="goal-heading">Автономная цель (Goal)</h2>
-    <p>Останавливается только после полностью завершённого ответа <code>GOAL_COMPLETE</code>. Маркер — заявление модели, не независимая проверка результата.</p>
+    <p>Завершается после полностью готового ответа <code>GOAL_COMPLETE</code>, дедлайна или лимита продолжений. Неизвестный исход отправки блокирует Goal. Маркер — заявление модели, не независимая проверка результата.</p>
     <label for="goal-text">Цель</label>
     <textarea id="goal-text" maxlength="10000" placeholder="Опиши результат, который нужно довести до конца"></textarea>
     <label for="goal-rules">Условия завершения (необязательно)</label>
