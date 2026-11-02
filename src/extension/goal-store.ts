@@ -52,10 +52,12 @@ declare const module:undefined|{exports:unknown};
     };
     const key=(url:string):string=>'chatgpt-goal:'+policy.canonical(url);
     const canonical=(url:string|undefined):string=>policy.canonical(url);
-    const buffered=(record:GoalRecord|null|undefined,plural:'earlyCompletions'|'handoffEarlyCompletions',singular:'earlyCompletion'|'handoffEarlyCompletion'):GoalCompletion[]=>[
-      ...(Array.isArray(record?.[plural])?record[plural]:[]),
-      ...(record?.[singular]?[record[singular]]:[])
-    ];
+    const buffered=(record:GoalRecord|null|undefined,plural:'earlyCompletions'|'handoffEarlyCompletions',singular:'earlyCompletion'|'handoffEarlyCompletion'):GoalCompletion[]=>{
+      if(!record)return [];
+      const list=record[plural];
+      const single=record[singular];
+      return [...(Array.isArray(list)?list:[]),...(single?[single]:[])];
+    };
     function requireUrl(url:string):string {
       const value=canonical(url);
       if(!value)throw Error('Goal доступен только в сохранённом чате ChatGPT');
