@@ -142,7 +142,9 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
     }
     const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).at(-1);
     const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
-    const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&(['kind','url','entryId','assistantId','userId'] as const).every(key=>recoveryBinding[key]===expectedRecoveryBinding[key]));
+    const observedBinding=recoveryBinding,requestedBinding=expectedRecoveryBinding;
+    const sameRecovery=Boolean(observedBinding&&requestedBinding&&
+      (['kind','url','entryId','assistantId','userId'] as const).every(key=>observedBinding[key]===requestedBinding[key]));
     const assistantOnly=sameRecovery&&recoveryBinding?.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
     if(expectedRecoveryBinding&&!sameRecovery)return {ok:false,reason:'Нативный ответ перед восстановлением изменился'};
     if(expectedPromptKey&&!assistantOnly&&(!latestUserKey||location.pathname+'|'+latestUserKey!==expectedPromptKey))return {ok:false,reason:'Запрос пользователя перед остановкой изменился'};
