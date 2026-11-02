@@ -31,4 +31,10 @@ test("the browser IIFE runs without Bun, Node, or module globals and respects th
     ok: true, events: [{ kind: "migration.sample", sequence: 1 }],
   });
   assert.deepEqual(JSON.parse(JSON.stringify(seen)), [{ type: "CHATGPT_JOURNAL_READ" }]);
+
+  await assert.rejects(async () => {
+    await reader({
+      sendMessage: async () => { throw new Error("synthetic journal transport failure"); },
+    });
+  }, /synthetic journal transport failure/, "read errors must not become empty successful exports");
 });
