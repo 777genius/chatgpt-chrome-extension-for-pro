@@ -32,6 +32,9 @@ interface CSRetryState {
   lastSuppressedNotice?:number;matches?:boolean;ready?:boolean;ok?:boolean;
 }
 interface CSHandoffRecord {
+  operationId?:string;savedSequence?:number;claimedAt?:number;phase?:string;
+  acceptance?:{messageId?:string;entryId?:string|null;targetUrl?:string};
+  lastUserText?:string;stopProven?:boolean;replacementProven?:boolean;
   id:string;stage:string;sourceUrl:string;sourceTitle?:string;
   targetUrl?:string;url?:string;prompt?:string;text?:string;
   lastUserText?:string;draft?:string;fileName?:string;asFile?:boolean;
@@ -44,6 +47,9 @@ interface CSHandoffRecord {
   [field:string]:unknown;
 }
 interface CSReply extends Record<string,unknown>{
+  claimed?:boolean;accepted?:boolean;confirmed?:boolean;
+  action?:string;messages?:{role:string;text:string}[];incomplete?:boolean;
+  status?:string;startedAt?:number;requestId?:string;
   ok?:boolean;duplicate?:boolean;changed?:boolean;idle?:boolean;
   notifyAwaiting?:boolean;pending?:boolean;reason?:string;error?:string;
   retryable?:boolean;stopped?:boolean;waiting?:boolean;
@@ -54,6 +60,8 @@ interface CSReply extends Record<string,unknown>{
   submittedText?:string;clickedAt?:number;requestId?:string;
 }
 interface CSMessage extends Record<string,unknown> {
+  frame?:number;revision?:number;receipt?:CSReceipt;goalNativeUserId?:string;
+  retryable?:boolean;nativeVerified?:boolean;rawExact?:boolean;
   type?:string;url?:string;operationId?:string;goalId?:string;
   startedAt?:number;requestId?:string;text?:string;status?:string;
   stage?:string;phase?:string;kind?:string;id?:string;reason?:string;
@@ -73,12 +81,12 @@ interface CSChrome {
 }
 interface CSIndicator {
   refresh():Promise<void>;dispose():void;
-  accept(value:CSReply):boolean;tick(value:{url:string;frame:number}):boolean;
+  accept(value:CSMessage):boolean;tick(value:CSMessage):boolean;
   loadingStartedAt():number|null;
   loadingGeneration():{startedAt:number|undefined;startReceipt:CSReceipt|null}|null;
 }
 interface CSDeferredObserver {
-  dispose():void;refresh():void;requestStarted(value:number|{startedAt?:number}):void;
+  dispose():void;refresh():void;requestStarted(value:number|undefined|{startedAt?:number}):void;
 }
 interface CSEditor extends HTMLElement {value?:string}
 interface CSPageCompletion {ok?:boolean;url?:string;promptKey?:string;assistantKey?:string;userId?:string;assistantId?:string;isLatest?:boolean;isReadOnly?:boolean;generating?:boolean;assistantCompleted?:boolean;assistantPhase?:string;hasError?:boolean;turnStatus?:string;reason?:string}
@@ -539,7 +547,7 @@ declare global {
   // Dedicated Goal coordinator calls this once per persisted operation. The
   // only actual click is still controlChatComposer in MAIN, behind the worker's
   // consumed, journaled authorization. No draft is replaced by automation.
-  async function dispatchGoal(message:CSGoalDispatch):Promise<void> {
+  async function dispatchGoal(message:CSMessage):Promise<void> {
     const url=message.url,operationId=message.operationId,text=message.text,id=message.goalId;
     const sameChat=()=>runtimeAvailable()&&ChatGPTHandoffTitle.chatUrl(location.href)===url;
     const status=(value,extra={})=>runtimeMessage({type:'CHATGPT_GOAL_STATUS',url,goalId:id,
