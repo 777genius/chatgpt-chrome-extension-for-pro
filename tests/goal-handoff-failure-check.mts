@@ -53,5 +53,8 @@ await assert.rejects(()=>handler({type:'CHATGPT_HANDOFF_BEGIN',record:record('th
   /Original Goal transition refused/,
   'cleanup write failure must not replace the original Goal error');
 assert.equal(saved[marker(8)],undefined,'marker removal is still attempted if failed-record write fails');
-assert.equal(journals.length,3);
+assert.deepEqual(journals.map(event=>event.kind),[
+  'handoff.navigating','handoff.pre_navigation_cancelled',
+  'handoff.navigating','handoff.navigating'
+], 'only the proven pre-navigation failure releases its durable source claim');
 console.log('Goal handoff: fail-closed preparation, marker cleanup, safe retry, preserved original error passed.');
