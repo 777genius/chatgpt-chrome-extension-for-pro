@@ -8,7 +8,8 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "types": [
-      "node"
+      "node",
+      "bun"
     ],
     "esModuleInterop": true
   },
