@@ -247,7 +247,9 @@
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))
           return {ok:false};
         const inFlight=['sending','clicked'].includes(record.phase);
+        const reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
         const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,
+          ...(reserved?{pendingSendKind:record.operation.kind,operation:null}:{}),
           reason:inFlight?'Ожидается исход отправки; ручное действие имеет приоритет':'Пауза: ручная отправка пользователя'};
         await event('manual_pause',next,tabId);
         await save(next);
