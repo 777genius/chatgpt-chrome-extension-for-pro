@@ -427,14 +427,14 @@ async function popupRecoveryCheck() {
     ['CHATGPT_GOAL_CONTROL','CHATGPT_HANDOFF_TITLE_INFO'].sort(),
     'opening the popup only reads Goal state and recovery information');
   assert.equal(messages.find(item=>item.type==='CHATGPT_GOAL_CONTROL')?.action,'get');
-  await waitFor(()=>document.getElementById('goal-start')!.disabled===false);
+  await waitFor(()=>(document.getElementById('goal-start') as HTMLButtonElement).disabled===false);
   (document.getElementById('goal-text') as HTMLTextAreaElement).value='Finalize popup goal';
   const actions:[string,string,string|null][]=[
     ['start','goal-start','goal-pause'],['pause','goal-pause','goal-resume'],
     ['resume','goal-resume','goal-stop'],['stop','goal-stop',null]
   ];
   for(const [action,id,nextId] of actions) {
-    const control=document.getElementById(id)!;
+    const control=document.getElementById(id) as HTMLButtonElement;
     assert.equal(control.disabled,false,action+' control must be available');
     control.dispatchEvent(new window.Event('click'));
     await waitFor(()=>messages.some(item=>item.type==='CHATGPT_GOAL_CONTROL'&&item.action===action));
@@ -443,7 +443,7 @@ async function popupRecoveryCheck() {
     assert.equal(sent[0].expectedTabId,7);
     assert.equal(sent[0].expectedUrl,goalUrl,'actions remain bound to the initial chat');
     if(action==='start')assert.equal(sent[0].goal,'Finalize popup goal');
-    if(nextId)await waitFor(()=>document.getElementById(nextId)!.disabled===false);
+    if(nextId)await waitFor(()=>(document.getElementById(nextId) as HTMLButtonElement).disabled===false);
   }
   assert.match(document.getElementById('goal-status')!.textContent||'',/Остановлено/);
   const button=document.getElementById('recover-title')!;
