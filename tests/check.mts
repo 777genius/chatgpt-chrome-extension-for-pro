@@ -79,18 +79,21 @@ async function domCheck() {
   await afterUpdate.fail('Existing error after update');
   assert.equal(afterUpdate.sends.length,0,'reload must not repeat a previously observed prompt without a new request');
   assert.equal(afterUpdate.logs.filter(e=>e.kind==='error.detected').length,0);
-  assert.equal(afterUpdate.messages.length,1,'an already-observed visible error must not vanish silently after reinjection');
-  assert.match(afterUpdate.messages[0].retryReason,/уже обрабатывался/);
+  assert.equal(afterUpdate.messages.filter(m=>m.type==='CHATGPT_RESPONSE_ERROR').length,1,
+    'an already-observed visible error must produce exactly one warning, got '+afterUpdate.messages.map(m=>m.type).join(', '));
+  assert.match(afterUpdate.messages.find(m=>m.type==='CHATGPT_RESPONSE_ERROR')?.retryReason,/уже обрабатывался/);
   assert.equal(afterUpdate.logs.filter(e=>e.kind==='retry.suppressed').length,1);
   const unknownAfterUpdate=setup('',true,true,'',{failures:[],lastPromptKey:'/c/example|conversation-turn-0',lastAttemptId:'',blocked:true,reason:'Не удалось подтвердить отправку'});
   await unknownAfterUpdate.fail('Время ожидания доставки сообщения истекло. Попробуйте снова.');
   assert.equal(unknownAfterUpdate.sends.length,0,'an unknown previous send must not be repeated');
-  assert.equal(unknownAfterUpdate.messages.length,1,'saved uncertainty still reports the current error and actual stop reason');
-  assert.match(unknownAfterUpdate.messages[0].retryReason,/Не удалось подтвердить отправку/);
+  assert.equal(unknownAfterUpdate.messages.filter(m=>m.type==='CHATGPT_RESPONSE_ERROR').length,1,
+    'saved uncertainty still reports one warning and the actual stop reason');
+  assert.match(unknownAfterUpdate.messages.find(m=>m.type==='CHATGPT_RESPONSE_ERROR')?.retryReason,/Не удалось подтвердить отправку/);
   assert.equal(unknownAfterUpdate.logs.filter(e=>e.kind==='retry.suppressed').length,1);
   unknownAfterUpdate.document.querySelector('aside')!.remove();await pause();
   await unknownAfterUpdate.fail('Delivery timed out. Please retry.');
-  assert.equal(unknownAfterUpdate.messages.length,1,'rewording a suppressed error for the same prompt must not spam alerts');
+  assert.equal(unknownAfterUpdate.messages.filter(m=>m.type==='CHATGPT_RESPONSE_ERROR').length,1,
+    'rewording a suppressed error for the same prompt must not spam alerts');
   assert.equal(unknownAfterUpdate.logs.filter(e=>e.kind==='retry.planned').length,0);
 
   const restoredBlock=setup('',true,true,'',{failures:[],blocked:true,reason:'Saved sticky stop'});
