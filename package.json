@@ -4,15 +4,27 @@
   "private": true,
   "description": "Chrome extension for ChatGPT completion alerts, guarded retries and conversation handoffs.",
   "license": "AGPL-3.0-only",
-  "engines": { "node": ">=26.0.0" },
+  "type": "module",
+  "packageManager": "bun@1.4.3",
+  "engines": {
+    "node": ">=26.0.0",
+    "bun": "1.4.3"
+  },
   "scripts": {
+    "build": "bun scripts/build.ts",
     "test": "node scripts/test.mts",
     "memory": "node scripts/chrome-memory.mts",
     "test:retry": "node tests/check.mts",
     "test:handoff": "node tests/handoff-check.mts",
     "typecheck": "tsc --noEmit",
     "check:syntax": "node scripts/syntax.mts",
-    "check": "npm run check:syntax && npm run typecheck && npm test"
+    "check": "bun run build && bun run check:syntax && bun run typecheck && bun run test",
+    "foundation:check": "agent-teams-foundation check",
+    "foundation:status": "agent-teams-foundation status",
+    "foundation:attach": "agent-teams-foundation attach",
+    "foundation:detach": "agent-teams-foundation detach",
+    "foundation:assert-dev-only": "agent-teams-foundation assert-dev-only",
+    "foundation:assert-registry": "agent-teams-foundation assert-registry"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
