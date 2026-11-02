@@ -158,8 +158,9 @@ function appendJournal(event, tab = {}) {
     const currentSend=active[tabId];
     const exactGrant=Boolean(currentSend&&operationId&&currentSend.operationId===operationId);
     const resetRetry=event.kind==='retry.manual_reset'&&currentSend?.kind==='retry.send_intent';
-    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&
-      ['goal.confirmed','goal.blocked','goal.stopped'].includes(event.kind);
+    // An unknown Goal click remains an active, consumed fence. Neither a
+    // timeout nor clicking Stop gives another automatic sender a new grant.
+    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&event.kind==='goal.confirmed';
     const clearsRetry=(exactGrant||resetRetry)&&currentSend?.kind==='retry.send_intent'&&
       ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
     const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&
