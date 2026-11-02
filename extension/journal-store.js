@@ -192,6 +192,18 @@ function appendJournal(event, tab = {}) {
       retrySendClaims[key]={operationId,tabId,at:claim?.at||Date.now(),phase:'reserved'};
       retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key};
     }
+    if(event.kind==='goal.started'&&retrySource&&(
+        retryPreparingByChat[retrySource]||
+        Object.entries(active).some(([owner,entry])=>entry&&
+          (entry.chatUrl||entry.sourceUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===retrySource)))
+      throw Object.assign(new Error('В этом чате уже готовится или выполняется автоматическая отправка'),{journalPolicy:true});
+    if(['retry.planned','retry.send_intent'].includes(event.kind)&&retrySource){
+      // The Goal's persisted reservation wins over legacy retry planning.
+      // Refuse before reserving a retry or touching the user's draft.
+      const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
+      if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
+        throw duplicate();
+    }
     if(event.kind==='retry.planned'||event.kind==='retry.send_intent')reserveRetry();
     if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft.operationId!==operationId||savedDraft.savedSequence!==event.savedSequence)) {
       throw Object.assign(new Error('Восстановление черновика уже выполнено или исход отправки неизвестен'),{journalPolicy:true});
@@ -211,11 +223,10 @@ function appendJournal(event, tab = {}) {
       // competing retries must also consult that durable operation claim.
       if(event.kind==='goal.send_intent'&&chatUrl&&retryPreparingByChat[chatUrl])
         throw Object.assign(new Error('В чате уже подготавливается восстановление ошибки; Goal не может параллельно отправлять'),{journalPolicy:true});
-      if(chatUrl&&event.kind!=='goal.send_intent') {
+      if(chatUrl&&event.kind==='handoff.sending') {
         const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
         if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
-          throw event.kind==='retry.send_intent'?duplicate():
-            Object.assign(new Error('Цель удерживает незавершённую отправку в этом чате'),{journalPolicy:true});
+          throw Object.assign(new Error('Цель удерживает незавершённую отправку в этом чате'),{journalPolicy:true});
       }
       // All automatic senders share one canonical-chat lock, not just one tab
       // slot. Unknown outcomes remain fenced after a tab closes or a worker
