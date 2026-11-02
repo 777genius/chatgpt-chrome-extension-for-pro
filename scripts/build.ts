@@ -1,7 +1,6 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as ts from "typescript";
 
 /**
  * Preserve MV3's current classic script boundaries and load order.
@@ -17,30 +16,20 @@ const destination = join(root, "dist", "extension");
 rmSync(destination, { recursive: true, force: true });
 cpSync(legacy, destination, { recursive: true });
 
+const transpiler = new Bun.Transpiler({ loader: "ts", target: "browser" });
+
 let migrated = 0;
 if (existsSync(typed)) {
   for (const name of readdirSync(typed).filter((file) => file.endsWith(".ts"))) {
     const from = join(typed, name);
     const to = join(destination, name.replace(/\.ts$/, ".js"));
     const input = readFileSync(from, "utf8");
-    const result = ts.transpileModule(input, {
-      fileName: from,
-      reportDiagnostics: true,
-      compilerOptions: {
-        target: ts.ScriptTarget.ES2023,
-        module: ts.ModuleKind.None,
-        removeComments: false,
-      },
-    });
-    const failures = (result.diagnostics ?? []).filter((item) => item.category === ts.DiagnosticCategory.Error);
-    if (failures.length > 0) {
-      throw new Error(ts.formatDiagnosticsWithColorAndContext(failures, {
-        getCanonicalFileName: (file) => file,
-        getCurrentDirectory: () => root,
-        getNewLine: () => "\n",
-      }));
+    const shape = transpiler.scan(input);
+    if (shape.imports.length > 0 || shape.exports.length > 0) {
+      throw new Error("Classic Chrome entry cannot have module imports/exports: " + name);
     }
-    writeFileSync(to, result.outputText);
+    const javascript = transpiler.transformSync(input);
+    writeFileSync(to, javascript);
     migrated++;
   }
 }
