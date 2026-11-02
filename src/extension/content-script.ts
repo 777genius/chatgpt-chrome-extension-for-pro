@@ -133,7 +133,7 @@ declare global {
   let completionSendIntent:{at:number;baselineKey:string;path:string}|null = null;
   let completionAttempt:CSAttempt|null = null;
   let goalDispatchBusy = false;
-  let goalDispatchQueue = Promise.resolve();
+  let goalDispatchQueue:Promise<unknown> = Promise.resolve();
   let completionRecoveryTimer:ReturnType<typeof setTimeout>|null = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
@@ -376,7 +376,7 @@ declare global {
   const retryStates = new Map<string,CSRetryState>();
   let retryRestoredPath = '';
   let retryRestoreTask:Promise<void>|null = null;
-  let retryTask = Promise.resolve();
+  let retryTask:Promise<unknown> = Promise.resolve();
   const pendingDrafts = new Map<string,string>();
   let draftRestoreBusy = false;
   let draftRestorePath = '';
@@ -550,7 +550,7 @@ declare global {
   async function dispatchGoal(message:CSMessage):Promise<void> {
     const url=message.url,operationId=message.operationId,text=message.text,id=message.goalId;
     const sameChat=()=>runtimeAvailable()&&ChatGPTHandoffTitle.chatUrl(location.href)===url;
-    const status=(value,extra={})=>runtimeMessage({type:'CHATGPT_GOAL_STATUS',url,goalId:id,
+    const status=(value:string,extra:Record<string,unknown>={})=>runtimeMessage({type:'CHATGPT_GOAL_STATUS',url,goalId:id,
       operationId,status:value,...extra});
     let editor=null,inserted=false,clicked=false,intentRequested=false;
     try {
@@ -646,7 +646,7 @@ declare global {
     manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
-    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
+    const logRetry = (kind:string, details:Record<string,unknown> = {}, required:boolean = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
     let clicked = false;
     let confirmed = false;
     const expectedToken = watchToken;
@@ -656,7 +656,7 @@ declare global {
     let recoveryVerifiedIdle = false;
     let recoveryDraft = null;
     let readinessPhase = 'planned';
-    const readiness = async (phase,details={}) => {
+    const readiness = async (phase:string,details:Record<string,unknown>={}) => {
       if(readinessPhase===phase)return;
       readinessPhase=phase;
       await logRetry('retry.readiness',{phase,...details});
@@ -1309,17 +1309,17 @@ declare global {
   function waitForAnswerBoundToLatestPrompt(isCurrent:()=>boolean,attempt:CSAttempt):Promise<string|null> {
     return new Promise((resolve) => {
       let settled = false;
-      let observer = null;
-      let watchdogId = null;
-      let pollId = null;
-      let throttleId = null;
-      let frameId = null;
+      let observer:MutationObserver|null = null;
+      let watchdogId:ReturnType<typeof setInterval>|null = null;
+      let pollId:ReturnType<typeof setInterval>|null = null;
+      let throttleId:ReturnType<typeof setTimeout>|null = null;
+      let frameId:number|null = null;
       let lastCheckAt = 0;
       let stableText = '';
       let stableSince = 0;
       let generationEndedAt = 0;
       let completionProbeBusy=false, lastCompletionProbeAt=0;
-      const blockedProbeReasons=new Set();
+      const blockedProbeReasons=new Set<string>();
       const startedAt = Date.now();
 
       const cleanupScheduledCheck = () => {
@@ -1333,7 +1333,7 @@ declare global {
         }
       };
 
-      const finish = (text) => {
+      const finish = (text:string|null) => {
         if (settled) return;
         settled = true;
         if (observer) observer.disconnect();
