@@ -415,9 +415,17 @@ async function notificationStatusCheck() {
   tabs[7].url=a;
   const reset=await h.manual(a);
   await flush();
-  assert.equal(reset.status,null);assert.ok(reset.revision>oldRevision);
-  assert.ok(statusMessages.some(message=>message.type==='CHATGPT_STATUS_CHANGED'&&message.url===a&&message.status===null));
+  assert.equal(reset.status.kind,'loading');assert.ok(reset.revision>oldRevision);
+  assert.ok(statusMessages.some(message=>message.type==='CHATGPT_STATUS_CHANGED'&&message.url===a&&message.status?.kind==='loading'));
   assert.equal(focusEffects,0,'notification retirement never activates a tab or focuses a window');
+  assert.equal((await h.request('CHATGPT_GENERATION_STOPPED',a,h.sender(),{startedAt:reset.status.eventAt+1})).status.kind,'loading','a stale stop cannot cancel another request');
+  const stopped=await h.request('CHATGPT_GENERATION_STOPPED',a,h.sender(),{startedAt:reset.status.eventAt});
+  assert.equal(stopped.status,null,'a confirmed manual stop retires its own loader');
+  const autoStart=h.startRequest(a);await flush();
+  assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.kind,'loading','a real automatic request also starts the loader');
+  await h.emit(7,'completed-after-loading',false);
+  assert.equal((await h.request('CHATGPT_GENERATION_STOPPED',a,h.sender(),{startedAt:autoStart})).status.kind,'success','a late stop cannot erase a completed result');
+
 
   deferCreates=true;
   await h.emit(7,'pending-old');

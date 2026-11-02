@@ -20,7 +20,7 @@ const world=createContext({document,window,location,URL,AbortController,crypto:g
  Date:class extends Date{static now(){return now;}},
  setInterval:()=>1,clearInterval:()=>{},setTimeout:()=>1,clearTimeout:()=>{},
  chrome:{runtime:{id:'test',onMessage:{addListener:(fn:(m:Message)=>void)=>listeners.push(fn),removeListener:()=>{}},
- sendMessage:async(message:Message)=>{sent.push(message);if(message.type==='CHATGPT_STATUS_GET')return {ok:true,url:location.href,revision,status:{kind:'success'}};if(message.type==='CHATGPT_MANUAL_SEND')return {ok:true,url:message.url,revision:++revision,status:null};return {ok:true,record:null,state:null};}}}});
+ sendMessage:async(message:Message)=>{sent.push(message);if(message.type==='CHATGPT_STATUS_GET')return {ok:true,url:location.href,revision,status:{kind:'success'}};if(message.type==='CHATGPT_MANUAL_SEND')return {ok:true,url:message.url,revision:++revision,status:{kind:'loading'}};return {ok:true,record:null,state:null};}}}});
 for(const file of ['memory-maintenance.js','handoff-title.js','status-indicator.js','content-script.js'])runInContext(readFileSync(`extension/${file}`,'utf8'),world);
 const editor=document.querySelector('#prompt-textarea')!,button=document.querySelector('button')!;
 const fire=(type:string,event:IntentEvent)=>{for(const fn of callbacks.get(type)||[])fn(event);};
@@ -31,7 +31,7 @@ assert.ok(document.querySelector('[data-chatgpt-notifier-status]'),'completed re
 fire('keydown',{isTrusted:true,key:'Enter',target:editor as unknown as Element});
 assert.equal(resets().length,0,'Enter newline alone must preserve indicator');
 start();await flush();assert.equal(resets().length,1,'actual manual request acknowledges indicator');
-assert.equal(document.querySelector('[data-chatgpt-notifier-status]'),null,'the real indicator resets after confirmed manual send');
+assert.match(decodeURIComponent(document.querySelector('[data-chatgpt-notifier-status]')!.getAttribute('href')!),/#2563eb/,'manual send replaces green with a waiting loader');
 start();assert.equal(resets().length,1,'one intent acknowledges only one request');
 fire('click',{isTrusted:false,target:button as unknown as Element});start();assert.equal(resets().length,1,'automatic clicks cannot reset indicator');
 button.setAttribute('disabled','');fire('click',{isTrusted:true,target:button as unknown as Element});start();assert.equal(resets().length,1,'disabled send button cannot arm acknowledgement');button.removeAttribute('disabled');
@@ -49,8 +49,14 @@ const actualStart=now+100;now+=30000;start(actualStart);
 assert.equal(resets().length,3,'a timely real send must reset even when confirmation arrives after 30 seconds');
 assert.equal(resets()[2].startedAt,actualStart);
 await flush();
-assert.equal(document.querySelector('[data-chatgpt-notifier-status]'),null,'delayed confirmation also clears the green favicon');
+assert.match(decodeURIComponent(document.querySelector('[data-chatgpt-notifier-status]')!.getAttribute('href')!),/#2563eb/,'delayed confirmation also replaces green with the waiting loader');
 fire('click',{isTrusted:false,target:button as unknown as Element});start(now+1);
 assert.equal(resets().length,3,'late delivery does not weaken the trusted-manual guard');
+const stop=document.createElement('button');stop.setAttribute('data-testid','stop-button');document.body.append(stop);
+fire('click',{isTrusted:false,target:stop as unknown as Element});
+assert.equal(sent.filter(m=>m.type==='CHATGPT_GENERATION_STOPPED').length,0,'an automatic recovery stop must not cancel the loading indicator');
+fire('click',{isTrusted:true,target:stop as unknown as Element});
+assert.equal(sent.filter(m=>m.type==='CHATGPT_GENERATION_STOPPED').length,1,'manual stop requests cancellation of this exact loading request');
+assert.equal(editor.textContent,'Private draft');
 (world.__chatgptNotifierDispose as ()=>void)();document.addEventListener=original;
 console.log('Manual status reset: trusted send plus actual request, synthetic/disabled/newline/stale/route guards passed.');

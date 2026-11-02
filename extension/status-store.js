@@ -2,7 +2,8 @@
 
 // Per-chat status and notification receipts survive service-worker suspension.
 // A visit retires a generation, including a notification still being created;
-// it never changes the tab status. Only a later trusted manual send resets it.
+// it never changes the tab status. Request starts enter loading; terminal
+// results and trusted manual sends are ordered by their captured receipts.
 const statusEpoch=`${Date.now()}:${Math.random()}`;
 let statusReceiptSequence=0;
 const statusWrites=new Map();
@@ -110,6 +111,35 @@ function withChatStatus(url,change) {
   return next;
 }
 function readChatStatus(url) { return withChatStatus(url,record=>({value:statusView(record)})); }
+// A request can start at '/' before ChatGPT allocates its permanent chat URL.
+// Native generation controls may seed only a virgin status, never a known result.
+function observeChatLoading(url,eventAt,receipt) {
+  return withChatStatus(url,record=>{
+    if(record.revision!==0||record.status||record.manualThrough||record.loadingStoppedThrough)return {value:statusView(record)};
+    record.status={kind:'loading',eventAt,receipt,observed:true};record.revision++;
+    return {write:true,value:statusView(record)};
+  });
+}
+function markChatLoading(url,eventAt,receipt) {
+  return withChatStatus(url,record=>{
+    if(record.loadingStoppedThrough&&statusBefore(receipt,record.loadingStoppedThrough))return {value:statusView(record)};
+    if(record.manualThrough&&!statusBefore(record.manualThrough,receipt))return {value:statusView(record)};
+    if(record.status&&!statusBefore(record.status.receipt,receipt))return {value:statusView(record)};
+    if(record.status?.kind==='loading'&&record.status.receipt?.epoch===receipt.epoch&&record.status.receipt?.order===receipt.order)return {value:statusView(record)};
+    record.status={kind:'loading',eventAt,receipt};record.revision++;
+    return {write:true,value:statusView(record)};
+  });
+}
+function stopChatLoading(url,startedAt,receipt,startReceipt=null) {
+  return withChatStatus(url,record=>{
+    const matching=record.status?.kind==='loading'&&record.status.eventAt===startedAt;
+    const generation=matching?record.status.receipt:startReceipt;
+    if(!generation)return {value:statusView(record)};
+    if(!record.loadingStoppedThrough||!statusBefore(generation,record.loadingStoppedThrough))record.loadingStoppedThrough=generation;
+    if(matching&&statusBefore(record.status.receipt,receipt)){record.status=null;record.revision++;}
+    return {write:true,value:statusView(record)};
+  });
+}
 function reserveChatNotification(url,tabId,kind,eventAt,receipt) {
   return withChatStatus(url,record=>{
     const sequence=++record.sequence;
@@ -149,12 +179,12 @@ function closeChatNotification(url,id) {
     return {write:true};
   });
 }
-async function visitChatNotifications(url,receipt,{manual=false}={}) {
+async function visitChatNotifications(url,receipt,{manual=false,startedAt=null}={}) {
   const result=await withChatStatus(url,record=>{
     const selected=record.notifications.filter(item=>statusBefore(item.receipt,receipt));
     record.returnedThrough=Math.max(record.returnedThrough,...selected.map(item=>item.sequence));
     if(manual) {
-      if(!record.status||statusBefore(record.status.receipt,receipt))record.status=null;
+      if((!record.status||statusBefore(record.status.receipt,receipt))&&(!record.loadingStoppedThrough||!statusBefore(receipt,record.loadingStoppedThrough)))record.status=Number.isFinite(startedAt)?{kind:'loading',eventAt:startedAt,receipt}:null;
       if(!record.manualThrough||!statusBefore(receipt,record.manualThrough))record.manualThrough=receipt;
       record.revision++;
     }

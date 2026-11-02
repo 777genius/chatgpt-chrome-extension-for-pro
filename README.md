@@ -2,15 +2,16 @@
 
 **Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Version **1.3.2** · Chrome / Chromium **116+** · No build required
+Version **1.4.0** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
 | Feature | What it does |
 | --- | --- |
 | **Desktop alerts** | Sound, answer or error preview, and elapsed response time when known. |
-| **Red / green status icons** | Red for errors, green for completed responses, in notifications and the tab favicon. |
-| **Read without losing status** | Visiting a chat dismisses its OS notifications. The tab indicator stays until you manually send a new message. |
+| **Animated waiting indicator** | A rotating blue loader in the tab favicon while a request is running, including background tabs. Animation pauses when Chrome is unfocused. No estimated percentages. |
+| **Red / green status icons** | Red for stopped errors, green for completed responses, in notifications and the tab favicon. |
+| **Read without losing status** | Visiting a chat dismisses its OS notifications. The result icon stays until your next manual send, then becomes a waiting loader. |
 | **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` retries in the same chat. Stops on exhausted limits or an unconfirmed send. |
 | **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. |
 | **Chat-limit handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. |

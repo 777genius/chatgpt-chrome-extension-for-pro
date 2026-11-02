@@ -116,7 +116,7 @@ function appendJournal(event, tab = {}) {
       [JOURNAL_META]: { ...meta, sequence, active, requests, tabs, lastAt: entry.recordedAt,
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry) } });
     journalFailure = '';
-    return { ok: true, sequence };
+    return { ok: true, sequence, sourceUrl:entry.sourceUrl };
   });
   journalQueue = write;
   return write.catch((error) => { if (!error.journalPolicy) {journalFailure = String(error?.message || error); console.error('Journal write failed', journalFailure);} throw error; });
@@ -142,7 +142,7 @@ async function readRetryState(url) {
 function journalInBackground(event, tab) { void appendJournal(event, tab).catch(() => {}); }
 function journalRequest(kind, details) {
   // Queue immediately, preserving request order; documentUrl is the URL at send time.
-  journalInBackground({kind, tabId:details.tabId, requestId:details.requestId, attemptId:String(details.timeStamp),
+  return appendJournal({kind, tabId:details.tabId, requestId:details.requestId, attemptId:String(details.timeStamp),
     eventAt:details.timeStamp, sourceUrl:details.documentUrl || details.initiator || '',
     statusCode:details.statusCode, error:details.error});
 }

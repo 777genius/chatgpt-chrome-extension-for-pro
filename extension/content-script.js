@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.3.2';
+  const SCRIPT_VERSION = '1.4.0';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -83,7 +83,7 @@
   }
 
   statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,
-    load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url}),alive:runtimeAvailable})||null;
+    load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:isGenerating(),startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null}),alive:runtimeAvailable})||null;
 
   function notifyPageReturned(event) {
     if((event&&event.isTrusted===false)||!pageIsActive()||returnedPageUrl===location.href)return;
@@ -514,7 +514,10 @@
       state.reason = `Автопродолжение остановлено: ${cause.message}`;
       notifyError(error, state.reason);
     } finally {
-      if (!clicked) void logRetry('retry.cancelled',{operationId,reason:'Отправка не выполнялась'});
+      if (!clicked) {
+        void logRetry('retry.cancelled',{operationId,reason:'Отправка не выполнялась'});
+        if(recoveryStopped&&!isGenerating())void runtimeMessage({type:'CHATGPT_GENERATION_STOPPED',url:sourceUrl,startedAt:Number(attempt)});
+      }
       else if (!confirmed && !state.blocked) void logRetry('retry.failed',{operationId,clicked:true,confirmed:false,reason:'Контекст чата изменился; результат отправки неизвестен'});
       replacingDraft = false;
       if (replaced && runtimeAvailable() && location.pathname === path) {
@@ -1161,6 +1164,7 @@
   document.addEventListener('click', (event) => {
     if (!isStopButton(event.target)) return;
     if (stoppingRecovery && !event.isTrusted) return;
+    if(event.isTrusted)void runtimeMessage({type:'CHATGPT_GENERATION_STOPPED',url:location.href,startedAt:statusIndicator?.loadingStartedAt?.()||Number(globalThis.__chatgptNotifierAttemptId)});
     // A manual stop is not a successful completion. The next conversation
     // request will arm the watcher again.
     watchToken += 1;
@@ -1168,8 +1172,9 @@
     suppressUntilEpoch = Date.now() + 1500;
   }, { capture: true, signal: listeners.signal });
 
-  function onRuntimeMessage(message) {
+  function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_STATUS_TICK'){sendResponse?.({ok:statusIndicator?.tick(message)||false});return;}
     if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt);
     if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){void statusIndicator?.refresh();notifyPageReturned();}

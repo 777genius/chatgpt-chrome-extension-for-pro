@@ -3,6 +3,7 @@ importScripts('page-probe.js');
 importScripts('journal-store.js');
 importScripts('handoff-title.js');
 importScripts('status-store.js');
+importScripts('status-animation.js');
 importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
 
@@ -20,6 +21,9 @@ const CHATGPT_REQUEST_FILTER = {
 
 let creatingOffscreen = null;
 const lastNotificationFingerprintByTab = new Map();
+const statusAnimation=ChatGPTStatusAnimation.create({send:(tabId,message)=>chrome.tabs.sendMessage(tabId,message),setTimeout,clearTimeout});
+let statusFocusEventSeen=false;
+if(chrome.windows?.getLastFocused)void chrome.windows.getLastFocused().then(window=>{if(!statusFocusEventSeen)statusAnimation.setEnabled(window.focused===true);}).catch(()=>{});
 const manualRequestReceiptsByTab=new Map();
 
 function normalizePathname(url) {
@@ -146,8 +150,10 @@ async function emitBoth({ tabId = null, title = 'ChatGPT', message = 'Response f
 
 async function broadcastChatStatus(view) {
   const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*'});
-  await Promise.allSettled(tabs.filter(tab=>ChatGPTHandoffTitle.chatUrl(tab.url)===view.url).map(tab=>
-    chrome.tabs.sendMessage(tab.id,{type:'CHATGPT_STATUS_CHANGED',...view})));
+  await Promise.allSettled(tabs.filter(tab=>ChatGPTHandoffTitle.chatUrl(tab.url)===view.url).map(tab=>{
+    statusAnimation.set(tab.id,view.url,view.status?.kind==='loading');
+    return chrome.tabs.sendMessage(tab.id,{type:'CHATGPT_STATUS_CHANGED',...view});
+  }));
 }
 
 function messageChatUrl(message,sender) {
@@ -200,8 +206,13 @@ chrome.runtime.onInstalled.addListener(() => installErrorWatchers().catch(consol
 chrome.runtime.onStartup.addListener(() => installErrorWatchers().catch(console.warn));
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
-  manualRequestReceiptsByTab.set(details.tabId,{startedAt:details.timeStamp,receipt:statusReceipt(),url:ChatGPTHandoffTitle.chatUrl(details.documentUrl)});
-  journalRequest('request.started',details);
+  const receipt=statusReceipt();
+  manualRequestReceiptsByTab.set(details.tabId,{startedAt:details.timeStamp,receipt,url:ChatGPTHandoffTitle.chatUrl(details.documentUrl)});
+  // Use the source captured by the serialized journal, never a later tab URL.
+  void journalRequest('request.started',details).then(async event=>{
+    const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl);
+    if(url)await broadcastChatStatus(await markChatLoading(url,details.timeStamp,receipt));
+  }).catch(()=>{});
   chrome.scripting.executeScript({
     target: { tabId: details.tabId },
     func: (startedAt) => { globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`; },
@@ -211,13 +222,13 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
 
 chrome.webRequest.onCompleted.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
-  journalRequest('request.completed',details);
+  void journalRequest('request.completed',details).catch(()=>{});
   if (details.statusCode < 200 || details.statusCode >= 300) return;
   signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED'}).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
 
 chrome.webRequest.onErrorOccurred?.addListener((details) => {
-  if (isAnswerStreamRequest(details)) journalRequest('request.failed',details);
+  if (isAnswerStreamRequest(details)) void journalRequest('request.failed',details).catch(()=>{});
 }, CHATGPT_REQUEST_FILTER);
 
 const handoffWrites = new Map();
@@ -488,24 +499,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
-  if (['CHATGPT_PAGE_RETURNED','CHATGPT_STATUS_GET','CHATGPT_MANUAL_SEND'].includes(message?.type)) {
+  if (['CHATGPT_PAGE_RETURNED','CHATGPT_STATUS_GET','CHATGPT_MANUAL_SEND','CHATGPT_GENERATION_STOPPED'].includes(message?.type)) {
     const url=messageChatUrl(message,sender);
     let receipt=statusReceipt();
     if(!url){sendResponse?.({ok:false,reason:'Чат изменился'});return false;}
     if(message.type==='CHATGPT_MANUAL_SEND') {
       const request=manualRequestReceiptsByTab.get(sender.tab.id);
-      if(!request||!Number.isFinite(message.startedAt)||request.startedAt!==message.startedAt||request.url&&request.url!==url) {
+      if(!request||request.consumed||!Number.isFinite(message.startedAt)||request.startedAt!==message.startedAt||request.url&&request.url!==url) {
         sendResponse?.({ok:false,reason:'Ручная отправка не подтверждена текущим запросом'});return false;
       }
       receipt=request.receipt;
-      manualRequestReceiptsByTab.delete(sender.tab.id);
+      request.consumed=true;
     }
     (async()=>{
       const tab=await chrome.tabs.get(sender.tab.id);
       if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'Чат изменился'};
-      if(message.type==='CHATGPT_STATUS_GET')return {ok:true,...await readChatStatus(url)};
+      if(message.type==='CHATGPT_STATUS_GET'){
+        let view=await readChatStatus(url);
+        if(message.generating===true&&!view.status&&view.revision===0){
+          const request=manualRequestReceiptsByTab.get(sender.tab.id);
+          const known=request?.startedAt===message.startedAt;
+          view=await observeChatLoading(url,Number.isFinite(message.startedAt)&&message.startedAt>0?message.startedAt:Date.now(),known?request.receipt:receipt);
+        }
+        statusAnimation.set(sender.tab.id,url,view.status?.kind==='loading');
+        return {ok:true,...view};
+      }
+      if(message.type==='CHATGPT_GENERATION_STOPPED'){
+        const request=manualRequestReceiptsByTab.get(sender.tab.id);
+        const startReceipt=request?.startedAt===message.startedAt&&(!request.url||request.url===url)?request.receipt:null;
+        const view=await stopChatLoading(url,message.startedAt,receipt,startReceipt);
+        void broadcastChatStatus(view).catch(()=>{});
+        return {ok:true,...view};
+      }
       if(message.type==='CHATGPT_MANUAL_SEND') {
-        const view=await visitChatNotifications(url,receipt,{manual:true});
+        const view=await visitChatNotifications(url,receipt,{manual:true,startedAt:message.startedAt});
         void broadcastChatStatus(view).catch(()=>{});
         return {ok:true,...view};
       }
@@ -529,6 +556,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
   manualRequestReceiptsByTab.delete(tabId);
+  statusAnimation.remove(tabId);
 });
 
 chrome.tabs.onActivated?.addListener(({tabId})=>{
@@ -536,6 +564,8 @@ chrome.tabs.onActivated?.addListener(({tabId})=>{
   void chrome.tabs.get(tabId).then(tab=>visitVisibleChat(tabId,ChatGPTHandoffTitle.chatUrl(tab.url),receipt)).catch(()=>{});
 });
 chrome.windows?.onFocusChanged?.addListener(windowId=>{
+  statusFocusEventSeen=true;
+  statusAnimation.setEnabled(windowId>=0);
   if(windowId<0)return;
   const receipt=statusReceipt();
   void chrome.tabs.query({active:true,windowId}).then(([tab])=>tab&&visitVisibleChat(tab.id,ChatGPTHandoffTitle.chatUrl(tab.url),receipt)).catch(()=>{});
@@ -546,6 +576,7 @@ chrome.tabs.onUpdated?.addListener((tabId, change, tab) => {
   if (change.url || change.discarded !== undefined || change.frozen !== undefined) {
     journalInBackground({kind:'tab.updated',changes:change},tab);
   }
+  if(change.url)statusAnimation.remove(tabId);
   if(change.url)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_ROUTE_CHANGED'}).catch(()=>{});
   if(change.url)void visitVisibleChat(tabId,ChatGPTHandoffTitle.chatUrl(tab.url),statusReceipt()).catch(()=>{});
 });
