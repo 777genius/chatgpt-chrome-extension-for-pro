@@ -16,17 +16,17 @@ if (missing.length > 0) {
 if (!existsSync(join(root, "bun.lock"))) {
   throw new Error("A frozen Bun lockfile is required before review-ready/merge");
 }
-const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
+const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+  version:string;
+  devDependencies?:Record<string,string>;
+  dependencies?:Record<string,string>;
+};
 const manifest = JSON.parse(readFileSync(join(historical, "manifest.json"), "utf8")) as { version: string };
 if (pkg.version !== manifest.version) throw new Error("Package and MV3 manifest version drift");
-const deps = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
-  devDependencies?: Record<string, string>;
-  dependencies?: Record<string, string>;
-};
-if (deps.devDependencies?.typescript !== "7.0.2") {
+if (pkg.devDependencies?.typescript !== "7.0.2") {
   throw new Error("Published TS7 contract requires exact TypeScript 7.0.2");
 }
-if (deps.dependencies?.["@agent-teams/engineering-foundation"]) {
+if (pkg.dependencies?.["@agent-teams/engineering-foundation"]) {
   throw new Error("Engineering Foundation must never be bundled into Chrome");
 }
 function inspectSource(dir: string): void {
