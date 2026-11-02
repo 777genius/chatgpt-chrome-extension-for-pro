@@ -341,27 +341,51 @@
         await save(next);
       });
     }
+    async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
+      const source=canonical(sourceUrl),target=canonical(targetUrl);
+      if(!source||!target||source===target||!handoffId||!userId||nativeVerified!==true||
+          !completionKey?.startsWith(promptKey+'|')||
+          !promptKey?.startsWith(new URL(target).pathname+'|')||typeof response!=='string')return {ok:false};
+      return serialize(async()=>{
+        const old=await read(source);
+        if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)return {ok:false};
+        if(old.handoffEarlyCompletion)return {ok:false};
+        const next={...old,handoffEarlyCompletion:{url:target,tabId,completionKey,promptKey,response,
+          nativeVerified,rawExact,userId}};
+        await event('handoff_completion_staged',next,tabId,{handoffId,completionKey,promptKey});
+        await save(next);
+        return {ok:true};
+      });
+    }
     async function handoffConfirm({sourceUrl,targetUrl,handoffId,tabId,acceptedUserId}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target)return;
-      await serialize(async()=>{
+      const early=await serialize(async()=>{
         const old=await read(source);
         const existing=await read(target);
-        if(existing?.id===old?.id&&old?.phase==='moved')return;
-        if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)
-          return;
+        if(existing?.id===old?.id&&old?.phase==='moved')
+          return existing.earlyCompletion||null;
+        if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)return null;
         if(typeof acceptedUserId!=='string'||!acceptedUserId)
           throw Error('Нативный ID перенесённого пользовательского сообщения не подтверждён');
         if(existing&&!['completed','stopped','blocked','moved'].includes(existing.phase))
           throw Error('В новом чате уже есть другая активная цель');
-        const moved={...old,phase:'moved',reason:'Цель перенесена в '+target,operation:null};
+        const retained=old.handoffEarlyCompletion?.userId===acceptedUserId&&
+          old.handoffEarlyCompletion.url===target?old.handoffEarlyCompletion:null;
+        const moved={...old,phase:'moved',reason:'Цель перенесена в '+target,operation:null,handoffEarlyCompletion:null};
         const next={...old,url:target,phase:old.preHandoffPhase==='paused'?'paused':'waiting',
-          reason:'',expectedPromptKey:null,handoffPending:true,handoffAcceptedUserId:acceptedUserId,operation:null,pendingCompletion:null};
+          reason:'',expectedPromptKey:null,handoffPending:true,handoffAcceptedUserId:acceptedUserId,
+          operation:null,pendingCompletion:null,earlyCompletion:retained,handoffEarlyCompletion:null};
         await event('handoff_confirmed',next,tabId,{sourceUrl:source,targetUrl:target,handoffId});
         await storage.set({[key(source)]:moved,[key(target)]:next});
+        return retained;
       });
+      // If an answer completed between native handoff acceptance and Goal
+      // transfer, process its saved proof once. It stays on the target Goal for
+      // recovery if execution stops before this replay.
+      if(early)await completion(early);
     }
-    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffConfirm,
+    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
