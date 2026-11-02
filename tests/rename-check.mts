@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization';
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -67,12 +67,15 @@ function harness(mode: Mode = 'success') {
         if(mode!=='optimistic') document.title=input.value;
         document.querySelector('header')!.removeAttribute('inert');
         if(mode==='no-ack')return;
-        const payload=new TextEncoder().encode(JSON.stringify({title:mode==='wrong-request'?'Other':input.value}));
+        const payload=new TextEncoder().encode(JSON.stringify({title:mode==='wrong-request'||mode.endsWith('-wrong-title')?'Other':input.value}));
         const split=mode==='split-utf8'?payload.findIndex(byte=>byte>=128)+1:0;
         const raw=split?[{bytes:payload.slice(0,split).buffer as ArrayBuffer},{bytes:payload.slice(split).buffer as ArrayBuffer}]:[{bytes:payload.buffer as ArrayBuffer}];
-        const request:Request={tabId:7,method:'PATCH',url:`https://chatgpt.com/backend-api/${mode==='wrong-path'?'share':'conversation'}/target`,requestId:'rename-1',requestBody:{raw}};
+        const path=mode==='wrong-path'?'share':mode.startsWith('plural')?'conversations':'conversation';
+        const id=mode.endsWith('-wrong-id')?'unrelated':'target';
+        const pathname=mode.startsWith('native')?`conversation/id/${id}/rename`:`${path}/${id}`;
+        const request:Request={tabId:mode.endsWith('-wrong-tab')?8:7,method:mode==='native-patch'?'PATCH':mode.startsWith('native')||mode==='plural-post'?'POST':mode==='plural-get'?'GET':'PATCH',url:`https://chatgpt.com/backend-api/${pathname}`,requestId:'rename-1',requestBody:{raw}};
         before.forEach(fn=>fn(request));
-        complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'?503:200}));
+        complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'||mode.endsWith('-failed-ack')?503:200}));
       });
     });
     document.body.append(menu);
@@ -121,14 +124,28 @@ function harness(mode: Mode = 'success') {
   assert.equal((h.storage[`chatgpt-handoff-title:${targetUrl}`] as {title:string}).title,expectedTitle);
   assert.equal((await h.rename()).ok,true);assert.equal(h.saved,1,'confirmed intent is not replayed');
 }
-for(const mode of ['no-ack','wrong-request','wrong-path','failed-ack','optimistic'] as const){
+for(const mode of ['no-ack','wrong-request','wrong-path','failed-ack','optimistic','plural-wrong-id','plural-wrong-title','plural-failed-ack','plural-get','plural-wrong-tab','native-wrong-id','native-wrong-title','native-patch','native-failed-ack','native-wrong-tab'] as const){
   const h=harness(mode);
   const result=await h.rename();
   assert.equal(result.ok,false,`${mode} cannot confirm title persistence`);
   assert.equal(h.record.titleStatus,'failed');
   assert.equal(h.storage[`chatgpt-handoff-title:${targetUrl}`],undefined);
   assert.equal(h.saved,1,'uncertain save is not clicked again');
+  if(mode.endsWith('-wrong-id')||mode.endsWith('-wrong-title')||mode.endsWith('-wrong-tab')||mode==='plural-get'||mode==='native-patch') {
+    assert.equal(h.events.filter(event=>event.kind==='handoff.title_request').length,0,'unrelated requests never become title acknowledgement evidence');
+    assert.equal(h.events.filter(event=>event.kind==='handoff.title_response').length,0);
+  }
   await h.rename();assert.equal(h.saved,1,'failure record prevents repeat mutation');
+}
+for(const mode of ['plural','plural-post','native'] as const) {
+  const h=harness(mode);
+  const result=await h.rename();
+  assert.equal(result.ok,true,result.reason||'exact conversation rename endpoint must confirm the saved title');
+  assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1);
+  assert.equal(h.events.filter(event=>event.kind==='handoff.title_request').length,1);
+  assert.equal(h.events.filter(event=>event.kind==='handoff.title_response').length,1);
+  await h.rename();assert.equal(h.saved,1,'confirmed rename request must never authorize a second save');
 }
 {
   const h=harness('unsaved');

@@ -8,7 +8,10 @@ chrome.webRequest.onBeforeRequest.addListener(details=>{
   const pending=pendingTitles.get(details.tabId);
   if (!pending || !['PATCH','POST'].includes(details.method)) return;
   const id=journalChatId(pending.url);
-  if (new URL(details.url).pathname!==`/backend-api/conversation/${id}`) return;
+  const pathname=new URL(details.url).pathname;
+  const nativeRename=details.method==='POST'&&pathname===`/backend-api/conversation/id/${id}/rename`;
+  const legacyRename=pathname===`/backend-api/conversation/${id}`||pathname===`/backend-api/conversations/${id}`;
+  if (!nativeRename&&!legacyRename) return;
   const raw=details.requestBody?.raw;
   if (!raw || raw.reduce((sum,item)=>sum+(item.bytes?.byteLength||0),0)>65536) return;
   try {
