@@ -29,7 +29,7 @@ async function check(mode:Mode) {
     worker=createContext({URL,console,chrome,setTimeout,clearTimeout});worker.importScripts=(name:string)=>runInContext(readFileSync('extension/'+name,'utf8'),worker);
     runInContext(readFileSync('extension/service-worker.js','utf8'),worker);
   }
-  async function append(kind:string,extra:Record<string,unknown>={}){worker.event={kind,sourceUrl,operationId:'draft-op',...extra};await runInContext(`appendJournal(event,{id:7,url:'${sourceUrl}'})`,worker);}
+  async function append(kind:string,extra:Record<string,unknown>={}){worker.event={kind,sourceUrl,operationId:'draft-op',promptKey:'/c/draft-fixture|user-turn',...extra};await runInContext(`appendJournal(event,{id:7,url:'${sourceUrl}'})`,worker);}
   function bootContent(){
     const runtime={id:'fixture',onMessage:{addListener(){},removeListener(){}},sendMessage:(message:any)=>new Promise(resolve=>{
       let answered=false;const result=messageHandler(message,{frameId:0,tab:{...tab}},(answer:any)=>{
