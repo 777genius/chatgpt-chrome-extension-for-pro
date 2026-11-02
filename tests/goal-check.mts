@@ -174,6 +174,29 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(state(env).operation.kind,'initial');
 }
 
+// Worker restart can safely redeliver only the SAME reserved operation. Once
+// the intent is persisted, recovery must not re-authorize a possible click.
+{
+  const env=fixture();await begin(env);
+  const op=state(env).operation;
+  await env.fresh().recoverTab({id:8,url:URL_A});
+  assert.equal(env.messages.length,1,'other tab cannot steal reserved dispatch');
+  await env.fresh().recoverTab({id:7,url:URL_A});
+  assert.equal(env.messages.length,2,'same reserved operation is re-delivered');
+  assert.equal(env.messages[0].message.operationId,env.messages[1].message.operationId);
+  await env.store.intent({url:URL_A,tabId:7,id:state(env).id,operationId:op.id,text:op.text});
+  await env.fresh().recoverTab({id:7,url:URL_A});
+  assert.equal(env.messages.length,2,'intent may have clicked, recovery cannot retry');
+}
+{
+  const env=fixture();await begin(env);
+  env.time+=3600001;
+  await env.fresh().recoverTab({id:7,url:URL_A});
+  assert.equal(state(env).phase,'stopped');
+  assert.equal(state(env).operation,null);
+  assert.equal(env.messages.length,1,'expired reserved send cannot recover');
+}
+
 // A trusted manual send in the preparation window must not strand Goal in
 // paused-with-operation or allow stale content dispatch to click.
 {
