@@ -471,7 +471,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
   }).catch(()=>{});
   chrome.scripting.executeScript({
     target: { tabId: details.tabId },
-    func: (startedAt,requestId,receipt) => { const prior=globalThis.__chatgptNotifierRequestReceipt;if(!(globalThis.__chatgptNotifierRequestStartedAt>startedAt)&&!(prior?.epoch===receipt.epoch&&prior.order>receipt.order)){globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`;globalThis.__chatgptNotifierRequestId=requestId;globalThis.__chatgptNotifierRequestReceipt=receipt;} },
+    func: (startedAt:number,requestId:string|null,receipt:SWReceipt) => { const prior=globalThis.__chatgptNotifierRequestReceipt;if(!((globalThis.__chatgptNotifierRequestStartedAt??0)>startedAt)&&!(prior?.epoch===receipt.epoch&&prior.order>receipt.order)){globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`;globalThis.__chatgptNotifierRequestId=requestId;globalThis.__chatgptNotifierRequestReceipt=receipt;} },
     args: [details.timeStamp,request.requestId,receipt]
   }).then(()=>signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:details.timeStamp,requestId:request.requestId})).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
@@ -729,8 +729,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if(!url||!message.operationId||typeof message.promptKey!=='string'||!message.promptKey||typeof message.attemptId!=='string'){
       sendResponse?.({ok:false,reason:'Не подтверждён запрос для остановки'});return false;
     }
-    const refuse=async reason=>{await appendJournal({kind:'recovery.stop_refused',operationId:message.operationId,sourceUrl:url,attemptId:message.attemptId,requestId:message.requestId,reason},sender.tab);return {ok:false,reason};};
-    const matches=request=>!request||String(request.startedAt)===message.attemptId&&(!request.requestId||request.requestId===message.requestId)&&(!request.url||request.url===url);
+    const refuse=async (reason:string)=>{await appendJournal({kind:'recovery.stop_refused',operationId:message.operationId,sourceUrl:url,attemptId:message.attemptId,requestId:message.requestId,reason},sender.tab);return {ok:false,reason};};
+    const matches=(request:SWReceiptRecord|null|undefined)=>!request||String(request.startedAt)===message.attemptId&&(!request.requestId||request.requestId===message.requestId)&&(!request.url||request.url===url);
     (async()=>{
       const initial=await latestRequestReceipt(sender.tab.id);
       if(!matches(initial))return refuse('Запрос перед остановкой изменился');
