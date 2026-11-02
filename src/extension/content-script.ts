@@ -93,7 +93,7 @@ interface CSPageCompletion {ok?:boolean;url?:string;promptKey?:string;assistantK
 interface CSGoalDispatch {type:string;url:string;goalId:string;operationId:string;text:string}
 interface CSArmOptions {
   resumed?:boolean;completed?:boolean;nativeProgress?:boolean;
-  restored?:CSAttempt|null;
+  restored?:Partial<CSAttempt>|null;
 }
 declare const chrome:CSChrome;
 declare const ChatGPTNotifierMemory:{createLatestTaskSlot():{replace(cleanup:()=>void):()=>void;cancel():void}};
@@ -444,8 +444,9 @@ declare global {
     function text(node:Node):string {
       if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
       if (node.nodeType !== Node.ELEMENT_NODE) return '';
-      if (node.tagName === 'BR') return node.classList.contains('ProseMirror-trailingBreak') ? '' : '\n';
-      const separator = ['UL', 'OL'].includes(node.tagName) ? '\n' : '';
+      const elementNode=node as Element;
+      if (elementNode.tagName === 'BR') return elementNode.classList.contains('ProseMirror-trailingBreak') ? '' : '\n';
+      const separator = ['UL', 'OL'].includes(elementNode.tagName) ? '\n' : '';
       return Array.from(node.childNodes).map(text).join(separator);
     }
     return Array.from(copy.childNodes).map(text).join('\n');
@@ -1569,12 +1570,14 @@ declare global {
     const intent=completionSendIntent;
     if(!intent&&!options.resumed&&!options.restored)return;
     if(options.resumed&&!options.nativeProgress)return;
-    if(!options.resumed&&!options.restored&&(intent.path!==location.pathname||!Number.isFinite(startedAt)||startedAt<intent.at||startedAt-intent.at>10000))return;
+    if(!options.resumed&&!options.restored&&(!intent||intent.path!==location.pathname||
+        typeof startedAt!=='number'||!Number.isFinite(startedAt)||
+        startedAt<intent.at||startedAt-intent.at>10000))return;
     completionSendIntent=null;
     const snapshot=latestPromptSnapshot();
-    const attempt={id,requestId,startedAt,token:watchToken,path:location.pathname,url:ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/',
-      baselineKey:options.restored?options.restored.baselineKey:options.resumed?'':intent.baselineKey,promptKey:options.restored?options.restored.promptKey:options.resumed?snapshot?.promptKey||'':'',httpCompleted:Boolean(options.completed||options.restored?.httpCompleted)};
     if(!id)return;
+    const attempt:CSAttempt={id,requestId,startedAt,token:watchToken,path:location.pathname,url:ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/',
+      baselineKey:options.restored?options.restored.baselineKey||'':options.resumed?'':intent!.baselineKey,promptKey:options.restored?options.restored.promptKey||'':options.resumed?snapshot?.promptKey||'':'',httpCompleted:Boolean(options.completed||options.restored?.httpCompleted)};
     completionAttempt=attempt;
     persistCompletionAttempt(attempt);
     const isCurrent=()=>{
