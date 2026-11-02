@@ -195,7 +195,7 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
   if (!state.selected) return { ok: false, reason: "rename-not-selected" };
   const inputs = Array.from(document.querySelectorAll<HTMLInputElement>(
     '[role="dialog"][aria-modal="true"] form input')).filter(visible);
-  const input = state.input || (inputs.length === 1 && inputs[0]);
+  const input = state.input || (inputs.length === 1 ? inputs[0] : null);
   const form = input?.closest("form");
   if (!input || !visible(input) || !form || !form.querySelector("h2") ||
       form.querySelectorAll("input").length !== 1 ||
@@ -226,7 +226,7 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
       return { ok: false, retryable: true, reason: "title-model-not-ready" };
     }
     const save = form.querySelector<HTMLButtonElement>('button[type="submit"]');
-    if (!visible(save) || save?.disabled) {
+    if (!save || !visible(save) || save.disabled) {
       return { ok: false, retryable: true, reason: "title-save-not-ready" };
     }
     state.saved = true;
