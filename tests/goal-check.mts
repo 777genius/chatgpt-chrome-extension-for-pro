@@ -10,10 +10,10 @@ const URL_A='https://chatgpt.com/c/goal-fixture-a';
 const URL_B='https://chatgpt.com/c/goal-fixture-b';
 let sequence=0;
 type Env={data:Record<string,any>;messages:{tabId:number,message:any}[];events:any[];
-  tabs:Record<number,string>;time:number;store:any;fresh:()=>any;failWrite:boolean};
+  tabs:Record<number,string>;time:number;store:any;fresh:()=>any;failWrite:boolean;busy:boolean};
 function fixture():Env {
   const env:Env={data:{},messages:[],events:[],tabs:{7:URL_A,8:URL_A},time:1000000,store:null,
-    fresh:()=>null,failWrite:false};
+    fresh:()=>null,failWrite:false,busy:false};
   const storage={
     async get(key:string){return {[key]:structuredClone(env.data[key])};},
     async set(value:Record<string,unknown>){
@@ -23,7 +23,10 @@ function fixture():Env {
   };
   const tabs={
     async get(tabId:number){return {id:tabId,url:env.tabs[tabId]};},
-    async sendMessage(tabId:number,message:any){env.messages.push({tabId,message});return {ok:true};}
+    async sendMessage(tabId:number,message:any){
+      if(message?.type==='CHATGPT_GOAL_READINESS')return {ok:true,idle:!env.busy,reason:'Synthetic manual response is active'};
+      env.messages.push({tabId,message});return {ok:true};
+    }
   };
   const journal=async(event:any)=>{env.events.push(structuredClone(event));return {ok:true};};
   env.fresh=()=>create({storage,tabs,appendJournal:journal,now:()=>env.time,
@@ -140,6 +143,23 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(env.messages.length,2);
   assert.equal(state(env).phase,'preparing');
   await assert.rejects(()=>env.store.control({action:'resume',url:URL_A,tabId:7}),/Нельзя/);
+}
+
+// A user manual send after a Goal answer interrupts auto-continue, then an
+// explicit resume requires an idle chat and creates a single continuation.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await env.store.manual({url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'paused');
+  assert.equal(state(env).manualOverride,true);
+  env.busy=true;
+  await assert.rejects(()=>env.store.control({action:'resume',url:URL_A,tabId:7}),/Synthetic manual/);
+  assert.equal(state(env).phase,'paused');
+  env.busy=false;
+  await env.store.control({action:'resume',url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'preparing');
+  assert.equal(state(env).operation.kind,'continuation');
+  assert.equal(env.messages.length,2);
 }
 
 // Pause or stop after the send intent never clears the unknown-operation fence.
