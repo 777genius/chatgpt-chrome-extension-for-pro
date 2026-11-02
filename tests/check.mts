@@ -361,13 +361,17 @@ async function popupRecoveryCheck() {
   await Promise.resolve();await Promise.resolve();
   assert.equal(document.getElementById('title-recovery')!.hidden,false);
   assert.equal(document.getElementById('desired-title')!.textContent,'Saved title (2)');
-  assert.equal(messages.length,1,'opening the popup only reads recovery information');
+  assert.deepEqual(messages.map(item=>item.type).sort(),
+    ['CHATGPT_GOAL_CONTROL','CHATGPT_HANDOFF_TITLE_INFO'].sort(),
+    'opening the popup only reads Goal state and recovery information');
+  assert.equal(messages.find(item=>item.type==='CHATGPT_GOAL_CONTROL')?.action,'get');
   const button=document.getElementById('recover-title')!;
   button.dispatchEvent(new window.Event('click'));
   button.dispatchEvent(new window.Event('click'));
-  assert.equal(messages.length,2,'explicit duplicate clicks issue one recovery request');
-  assert.equal(messages[1].desiredTitle,'Saved title (2)');
-  assert.equal(messages[1].targetUrl,info.targetUrl);
+  const recoverRequests=messages.filter(item=>item.type==='CHATGPT_HANDOFF_RENAME_RECOVER');
+  assert.equal(recoverRequests.length,1,'explicit duplicate clicks issue one recovery request');
+  assert.equal(recoverRequests[0].desiredTitle,'Saved title (2)');
+  assert.equal(recoverRequests[0].targetUrl,info.targetUrl);
   finishRecovery({ok:true});await pause();
   assert.equal(document.getElementById('title-recovery')!.hidden,true);
   assert.equal(document.getElementById('status')!.textContent,'Название чата восстановлено.');
