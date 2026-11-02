@@ -145,10 +145,15 @@ function appendJournal(event, tab = {}) {
     }
     if (['request.completed','request.failed'].includes(event.kind)) operationId ||= requests[event.requestId]?.operationId || null;
     if (['retry.send_intent','handoff.sending','goal.send_intent'].includes(event.kind)) {
-      const previous=active[tabId];
-      if(previous)
-        throw Object.assign(new Error('Вкладка уже имеет незавершённую автоматическую отправку; новое разрешение запрещено'),{journalPolicy:true});
-      active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,at:Date.now()};
+      const chatUrl=retryDraftUrl(event.kind==='handoff.sending'?event.targetUrl||tab.url:sourceUrl);
+      // All automatic senders share one canonical-chat lock, not just one tab
+      // slot. Unknown outcomes remain fenced after a tab closes or a worker
+      // restarts. Read legacy entries through their saved tab URL.
+      if(active[tabId] || chatUrl && Object.entries(active).some(([owner,entry])=>
+          Number(owner)!==tabId && entry &&
+          (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl))
+        throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
+      active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now()};
     }
     if (event.kind === 'send.authorized') {
       if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
@@ -165,7 +170,10 @@ function appendJournal(event, tab = {}) {
       ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
     const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&
       ['handoff.sent','handoff.failed'].includes(event.kind);
-    if(event.kind==='tab.closed'||clearsGoal||clearsRetry||clearsHandoff)delete active[tabId];
+    // A closed tab is not evidence that its message was never clicked.
+    // Preserve unresolved Goal locks for other tabs opening the same chat.
+    if((event.kind==='tab.closed'&&currentSend?.kind!=='goal.send_intent')||
+        clearsGoal||clearsRetry||clearsHandoff)delete active[tabId];
     const requestSource = requests[event.requestId]?.sourceUrl;
     if (['request.completed','request.failed'].includes(event.kind)) delete requests[event.requestId];
     const entry = { ...event, schema: 1, sequence, recordedAt: Date.now(),
