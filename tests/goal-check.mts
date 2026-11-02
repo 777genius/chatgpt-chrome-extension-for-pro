@@ -190,6 +190,20 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(state(env).phase,'preparing','already consumed early result is not replayed');
 }
 
+// A restarted worker must not dispatch the same newly reserved continuation
+// twice when it replays a completed answer left in durable waiting state.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  const promptKey=state(env).expectedPromptKey;
+  state(env).earlyCompletion={url:URL_A,tabId:7,
+    completionKey:promptKey+'|early-assistant',promptKey,response:'Continue',
+    nativeVerified:true,rawExact:false,userId:'native-user'};
+  const recovery=await env.fresh().recoverTab({id:7,url:URL_A});
+  assert.equal(recovery.replayed,true);
+  assert.equal(state(env).phase,'preparing');
+  assert.equal(env.messages.length,2,'one replay creates exactly one dispatcher');
+}
+
 // The fast completion of the exact goal marker is also replayed, without
 // dispatching a continuation before or after the send acknowledgement.
 {
