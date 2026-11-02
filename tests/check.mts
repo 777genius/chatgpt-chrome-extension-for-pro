@@ -201,13 +201,14 @@ async function workerCheck() {
   let soundCalls = 0;
   let activeTab={id:7,url:'https://chatgpt.com/c/example'};
   let handoffProof:any=null;
+  let missingWatcher=false;const requestSignals:any[]=[];
   const storage: Record<string, any> = {};
   const chrome = {
     storage: { local: { get: async (key: string | string[] | null) => key === null ? {...storage} : Object.fromEntries((Array.isArray(key)?key:[key]).map(name=>[name,storage[name]])), set: async (entries: any) => {Object.assign(storage, entries);} } },
     runtime: { id:'test-extension',onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
       getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
-    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async () => {} },
+    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}} },
     scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
@@ -236,16 +237,22 @@ async function workerCheck() {
   assert.equal(notifications[3].contextMessage, '', 'unknown duration leaves subtitle empty');
   callbacks.before({ tabId: 8, method: 'POST', timeStamp: 123456, url: 'https://chatgpt.com/backend-api/f/conversation' }); await pause();
   assert.equal(injections.at(-1).target.tabId, 8);
-  assert.equal(injections.at(-2).args[0], 123456);
+  assert.equal(injections.at(-1).args[0], 123456);
   const tabWorld: any = {};
-  runInContext(`(${injections.at(-2).func.toString()})(123456)`, createContext(tabWorld));
+  runInContext(`(${injections.at(-1).func.toString()})(123456)`, createContext(tabWorld));
   assert.equal(tabWorld.__chatgptNotifierRequestStartedAt, 123456);
   const beforeSteer=injections.length;
   callbacks.before({tabId:8,method:'POST',timeStamp:123999,requestId:'steer-test',documentUrl:'https://chatgpt.com/c/example',url:'https://chatgpt.com/backend-api/f/steer_turn'});await pause();
-  assert.equal(injections.length,beforeSteer+2,'steering sends must arm timing and attempt observation');
-  assert.equal(injections.at(-2).args[0],123999);
+  assert.equal(injections.length,beforeSteer+1,'a live watcher receives request start without reloading script files');
+  assert.equal(injections.at(-1).args[0],123999);
   callbacks.before({tabId:8,method:'POST',timeStamp:124000,url:'https://chatgpt.com/backend-api/f/conversation/prepare'});await pause();
-  assert.equal(injections.length,beforeSteer+2,'preparation must not count as a submitted message');
+  assert.equal(injections.length,beforeSteer+1,'preparation must not count as a submitted message');
+  assert.ok(requestSignals.some(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===123999));
+  const beforeMissing=injections.length;missingWatcher=true;
+  callbacks.before({tabId:8,method:'POST',timeStamp:125000,url:'https://chatgpt.com/backend-api/f/conversation'});await pause();
+  assert.equal(injections.length,beforeMissing+2,'a missing receiver still gets timing plus one fallback installation');
+  assert.ok(injections.at(-1).files.includes('status-indicator.js'));
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===125000).length,2,'start is redelivered only after the missing receiver is installed');
   assert.ok(notifications.every(n => !/click to return/i.test(n.contextMessage)));
   const record={id:'handoff-test',sourceUrl:'https://chatgpt.com/c/source',sourceTitle:'Original name',text:'complete history'};
   Object.assign(workerContext,{record});

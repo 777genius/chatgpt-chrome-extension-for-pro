@@ -168,8 +168,7 @@ async function visitVisibleChat(tabId,url,receipt) {
   if(url&&await visibleChatTab(tabId,url))await visitChatNotifications(url,receipt);
 }
 
-async function signalConversationRequestCompleted(tabId) {
-  const message = { type: 'CHATGPT_CONVERSATION_REQUEST_COMPLETED' };
+async function signalConversationRequestEvent(tabId,message) {
   try {
     await chrome.tabs.sendMessage(tabId, message);
     return;
@@ -184,7 +183,7 @@ async function signalConversationRequestCompleted(tabId) {
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
-    console.warn('Prompt-Bound Alert: could not arm tab completion watcher', error);
+    console.warn('Prompt-Bound Alert: could not notify tab request watcher', error);
   }
 }
 
@@ -207,16 +206,14 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
     target: { tabId: details.tabId },
     func: (startedAt) => { globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`; },
     args: [details.timeStamp]
-  }).then(() => chrome.scripting.executeScript({
-    target: { tabId: details.tabId }, files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'content-script.js']
-  })).then(()=>chrome.tabs.sendMessage(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:details.timeStamp})).catch(() => {});
+  }).then(()=>signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:details.timeStamp})).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
 
 chrome.webRequest.onCompleted.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
   journalRequest('request.completed',details);
   if (details.statusCode < 200 || details.statusCode >= 300) return;
-  signalConversationRequestCompleted(details.tabId).catch(() => {});
+  signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED'}).catch(() => {});
 }, CHATGPT_REQUEST_FILTER);
 
 chrome.webRequest.onErrorOccurred?.addListener((details) => {

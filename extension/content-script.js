@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.3.1';
+  const SCRIPT_VERSION = '1.3.2';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -570,8 +570,11 @@
   function confirmManualStatusIntent(startedAt) {
     const intent=manualSendIntent;
     if(!intent)return;
-    if(!intent.url||Date.now()-intent.at>10000||ChatGPTHandoffTitle.chatUrl(location.href)!==intent.url){manualSendIntent=null;return;}
-    if(!Number.isFinite(startedAt)||startedAt<intent.at||String(startedAt)===intent.attempt||String(startedAt)!==String(globalThis.__chatgptNotifierAttemptId||''))return;
+    if(!intent.url||ChatGPTHandoffTitle.chatUrl(location.href)!==intent.url){manualSendIntent=null;return;}
+    // Bound the actual send time, not delivery of the worker's confirmation.
+    if(!Number.isFinite(startedAt)||startedAt<intent.at)return;
+    if(startedAt-intent.at>10000){manualSendIntent=null;return;}
+    if(String(startedAt)===intent.attempt||String(startedAt)!==String(globalThis.__chatgptNotifierAttemptId||''))return;
     manualSendIntent=null;
     runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
   }
