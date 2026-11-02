@@ -2,7 +2,7 @@
 
 // Serialized into ChatGPT's MAIN world by chrome.scripting. No closure state,
 // cookies, network requests, or translated-string matching.
-function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '') {
+function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '') {
   const alert = document.querySelectorAll('aside[role="alert"].text-danger, [role="status"]:has(.text-chatgpt-recovery)')[alertIndex];
   const button = alert?.querySelector('button');
   const origin = button || alert;
@@ -50,16 +50,19 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
       (alert.querySelector('.text-chatgpt-recovery') && messageIds.has('errors.network.reconnecting_fallback')) || inputDeliveryError ? 'retry' : 'unknown';
   if (recoveryAction === 'stop-recovery') {
     const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
-    if (location.href !== expectedUrl || !root.contains(alert) || !alert.getClientRects().length ||
+    const chatRoute=value=>{try{const u=new URL(value);return u.origin==='https://chatgpt.com'?u.origin+(u.pathname==='/'?'/':u.pathname.replace(/\/$/,'')):'';}catch{return '';}};
+    if (!chatRoute(expectedUrl)||chatRoute(location.href)!==chatRoute(expectedUrl) || !root.contains(alert) || !alert.getClientRects().length ||
         !alert.querySelector('.text-chatgpt-recovery') || !messageIds.has('errors.network.reconnecting_fallback')) {
       return {ok:false,reason:'Статус прерванного соединения не подтверждён'};
     }
     const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).at(-1);
+    const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
+    if(expectedPromptKey&&(!latestUserKey||location.pathname+'|'+latestUserKey!==expectedPromptKey))return {ok:false,reason:'Запрос пользователя перед остановкой изменился'};
     if (latestUser && (alert.contains(latestUser) || (alert.compareDocumentPosition(latestUser) & 4))) return {ok:false,reason:'Обнаружен более новый запрос пользователя'};
     // This stop icon was verified in the real composer. Exact SVG structure
     // avoids translated labels; unknown future icons fail closed.
     const stop = Array.from(root.querySelectorAll('button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], [data-composer-body] button[type="button"]:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).find(node=>node.getClientRects().length);
-    if (!stop) return {ok:true,stopped:false};
+    if (!stop) return {ok:false,stopped:false,reason:'Нативная кнопка остановки не найдена; автопродолжение отменено'};
     if (stop.disabled || stop.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Остановка временно недоступна'};
     stop.click();
     return {ok:true,stopped:true};

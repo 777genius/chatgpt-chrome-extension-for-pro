@@ -63,7 +63,7 @@ function probeCheck(){
  const btn=document.querySelector('button')! as any;
  const fiber={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries},return:null}};
  btn.__reactFiber$test=fiber;
- const ctx=createContext({document});runInContext(probe,ctx);
+ const ctx=createContext({document,URL});runInContext(probe,ctx);
  const result=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',ctx)));
  assert.equal(result.action,'new-chat');assert.equal(result.incomplete,false);
  assert.deepEqual(result.messages.map((m:any)=>m.id),['a1','u1','u2','a2']);
