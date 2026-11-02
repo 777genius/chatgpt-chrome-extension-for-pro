@@ -174,7 +174,7 @@ declare global {
     if (!runtimeAvailable()) { stopContext(); return null; }
     try { return await chrome.runtime.sendMessage(message); }
     catch (error) {
-      if (!runtimeAvailable() || /context invalidated/i.test(String(error?.message))) stopContext();
+      if (!runtimeAvailable() || /context invalidated/i.test(contentErrorMessage(error))) stopContext();
       return null;
     }
   }
