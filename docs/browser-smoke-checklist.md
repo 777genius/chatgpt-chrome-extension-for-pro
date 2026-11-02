@@ -6,9 +6,10 @@ final current commit. This checklist is for a **separate test browser
 profile and designated disposable ChatGPT test chat**, not working chats.
 
 1. From the successful, current-head **Ready PR** GitHub Actions run,
-   download its `chrome-mv3-<run SHA>` artifact and extract the
-   `dist/extension/` contents. This is the preferred way to test precisely
-   the build that passed CI. If rebuilding locally instead, use the exact
+   download its `chrome-mv3-<run SHA>` artifact. Extract it into
+   a fresh folder and select the folder containing `manifest.json`
+   (GitHub Artifact may omit the `dist/extension/` parent directories).
+   This is the preferred way to test precisely the build that passed CI. If rebuilding locally instead, use the exact
    reviewed PR head/base and `bun install --frozen-lockfile`. Load the
    generated directory through Chrome's **Load unpacked**. Verify version
    matches `package.json` and Chrome requests no permissions beyond
