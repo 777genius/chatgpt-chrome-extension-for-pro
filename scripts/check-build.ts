@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const dir = join(root, "dist", "extension");
@@ -35,6 +36,17 @@ for (const file of files) {
 }
 const js = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
 for (const file of js) {
+  const bytes = readFileSync(join(dir, file), "utf8");
+  const parsed = ts.createSourceFile(file, bytes, ts.ScriptTarget.ES2023, true, ts.ScriptKind.JS);
+  for (const statement of parsed.statements) {
+    if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement) ||
+        ts.isExportAssignment(statement) || ts.isImportEqualsDeclaration(statement)) {
+      throw new Error("ES module syntax is forbidden in MV3 classic script: " + file);
+    }
+  }
+  if (parsed.parseDiagnostics.length) {
+    throw new Error("Emitted classic script parse failed: " + file);
+  }
   const check = spawnSync(process.execPath, ["--check", join(dir, file)], { stdio: "inherit" });
   if (check.error || check.status !== 0) throw new Error("Generated script failed syntax: " + file);
 }
