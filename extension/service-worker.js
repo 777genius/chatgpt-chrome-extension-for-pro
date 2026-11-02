@@ -289,7 +289,7 @@ async function handleHandoffMessage(message, tabId) {
   if (message.type === 'CHATGPT_HANDOFF_GET') {
     const saved=(await chrome.storage.local.get(key))[key]||null;
     if(saved?.stage==='sent'&&saved.targetUrl)
-      await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId});
+      await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId,acceptedUserId:saved.acceptance?.messageId});
     return {ok:true,record:saved};
   }
   const previous = handoffWrites.get(tabId) || Promise.resolve();
@@ -331,7 +331,7 @@ async function handleHandoffMessage(message, tabId) {
     let acceptance=null;
     if(message.type==='CHATGPT_HANDOFF_RECONCILE'||message.stage==='sent') {
       if(current.stage==='sent'){
-        await goalController.handoffConfirm({sourceUrl:current.sourceUrl,targetUrl:current.targetUrl,handoffId:current.id,tabId});
+        await goalController.handoffConfirm({sourceUrl:current.sourceUrl,targetUrl:current.targetUrl,handoffId:current.id,tabId,acceptedUserId:current.acceptance?.messageId});
         return {ok:true,record:current,confirmed:true};
       }
       if(!['sending','awaiting-confirmation'].includes(current.stage))return {ok:true,record:current,confirmed:false};
@@ -366,7 +366,7 @@ async function handleHandoffMessage(message, tabId) {
     await chrome.storage.local.set({ [key]: record,
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
     if(message.stage==='sent')
-      await goalController.handoffConfirm({sourceUrl:record.sourceUrl,targetUrl:record.targetUrl,handoffId:record.id,tabId});
+      await goalController.handoffConfirm({sourceUrl:record.sourceUrl,targetUrl:record.targetUrl,handoffId:record.id,tabId,acceptedUserId:record.acceptance?.messageId});
     return { ok: true, record, notifyAwaiting:message.stage==='awaiting-confirmation'&&!current.awaitingNotifiedAt };
   });
   handoffWrites.set(tabId, write);
@@ -700,7 +700,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if(!isError&&!isWarning)void goalController.completion({url:sourceUrl,tabId,completionKey:rawCompletionKey,
       promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
-      rawExact:message.goalRawExact}).catch(error=>console.error('Goal completion failed',error));
+      rawExact:message.goalRawExact,userId:message.goalNativeUserId}).catch(error=>console.error('Goal completion failed',error));
     journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
       sourceUrl,warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
     const notification={tabId,title:`${isWarning?'⚠️ ':isError?'❌ ':''}${cleanSessionTitle(message.sessionTitle)}`,
