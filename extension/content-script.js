@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.5.0';
+  const SCRIPT_VERSION = '1.5.1';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -1014,6 +1014,7 @@
       let stableSince = 0;
       let generationEndedAt = 0;
       let completionProbeBusy=false, lastCompletionProbeAt=0;
+      const blockedProbeReasons=new Set();
       const startedAt = Date.now();
 
       const cleanupScheduledCheck = () => {
@@ -1057,7 +1058,7 @@
         const snapshot=latestPromptSnapshot();
         if(!attempt.promptKey&&snapshot){
           const bound=bindAttemptPrompt(attempt,{...snapshot,url:attempt.url,attemptId:globalThis.__chatgptNotifierAttemptId});
-          if(bound)attempt.promptKey=bound.promptKey;
+          if(bound){attempt.promptKey=bound.promptKey;void audit('completion.bound',{promptKey:attempt.promptKey,startedAt:attempt.startedAt});}
         }
         // Only unbound attempts expire. A confirmed long-running answer keeps
         // its observer until completion, stop, route change or a newer request.
@@ -1093,13 +1094,20 @@
         // answer actually finished, so a late repaint cannot cut it short.
         if (now - stableSince >= STREAM_SETTLE_MS && !completionProbeBusy && now-lastCompletionProbeAt>=1000) {
           completionProbeBusy=true;lastCompletionProbeAt=now;
-          void runtimeMessage({type:'CHATGPT_COMPLETION_PROBE',url:attempt.url,startedAt:attempt.startedAt})
+          void runtimeMessage({type:'CHATGPT_COMPLETION_PROBE',url:attempt.url,startedAt:attempt.startedAt,boundPromptKey:attempt.promptKey})
             .then(native=>{
               if(!isCurrent()||settled)return;
+              if(native?.ok===false){
+                const reason=String(native.reason||'unknown');
+                if(!blockedProbeReasons.has(reason)){blockedProbeReasons.add(reason);void audit('completion.probe_blocked',{promptKey:attempt.promptKey,startedAt:attempt.startedAt,reason});}
+              }
               const latest=latestPromptSnapshot();
               if(latest?.promptKey!==attempt.promptKey||latest.response!==text||isGenerating()||currentErrors().length)return;
               if((native?.assistantKey===latest.assistantKey&&completedAttemptEvidence(attempt,{...native,attemptId:attempt.id})) ||
-                  (attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing'))finish(text);
+                  (attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
+                void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
+                finish(text);
+              }
             }).catch(()=>{}).finally(()=>{completionProbeBusy=false;});
         }
       };

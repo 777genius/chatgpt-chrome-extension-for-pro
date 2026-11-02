@@ -491,7 +491,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     (async()=>{
       // A worker upgrade loses the in-memory request map. Recover UI observation
-      // only from the same durable loading generation and live native progress.
+      // from the same durable loading generation and live native progress. An
+      // already-bound content watcher may also prove its exact final answer.
       const before=initial?null:await readChatStatus(url);
       if(!initial&&(before.status?.kind!=='loading'||before.status.eventAt!==message.startedAt))return {ok:false,reason:'attempt-changed'};
       const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectCompletedTurn,args:[url]});
@@ -499,7 +500,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const tab=await chrome.tabs.get(sender.tab.id);
       if(manualRequestReceiptsByTab.get(sender.tab.id)!==initial||ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'attempt-changed'};
       if(!initial){
-        if(!native.ok||native.turnStatus!=='in_progress'||native.generating!==true||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
+        const liveProgress=native.turnStatus==='in_progress'&&native.generating===true;
+        const boundFinal=typeof message.boundPromptKey==='string'&&message.boundPromptKey&&message.boundPromptKey===native.promptKey&&
+          native.turnStatus==='complete'&&native.generating===false&&native.assistantCompleted===true&&
+          native.assistantPhase==='final_answer'&&Boolean(native.assistantId)&&Boolean(native.assistantKey);
+        if(!native.ok||(!liveProgress&&!boundFinal)||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
         const runtime=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'ISOLATED',func:()=>({attempt:globalThis.__chatgptNotifierAttemptId,startedAt:globalThis.__chatgptNotifierRequestStartedAt})});
         const current=await readChatStatus(url);
         if(runtime[0]?.result?.attempt!==String(message.startedAt)||runtime[0]?.result?.startedAt!==message.startedAt||
@@ -507,8 +512,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             manualRequestReceiptsByTab.has(sender.tab.id)||(await chrome.tabs.get(sender.tab.id)).url!==url)return {ok:false,reason:'attempt-changed'};
         if(manualRequestReceiptsByTab.has(sender.tab.id))return {ok:false,reason:'attempt-changed'};
         manualRequestReceiptsByTab.set(sender.tab.id,{startedAt:message.startedAt,receipt:current.status.receipt,url,consumed:true,recoveredPromptKey:native.promptKey});
+        journalInBackground({kind:'completion.request_recovered',attemptId:String(message.startedAt),sourceUrl:url,promptKey:native.promptKey,proof:boundFinal?'bound-native-final':'native-progress'},sender.tab);
       }
       const bound=manualRequestReceiptsByTab.get(sender.tab.id);
+      if(message.boundPromptKey&&message.boundPromptKey!==native.promptKey)return {ok:false,reason:'prompt-changed'};
       if(bound?.recoveredPromptKey&&bound.recoveredPromptKey!==native.promptKey)return {ok:false,reason:'prompt-changed'};
       return native;
     })().then(sendResponse).catch(()=>sendResponse?.({ok:false,reason:'probe-unavailable'}));

@@ -12,7 +12,7 @@ const context=createContext({document,window,Node:window.Node,Element:window.Ele
  Date:class extends Date{static now(){return now;}},performance:{now:()=>now},setTimeout,clearTimeout,
  setInterval:(fn:Function)=>setInterval(()=>{now+=500;fn();},10),clearInterval,
  chrome:{runtime:{id:'test',onMessage:{addListener:(fn:Function)=>{listener=fn;},removeListener(){}},sendMessage:async(message:any)=>{
- if(message.type==='CHATGPT_COMPLETION_PROBE')return {ok:true,url:'https://chatgpt.com/c/exact',promptKey:'/c/exact|conversation-turn-2',assistantKey:'conversation-turn-3',isLatest:true,isReadOnly:false,generating:!!document.querySelector('[data-testid=stop-button]'),hasError:false,turnStatus:nativeComplete?'complete':'in_progress',assistantCompleted:nativeComplete,assistantPhase:'final_answer'};
+ if(message.type==='CHATGPT_COMPLETION_PROBE'){if(nativeComplete)assert.equal(message.boundPromptKey,'/c/exact|conversation-turn-2','the surviving content watcher supplies its already-bound user key');return {ok:true,url:'https://chatgpt.com/c/exact',promptKey:'/c/exact|conversation-turn-2',assistantKey:'conversation-turn-3',isLatest:true,isReadOnly:false,generating:!!document.querySelector('[data-testid=stop-button]'),hasError:false,turnStatus:nativeComplete?'complete':'in_progress',assistantCompleted:nativeComplete,assistantPhase:'final_answer'};}
  if(message.type==='CHATGPT_LOG_EVENT')return {ok:true};
  if(message.type==='CHATGPT_RESPONSE_COMPLETE')messages.push(message);
  return {ok:true};
