@@ -368,9 +368,22 @@
         if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)return {ok:false};
         const saved=buffered(old,'handoffEarlyCompletions','handoffEarlyCompletion');
         if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
-        const next={...old,handoffEarlyCompletion:null,
-          handoffEarlyCompletions:[...saved,{url:target,tabId,completionKey,promptKey,response,
-            nativeVerified,rawExact,userId}].slice(-6)};
+        // Native acceptance may arrive *after* the answer. Never evict its
+        // candidate because later unrelated turns completed in the same tab.
+        // Keep one compact final proof per native user id; no assistant text is
+        // needed beyond the exact marker for policy.decision().
+        const compact={url:target,tabId,completionKey,promptKey,
+          response:response===policy.MARKER?policy.MARKER:'',nativeVerified,rawExact,userId};
+        const index=saved.findIndex(item=>item.userId===userId);
+        const candidates=index<0?[...saved,compact]:saved.map((item,i)=>i===index?compact:item);
+        if(candidates.length>256) {
+          const blocked={...old,phase:'blocked',
+            reason:'Больше 256 неподтверждённых ответов нового чата; нельзя безопасно выбрать ответ Goal'};
+          await event('handoff_overflow_blocked',blocked,tabId,{handoffId});
+          await save(blocked);
+          return {ok:false,blocked:true};
+        }
+        const next={...old,handoffEarlyCompletion:null,handoffEarlyCompletions:candidates};
         await event('handoff_completion_staged',next,tabId,{handoffId,completionKey,promptKey});
         await save(next);
         return {ok:true};
