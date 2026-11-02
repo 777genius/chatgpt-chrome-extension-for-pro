@@ -138,7 +138,8 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{
 },TITLE_REQUEST_FILTER);
 
 function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=false}: { recoverTemporaryTarget?: boolean }={}): Promise<RenameOutcome> {
-  if (titleJobs.has(tabId)) return titleJobs.get(tabId);
+  const activeTitleJob=titleJobs.get(tabId);
+  if (activeTitleJob) return activeTitleJob;
   const job=(async()=>{
     const key=handoffKey(tabId);
     const original=(await chrome.storage.local.get(key))[key];
@@ -153,7 +154,7 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
       try {
         const target=new URL(record.targetUrl);
         const path=target.pathname.match(/^\/c\/([^/]+)\/?$/);
-        const alias=path&&decodeURIComponent(path[1]);
+        const alias=path?.[1] ? decodeURIComponent(path[1]) : null;
         if(target.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(alias||''))targetAlias=alias;
       } catch {}
     }
