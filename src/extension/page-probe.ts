@@ -108,7 +108,7 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
     // no language-specific phrase or arbitrary red text authorizes a retry.
     if(i<16 && entry?.id&&alertContainerKey===entry.id && entry.isMostRecentTurn===true && entry.isReadOnly===false &&
         entry.showRequestUserInputStatus===true && entry.showPendingLoadingMessage===false &&
-        ['in_progress','complete'].includes(entry.turn?.status) && typeof entry.errorMessage==='string' &&
+        ['in_progress','complete'].includes(entry.turn?.status||'') && typeof entry.errorMessage==='string' &&
         entry.errorMessage.replace(/\s+/g,' ').trim()===visibleError && visibleError) inputDeliveryError=true;
   }
   // The owner's recovery policy follows the rendered native action: an
@@ -124,7 +124,7 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
   const nativeUser=nativeUsers.at(-1);
   const recoveryContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
   const recoveryContainerKey=recoveryContainer?.getAttribute('data-content-search-turn-key')||recoveryContainer?.getAttribute('data-testid');
-  const recoveryBinding:RecoveryBinding|null=recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&nativeAssistant?.messageId&&(!nativeUser||nativeUser.messageId)?{
+  const recoveryBinding:RecoveryBinding|null=Boolean(recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&nativeAssistant?.messageId&&(!nativeUser||nativeUser.messageId))?{
     kind:nativeUsers.length?'user':'assistant-only',url:location.origin+location.pathname,entryId:recoveryEntry.id,
     assistantId:nativeAssistant.messageId,userId:nativeUser?.messageId||null}:null;
   if (recoveryAction === 'stop-recovery'||recoveryAction==='inspect-recovery') {
@@ -137,23 +137,23 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
     const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).at(-1);
     const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
     const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&(['kind','url','entryId','assistantId','userId'] as const).every(key=>recoveryBinding[key]===expectedRecoveryBinding[key]));
-    const assistantOnly=sameRecovery&&recoveryBinding.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
+    const assistantOnly=sameRecovery&&recoveryBinding?.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
     if(expectedRecoveryBinding&&!sameRecovery)return {ok:false,reason:'Нативный ответ перед восстановлением изменился'};
     if(expectedPromptKey&&!assistantOnly&&(!latestUserKey||location.pathname+'|'+latestUserKey!==expectedPromptKey))return {ok:false,reason:'Запрос пользователя перед остановкой изменился'};
     if (latestUser && (alert.contains(latestUser) || (alert.compareDocumentPosition(latestUser) & 4))) return {ok:false,reason:'Обнаружен более новый запрос пользователя'};
     // This stop icon was verified in the real composer. Exact SVG structure
     // avoids translated labels; unknown future icons fail closed.
-    const stop = Array.from(root.querySelectorAll('button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], [data-composer-body] button[type="button"]:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).find(node=>node.getClientRects().length);
+    const stop = Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], [data-composer-body] button[type="button"]:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).find(node=>node.getClientRects().length);
     if (!stop) {
       // A stale turn can remain in_progress after streaming ended. Require the
       // native voice control's explicit idle flags and the real editor controller,
       // never the absence of a Stop selector or a translated label alone.
       const visible=(node:Element|null|undefined):boolean=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
-      const voice=Array.from(root.querySelectorAll('[data-composer-body] button')).find(node=>visible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true'&&node.querySelector('use[href$="#codex-icon-voice-regular-20"]'));
+      const voice=Array.from(root.querySelectorAll<HTMLButtonElement>('[data-composer-body] button')).find(node=>visible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true'&&node.querySelector('use[href$="#codex-icon-voice-regular-20"]'));
       let nativeVoiceIdle=false;
       const voiceFiber=voice&&Object.keys(voice).find(key=>key.startsWith('__reactFiber$'));
       const voiceObserved:unknown=voiceFiber&&voice?Reflect.get(voice,voiceFiber):null;
-      for(let current:ReactFiber|null=voiceObserved&&typeof voiceObserved==='object'?voiceObserved as ReactFiber:null,i=0;current&&i<16;i++,current=current.return){
+      for(let current:ReactFiber|null=voiceObserved&&typeof voiceObserved==='object'?voiceObserved as ReactFiber:null,i=0;current&&i<16;i++,current=current.return??null){
         const props=current.memoizedProps;
         if(props?.isLoading===false&&props.isStartButtonAllowed===true)nativeVoiceIdle=true;
       }
@@ -162,7 +162,7 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
       for(let node=editor;node&&!controller;node=node.parentElement){
         const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
         const observed:unknown=key?Reflect.get(node,key):null;
-        for(let current:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;current&&i<16;i++,current=current.return){
+        for(let current:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;current&&i<16;i++,current=current.return??null){
           const candidate=current.memoizedProps?.composerController;
           if(candidate?.view?.dom===editor&&typeof candidate.getChatGptPrompt==='function'){controller=candidate;break;}
         }
@@ -239,7 +239,8 @@ function inspectHandoffAcceptance(options:HandoffOptions) {
   for(const node of root.querySelectorAll('header button')) {
     if(!visible(node))continue;
     const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
-    for(let fiber=key&&node[key],i=0;fiber&&i<20;i++,fiber=fiber.return) {
+    const observed:unknown=key?Reflect.get(node,key):null;
+    for(let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;fiber&&i<20;i++,fiber=fiber.return??null) {
       const id=fiber.memoizedProps?.conversationId;
       if(typeof id==='string'&&id.startsWith('local-chatgpt:'))aliases.add(id);
       else if(typeof id==='string'&&id&&id!==chatId)nativeMismatch=true;
@@ -250,7 +251,8 @@ function inspectHandoffAcceptance(options:HandoffOptions) {
   const inspected=new Set<ReactFiber>();
   for(const node of anchors) {
     const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
-    for(let fiber=key&&node[key],i=0;fiber&&i<50;i++,fiber=fiber.return) {
+    const observed:unknown=key?Reflect.get(node,key):null;
+    for(let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;fiber&&i<50;i++,fiber=fiber.return??null) {
       if(inspected.has(fiber))continue;inspected.add(fiber);
       const entries=fiber.memoizedProps?.entries;
       if(!Array.isArray(entries))continue;
@@ -285,13 +287,14 @@ function controlChatComposer(options:ComposerOptions) {
     const directValue:unknown=Reflect.get(editor,'value');
     if (directValue !== undefined) return typeof directValue==='string'?directValue:'';
     if (!editor.querySelector('p, div, br, li')) return editor.textContent || '';
-    const copy = editor.cloneNode(true);
+    const copy = editor.cloneNode(true) as Element;
     copy.querySelectorAll('[aria-hidden="true"], .ProseMirror-widget, svg, button').forEach(node=>node.remove());
     function text(node:Node):string {
       if (node.nodeType === 3) return node.textContent || '';
       if (node.nodeType !== 1) return '';
-      if (node.tagName === 'BR') return node.classList.contains('ProseMirror-trailingBreak') ? '' : '\n';
-      return Array.from(node.childNodes).map(text).join(['UL','OL'].includes(node.tagName) ? '\n' : '');
+      const elementNode=node as Element;
+      if (elementNode.tagName === 'BR') return elementNode.classList.contains('ProseMirror-trailingBreak') ? '' : '\n';
+      return Array.from(node.childNodes).map(text).join(['UL','OL'].includes(elementNode.tagName) ? '\n' : '');
     }
     return Array.from(copy.childNodes).map(text).join('\n');
   }
@@ -316,7 +319,7 @@ function controlChatComposer(options:ComposerOptions) {
         for (const mark of node.marks || []) {
           const attrs = mark.attrs || {};
           if (mark.type !== 'link' || attrs.isAutolink !== true || attrs.isGeneratedAutolink !== true ||
-              attrs.href !== node.text || !/^https?:\/\//.test(attrs.href) || attrs.title || attrs.disabled ||
+              attrs.href !== node.text || (typeof attrs.href!=='string'||!/^https?:\/\//.test(attrs.href)) || attrs.title || attrs.disabled ||
               attrs.literalMarkdownSource || attrs.literalMarkdownOccurrenceId || attrs.sourceAppId) return false;
         }
         line += node.text;
@@ -339,19 +342,20 @@ function controlChatComposer(options:ComposerOptions) {
     const found = new Set<NativeAttachment>();
     for (const node of attachments?.querySelectorAll('*') || []) {
       const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
-      for(let fiber=key&&node[key],i=0;fiber&&i<5;i++,fiber=fiber.return){
+      const observed:unknown=key?Reflect.get(node,key):null;
+      for(let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;fiber&&i<5;i++,fiber=fiber.return??null){
         const attachment=fiber.memoizedProps?.attachment;
         if(attachment?.name)found.add(attachment);
       }
     }
     if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
-  const button = Array.from(root.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
+  const button = Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.
   const clickedAt=Date.now();
   button.click();
   let conversationAlias='';
   try {const id=decodeURIComponent(new URL(location.href).pathname.split('/').at(-1)||'');if(/^local-chatgpt:[a-z0-9-]+$/.test(id))conversationAlias=id;}catch{}
-  return {ok:true,clicked:true,effort,promptChars:prompt.length,submittedText:prompt,clickedAt,conversationAlias};
+  return {ok:true,clicked:true,effort,promptChars:typeof prompt==='string'?prompt.length:null,submittedText:prompt,clickedAt,conversationAlias};
 }
