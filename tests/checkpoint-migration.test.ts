@@ -31,6 +31,8 @@ async function scenario(dir: "extension" | "dist/extension"): Promise<unknown[]>
   observations.push(await run("completionCheckpointStart(7,{url:'https://chatgpt.com/c/a',startedAt:100,requestId:'late'})"));
   observations.push(await run("completionCheckpointFinish(7,200,'complete','two')"));
   observations.push(await run("completionCheckpointFinish(7,200,'complete','two')"));
+  observations.push(await run("completionCheckpointStart(7,{url:'https://chatgpt.com/c/a',startedAt:200,requestId:'three'})"));
+  observations.push(await run("completionCheckpointFinish(7,200,'complete','two')"));
   observations.push(await run("completionCheckpointRead(7)"));
   return JSON.parse(JSON.stringify(observations)) as unknown[];
 }
