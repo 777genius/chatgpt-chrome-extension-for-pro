@@ -1,0 +1,11 @@
+import { implement } from "@get-modular/assembly";
+import type { JournalReader } from "../contracts/journal.js";
+import type { JournalCapabilities } from "./journal.contracts.js";
+import { readerDeclaration } from "./reader.declaration.js";
+
+export const readerModule = implement<JournalCapabilities>()(readerDeclaration, async ({ transport }) => {
+  const port: JournalReader = {
+    read: () => transport.sendMessage({ type: "CHATGPT_JOURNAL_READ" }),
+  };
+  return { instance: port, capabilities: { "chatgpt/journal/reader": port } };
+});
