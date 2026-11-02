@@ -28,7 +28,8 @@
     "check:built": "bun scripts/check-build.ts",
     "check:changed": "agent-teams-foundation agent-workflow check-changed --consumer .",
     "check:fast": "bun run build && bun run check:built && bun run typecheck && bun run test",
-    "test:distribution": "bun scripts/test-distribution.ts"
+    "test:distribution": "bun scripts/test-distribution.ts",
+    "check:complete": "bun scripts/check-migration-complete.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
