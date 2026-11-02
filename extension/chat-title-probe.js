@@ -33,6 +33,7 @@ function controlChatTitle(options) {
   const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
   const actions = Array.from(document.querySelectorAll('header button[aria-haspopup="menu"]')).find(node=>visible(node) && node.querySelector('use[href*="ellipsis-horizontal"]'));
   let ready = false;
+  let streaming = false;
   const nativeConversationIds=new Set();
   // Native share control exposes server readiness for this conversation.
   for (const node of document.querySelectorAll('header button')) {
@@ -40,9 +41,15 @@ function controlChatTitle(options) {
     const key = Object.keys(node).find(key=>key.startsWith('__reactFiber$'));
     for (let fiber=key&&node[key],i=0;fiber&&i<18;i++,fiber=fiber.return) {
       const props=fiber.memoizedProps;
+      if(props?.isStreaming===true&&typeof props.conversationId==='string'&&
+          (props.conversationId===chatId||/^local-chatgpt:/.test(props.conversationId)))streaming=true;
       if (props?.isReady===true && typeof props.conversationId==='string') {
         nativeConversationIds.add(props.conversationId);
-        if(props.conversationId===chatId || /^local-chatgpt:/.test(props.conversationId))ready=true;
+        // Native isReady can become true while the share/action control is
+        // still disabled for the first streaming response. That menu omits
+        // Rename entirely; wait for its real enabled state before opening it.
+        if(!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&props.isStreaming!==true&&
+            (props.conversationId===chatId || /^local-chatgpt:/.test(props.conversationId)))ready=true;
       }
     }
   }
@@ -64,8 +71,8 @@ function controlChatTitle(options) {
     const query=client.getQueryCache().getAll().find(q=>q.queryKey?.[0]==='chatgpt-conversation'&&q.queryKey[1]===chatId);
     if(query?.state?.data?.conversation_id && query.state.data.conversation_id!==chatId)canonicalMismatch=true;
   }
-  ready=ready&&!canonicalMismatch;
-  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),title:document.title,url:location.href,
+  ready=ready&&!canonicalMismatch&&!streaming;
+  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,title:document.title,url:location.href,
     conversationId:nativeConversationIds.size===1?Array.from(nativeConversationIds)[0]:null};
   if (Number.isFinite(options.expiresAt)&&Date.now()>=options.expiresAt) return {ok:false,reason:'title-deadline-exceeded'};
   let state=globalThis.__chatgptNotifierTitleOperation;

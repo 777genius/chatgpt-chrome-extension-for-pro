@@ -2,6 +2,7 @@
 importScripts('page-probe.js');
 importScripts('completion-probe.js');
 importScripts('completion-checkpoint.js');
+importScripts('legacy-handoff-status.js');
 importScripts('request-receipts.js');
 importScripts('watcher-bootstrap.js');
 importScripts('journal-store.js');
@@ -420,13 +421,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'CHATGPT_STOP_RECOVERY') {
-    if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
+    const url=messageChatUrl(message,sender);
+    if(!url||!message.operationId||typeof message.promptKey!=='string'||!message.promptKey||typeof message.attemptId!=='string'){
+      sendResponse?.({ok:false,reason:'Не подтверждён запрос для остановки'});return false;
+    }
+    const refuse=async reason=>{await appendJournal({kind:'recovery.stop_refused',operationId:message.operationId,sourceUrl:url,attemptId:message.attemptId,requestId:message.requestId,reason},sender.tab);return {ok:false,reason};};
+    const matches=request=>!request||String(request.startedAt)===message.attemptId&&(!request.requestId||request.requestId===message.requestId)&&(!request.url||request.url===url);
     (async()=>{
-      await appendJournal({kind:'recovery.stop_intent',operationId:message.operationId,sourceUrl:message.url},sender.tab);
+      const initial=await latestRequestReceipt(sender.tab.id);
+      if(!matches(initial))return refuse('Запрос перед остановкой изменился');
+      await appendJournal({kind:'recovery.stop_intent',operationId:message.operationId,sourceUrl:url,attemptId:message.attemptId,requestId:message.requestId,promptKey:message.promptKey,recoveryBinding:message.recoveryBinding||null},sender.tab);
+      const [runtime]=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'ISOLATED',func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
+      const tab=await chrome.tabs.get(sender.tab.id),current=manualRequestReceiptsByTab.get(sender.tab.id)||null;
+      if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url||current!==initial||!matches(current)||
+          runtime?.result?.attemptId!==message.attemptId||(runtime.result.requestId||null)!==(message.requestId||null))return refuse('Запрос перед остановкой изменился');
       const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectChatError,
-        args:[message.alertIndex,false,'stop-recovery',message.url]});
+        args:[message.alertIndex,false,'stop-recovery',message.url,message.promptKey,message.recoveryBinding||null]});
       const result=results[0]?.result || {ok:false,reason:'Нет подтверждения остановки'};
-      await appendJournal({kind:result.ok?'recovery.stop_result':'recovery.stop_refused',operationId:message.operationId,stopped:result.stopped,reason:result.reason},sender.tab);
+      await appendJournal({kind:result.ok&&(result.stopped===true||result.idle===true)?'recovery.stop_result':'recovery.stop_refused',operationId:message.operationId,attemptId:message.attemptId,requestId:message.requestId,stopped:result.stopped,idle:result.idle,proof:result.proof,recoveryBinding:result.recoveryBinding,reason:result.reason},sender.tab);
       return result;
     })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message || error)}));
     return true;
@@ -520,6 +532,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if(message?.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS') {
+    const url=messageChatUrl(message,sender);
+    if(!url){sendResponse?.({ok:false});return false;}
+    reconcileLegacyHandoffStatus(sender.tab.id,url).then(view=>sendResponse?.({ok:true,changed:Boolean(view),...(view||{})})).catch(()=>sendResponse?.({ok:false}));
+    return true;
+  }
   if(message?.type==='CHATGPT_COMPLETION_CHECKPOINT') {
     const tabId=sender.tab?.id,url=completionCheckpointUrl(sender.tab?.url);
     if(sender.frameId>0||typeof tabId!=='number'||!url||completionCheckpointUrl(message.url)!==url){sendResponse?.({ok:false});return false;}
@@ -675,6 +693,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const url=messageChatUrl(message,sender);
     let receipt=statusReceipt();
     if(!url){sendResponse?.({ok:false,reason:'Чат изменился'});return false;}
+    if(message.type==='CHATGPT_GENERATION_STOPPED')cancelLegacyHandoffStatus(sender.tab.id);
     (async()=>{
       const tab=await chrome.tabs.get(sender.tab.id);
       if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'Чат изменился'};
@@ -730,6 +749,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
+  legacyHandoffStatusFences.delete(tabId);
   manualRequestReceiptsByTab.delete(tabId);
   void forgetRequestReceipts(tabId).catch(()=>{});
   statusAnimation.remove(tabId);

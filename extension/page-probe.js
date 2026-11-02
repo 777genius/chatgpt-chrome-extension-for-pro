@@ -2,7 +2,7 @@
 
 // Serialized into ChatGPT's MAIN world by chrome.scripting. No closure state,
 // cookies, network requests, or translated-string matching.
-function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '') {
+function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null) {
   const alert = document.querySelectorAll('aside[role="alert"].text-danger, [role="status"]:has(.text-chatgpt-recovery)')[alertIndex];
   const button = alert?.querySelector('button');
   const origin = button || alert;
@@ -22,7 +22,10 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     }
   }
   let entries = null;
+  let recoveryEntry = null;
   let inputDeliveryError = false;
+  const alertContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
+  const alertContainerKey=alertContainer?.getAttribute('data-content-search-turn-key')||alertContainer?.getAttribute('data-testid');
   const errorCopy=alert.cloneNode(true);
   errorCopy.querySelectorAll('button,[role="button"],[aria-hidden="true"]').forEach(node=>node.remove());
   const visibleError=String(errorCopy.textContent||'').replace(/\s+/g,' ').trim();
@@ -33,38 +36,79 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     if (i < 9) inspectElement(props.children);
     if (captureHistory && Array.isArray(props.entries)) entries = props.entries;
     const entry=props.entry;
+    const candidate=entry?.isMostRecentTurn===true?entry:Array.isArray(props.entries)?props.entries.at(-1):null;
+    if(candidate?.isMostRecentTurn===true&&candidate.isReadOnly===false)recoveryEntry=candidate;
     // Active-turn input delivery errors may omit the retry button altogether.
     // Bind to the native latest writable turn and its exact rendered error;
     // no language-specific phrase or arbitrary red text authorizes a retry.
-    if(i<16 && entry?.isMostRecentTurn===true && entry.isReadOnly===false &&
+    if(i<16 && entry?.id&&alertContainerKey===entry.id && entry.isMostRecentTurn===true && entry.isReadOnly===false &&
         entry.showRequestUserInputStatus===true && entry.showPendingLoadingMessage===false &&
-        entry.turn?.status==='in_progress' && typeof entry.errorMessage==='string' &&
+        ['in_progress','complete'].includes(entry.turn?.status) && typeof entry.errorMessage==='string' &&
         entry.errorMessage.replace(/\s+/g,' ').trim()===visibleError && visibleError) inputDeliveryError=true;
   }
-  // The server's untranslated fallback can offer Start new chat even though
-  // no length limit was reported. That CTA must not turn Unknown error into
-  // a handoff. Require the native React error surface, then retry in place.
+  // The owner's recovery policy follows the rendered native action: an
+  // explicit Start new chat also transfers Unknown error through the existing
+  // history handoff. Without that action, its native fallback retries in place.
   const unknownServerError=Boolean(fiberKey) && /^unknown error[.!]?$/i.test(visibleError);
-  const action = unknownServerError ? 'retry' : messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
-    : messageIds.has('chatgptConversations.responseError.retry') ||
+  const action = messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
+    : unknownServerError || messageIds.has('chatgptConversations.responseError.retry') ||
       (alert.querySelector('.text-chatgpt-recovery') && messageIds.has('errors.network.reconnecting_fallback')) || inputDeliveryError ? 'retry' : 'unknown';
-  if (recoveryAction === 'stop-recovery') {
+  const recoverySurface=Boolean(alert.querySelector('.text-chatgpt-recovery'))&&messageIds.has('errors.network.reconnecting_fallback');
+  const nativeUsers=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='user-message');
+  const nativeAssistant=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='assistant-message'&&typeof item.messageId==='string'&&item.messageId).at(-1);
+  const nativeUser=nativeUsers.at(-1);
+  const recoveryContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
+  const recoveryContainerKey=recoveryContainer?.getAttribute('data-content-search-turn-key')||recoveryContainer?.getAttribute('data-testid');
+  const recoveryBinding=recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&nativeAssistant&&(!nativeUser||nativeUser.messageId)?{
+    kind:nativeUsers.length?'user':'assistant-only',url:location.origin+location.pathname,entryId:recoveryEntry.id,
+    assistantId:nativeAssistant.messageId,userId:nativeUser?.messageId||null}:null;
+  if (recoveryAction === 'stop-recovery'||recoveryAction==='inspect-recovery') {
     const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
-    if (location.href !== expectedUrl || !root.contains(alert) || !alert.getClientRects().length ||
+    const chatRoute=value=>{try{const u=new URL(value);return u.origin==='https://chatgpt.com'?u.origin+(u.pathname==='/'?'/':u.pathname.replace(/\/$/,'')):'';}catch{return '';}};
+    if (!chatRoute(expectedUrl)||chatRoute(location.href)!==chatRoute(expectedUrl) || !root.contains(alert) || !alert.getClientRects().length ||
         !alert.querySelector('.text-chatgpt-recovery') || !messageIds.has('errors.network.reconnecting_fallback')) {
       return {ok:false,reason:'Статус прерванного соединения не подтверждён'};
     }
     const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).at(-1);
+    const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
+    const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&['kind','url','entryId','assistantId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key]));
+    const assistantOnly=sameRecovery&&recoveryBinding.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
+    if(expectedRecoveryBinding&&!sameRecovery)return {ok:false,reason:'Нативный ответ перед восстановлением изменился'};
+    if(expectedPromptKey&&!assistantOnly&&(!latestUserKey||location.pathname+'|'+latestUserKey!==expectedPromptKey))return {ok:false,reason:'Запрос пользователя перед остановкой изменился'};
     if (latestUser && (alert.contains(latestUser) || (alert.compareDocumentPosition(latestUser) & 4))) return {ok:false,reason:'Обнаружен более новый запрос пользователя'};
     // This stop icon was verified in the real composer. Exact SVG structure
     // avoids translated labels; unknown future icons fail closed.
     const stop = Array.from(root.querySelectorAll('button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], [data-composer-body] button[type="button"]:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).find(node=>node.getClientRects().length);
-    if (!stop) return {ok:true,stopped:false};
+    if (!stop) {
+      // A stale turn can remain in_progress after streaming ended. Require the
+      // native voice control's explicit idle flags and the real editor controller,
+      // never the absence of a Stop selector or a translated label alone.
+      const visible=node=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
+      const voice=Array.from(root.querySelectorAll('[data-composer-body] button')).find(node=>visible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true'&&node.querySelector('use[href$="#codex-icon-voice-regular-20"]'));
+      let nativeVoiceIdle=false;
+      const voiceFiber=voice&&Object.keys(voice).find(key=>key.startsWith('__reactFiber$'));
+      for(let current=voiceFiber&&voice[voiceFiber],i=0;current&&i<16;i++,current=current.return){
+        const props=current.memoizedProps;
+        if(props?.isLoading===false&&props.isStartButtonAllowed===true)nativeVoiceIdle=true;
+      }
+      const editor=Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,[data-composer-markdown][contenteditable="true"]')).find(visible);
+      let controller=null;
+      for(let node=editor;node&&!controller;node=node.parentElement){
+        const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
+        for(let current=key&&node[key],i=0;current&&i<16;i++,current=current.return){
+          const candidate=current.memoizedProps?.composerController;
+          if(candidate?.view?.dom===editor&&typeof candidate.getChatGptPrompt==='function'){controller=candidate;break;}
+        }
+      }
+      if(sameRecovery&&voice&&nativeVoiceIdle&&controller&&controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')return {ok:true,stopped:false,idle:true,proof:'native-voice-idle',recoveryBinding};
+      return {ok:false,stopped:false,reason:'Нативная остановка или свободный редактор не подтверждены; автопродолжение отменено'};
+    }
+    if(recoveryAction==='inspect-recovery')return {ok:true,stopped:false,idle:false,needsStop:true,recoveryBinding};
     if (stop.disabled || stop.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Остановка временно недоступна'};
     stop.click();
     return {ok:true,stopped:true};
   }
-  if (!captureHistory || action !== 'new-chat') return { action, messages: [] };
+  if (!captureHistory || action !== 'new-chat') return { action, messages: [], recoveryBinding };
   if (!entries) return { action, messages: [], incomplete: true };
   function messageText(item) {
     if (item.type === 'user-message') return typeof item.message === 'string' ? item.message : '';
