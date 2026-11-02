@@ -53,6 +53,7 @@ if (!(filterField instanceof HTMLInputElement)) throw new Error("Invalid journal
 const journalFilter: HTMLInputElement = filterField;
 
 let journal: JournalView | null = null;
+let journalExport: unknown = null;
 let journalRefreshVersion = 0;
 let limit = 200;
 const labels: Record<string, string> = {
@@ -127,11 +128,13 @@ async function refresh(): Promise<boolean> {
       }): Promise<unknown> };
     }).ChatGPTJournalModular;
     if (!composed) throw new Error("Journal composition has not been loaded");
-    const latest = asJournalView(await composed.read({
+    const raw = await composed.read({
       sendMessage: (message) => chrome.runtime.sendMessage(message),
-    }));
+    });
+    const latest = asJournalView(raw);
     if (currentRefresh !== journalRefreshVersion) return false;
     journal = latest;
+    journalExport = raw;
     render();
     return true;
   } catch (error: unknown) {
@@ -139,6 +142,7 @@ async function refresh(): Promise<boolean> {
     // A failed refresh must not let Export hand out a previously loaded
     // snapshot as though it were the current durable journal.
     journal = null;
+    journalExport = null;
     element("events").replaceChildren();
     element("more").hidden = true;
     element("status").textContent = "Не удалось прочитать журнал: " +
@@ -151,8 +155,8 @@ element("filter").addEventListener("input", () => { limit = 200; render(); });
 element("more").addEventListener("click", () => { limit += 200; render(); });
 element("export").addEventListener("click", async () => {
   const refreshed = await refresh();
-  if (!refreshed || !journal) return;
-  const url = URL.createObjectURL(new Blob([JSON.stringify(journal, null, 2)], {
+  if (!refreshed || !journal || !journalExport) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(journalExport, null, 2)], {
     type: "application/json;charset=utf-8",
   }));
   const link = document.createElement("a");
