@@ -495,6 +495,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!active || active.operationId !== options.operationId || Date.now() - active.at > 15000) throw new Error('Нет сохранённого разрешения на эту автоматическую отправку');
         if (active.kind === 'retry.send_intent') {
           if (options.text !== 'доделай е2е' || options.fileName) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
+        } else if (active.kind === 'goal.send_intent') {
+          if(options.requireMax||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
+          const grant=await goalController.authorize({url:options.url,tabId:sender.tab.id,
+            id:active.goalId,operationId:options.operationId,text:options.text});
+          if(!grant?.ok)throw new Error('Goal более не разрешает отправку');
         } else if (active.kind === 'handoff.sending') {
           const key = handoffKey(sender.tab.id);
           const record = (await chrome.storage.local.get(key))[key];
@@ -502,6 +507,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               (options.fileName || null) !== (record.asFile ? record.fileName : null)) throw new Error('Текст не совпадает с сохранённой передачей');
         } else throw new Error('Отправка пользовательского черновика запрещена');
         await appendJournal({kind:'send.authorized',operationId:options.operationId,text:options.text,sourceUrl:options.url},sender.tab);
+        if(active.kind==='goal.send_intent'){
+          const fresh=await goalController.authorize({url:options.url,tabId:sender.tab.id,
+            id:active.goalId,operationId:options.operationId,text:options.text});
+          if(!fresh?.ok)throw new Error('Goal приостановлен перед отправкой');
+        }
       }
       pageDispatchStarted=options.action==='send';
       return chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:controlChatComposer,args:[options]});
@@ -536,7 +546,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
-    appendJournal(event,sender.tab).then(result=>{
+    appendJournal(event,sender.tab).then(async result=>{
+      if(['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
+        await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
+          promptKey:event.newPromptKey});
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,error:String(error.message || error)}));
     return true;
@@ -663,6 +676,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isError&&!isWarning && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
     if (!isError&&!isWarning && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
+    if(!isError&&!isWarning)void goalController.completion({url:sourceUrl,tabId,completionKey:rawCompletionKey,
+      promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
+      rawExact:message.goalRawExact}).catch(error=>console.error('Goal completion failed',error));
     journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
       sourceUrl,warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
     const notification={tabId,title:`${isWarning?'⚠️ ':isError?'❌ ':''}${cleanSessionTitle(message.sessionTitle)}`,
