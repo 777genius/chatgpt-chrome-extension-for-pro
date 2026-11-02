@@ -216,7 +216,7 @@ async function signalConversationRequestEvent(tabId,message) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js', 'content-script.js']
+      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js', 'goal-policy.js', 'goal-inline.js', 'content-script.js']
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
@@ -233,7 +233,7 @@ async function installErrorWatchers() {
       // This pass runs once per full extension load. A same-version reload
       // must replace invalidated listeners, even if its isolated global remains.
       await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>{try{globalThis.__chatgptNotifierDispose?.();}catch{}globalThis.__chatgptNotifierDispose=null;globalThis.__chatgptNotifierVersion=null;}});
-      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','content-script.js']}); }
+      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','goal-policy.js','goal-inline.js','content-script.js']}); }
     catch (error) { journalInBackground({kind:'watcher.unavailable',reason:String(error.message || error)},tab); }
   }));
 }
@@ -294,10 +294,18 @@ async function handleHandoffMessage(message, tabId) {
     const pending=handoffWrites.get(tabId);
     if(pending)await pending.catch(()=>{});
     const saved=(await chrome.storage.local.get(key))[key]||null;
-    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation','sent'].includes(saved.stage))
+    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation'].includes(saved.stage))
       await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
+    if(saved?.id&&['sent','failed'].includes(saved.stage)) {
+      // A terminal historical recovery copy must not enroll a newer Goal in its
+      // transfer. Only an existing exact binding may need the legacy tab fill.
+      const goal=await goalController.get(saved.sourceUrl);
+      if(goal?.phase==='handoff'&&goal.handoffId===saved.id)
+        await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
+    }
     if(saved?.stage==='sent'&&saved.targetUrl)
       await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId,acceptedUserId:saved.acceptance?.messageId});
+    if(saved?.stage==='failed')await goalController.handoffFailed({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId,reason:saved.reason});
     return {ok:true,record:saved};
   }
   const previous = handoffWrites.get(tabId) || Promise.resolve();
@@ -401,6 +409,7 @@ async function handleHandoffMessage(message, tabId) {
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
     if(message.stage==='sent')
       await goalController.handoffConfirm({sourceUrl:record.sourceUrl,targetUrl:record.targetUrl,handoffId:record.id,tabId,acceptedUserId:record.acceptance?.messageId});
+    if(message.stage==='failed')await goalController.handoffFailed({sourceUrl:record.sourceUrl,handoffId:record.id,tabId,reason:record.reason});
     return { ok: true, record, notifyAwaiting:message.stage==='awaiting-confirmation'&&!current.awaitingNotifiedAt };
   });
   handoffWrites.set(tabId, write);
@@ -408,6 +417,21 @@ async function handleHandoffMessage(message, tabId) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if(message?.type==='CHATGPT_GOAL_INLINE') {
+    const tabId=sender.tab?.id,url=ChatGPTGoalPolicy.canonical(sender.tab?.url);
+    if(sender.frameId>0||typeof tabId!=='number'||!url||ChatGPTGoalPolicy.canonical(message.url)!==url||
+        !['get','start','pause','resume','stop'].includes(message.action)) {
+      sendResponse?.({ok:false,error:'Goal chat binding mismatch'});return false;
+    }
+    (async()=>{
+      if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)throw Error('Чат изменился');
+      if(message.action==='get')return {ok:true,record:await goalController.get(url),tabId,url};
+      const result=message.action==='start'?await goalController.start({url,tabId,goal:message.goal,rules:message.rules,
+        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes}):
+        await goalController.control({action:message.action,url,tabId});
+      return {...result,tabId,url};
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));return true;
+  }
   if(message?.type==='CHATGPT_GOAL_CONTROL') {
     if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('popup.html')) {
       sendResponse?.({ok:false,error:'Goal управляется только из popup расширения'});
@@ -602,6 +626,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
+    if(['retry.manual_reset','retry.preparation_superseded'].includes(event.kind)) {
+      sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
+    }
     appendJournal(event,sender.tab).then(async result=>{
       if(['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
         await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
@@ -843,6 +870,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if(!request)return {ok:false,reason:'Ручная отправка не подтверждена запросом'};
         receipt=request.receipt;
         await appendJournal({kind:'retry.preparation_superseded',sourceUrl:url,requestId:message.requestId,startedAt:message.startedAt},sender.tab);
+        await goalController.manual({url,tabId:sender.tab.id,startedAt:message.startedAt});
       }
       if(message.type==='CHATGPT_STATUS_GET'){
         let view=await readChatStatus(url);

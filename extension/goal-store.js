@@ -39,6 +39,8 @@
         {id:tabId,url:record.url});
     }
     function operation(record,kind,tabId,time) {
+      if(kind==='continuation'&&record.continuations>=record.maxContinuations)
+        throw Error('Лимит продолжений исчерпан');
       return {id:uuid(),kind,text:kind==='initial'?policy.initialText(record):policy.continuationText(record),
         tabId,createdAt:time,status:'reserved'};
     }
@@ -141,7 +143,9 @@
           if(['completed','stopped','blocked','moved'].includes(old.phase))throw Error('Goal уже завершён');
           const inFlight=['sending','clicked'].includes(old.phase);
           const ready=old.phase==='preparing'&&old.operation?.status==='reserved';
-          const record={...old,phase:inFlight?old.phase:'paused',pauseRequested:inFlight,
+          const handoff=old.phase==='handoff';
+          const record={...old,phase:inFlight||handoff?old.phase:'paused',pauseRequested:inFlight,
+            ...(handoff?{preHandoffPhase:'paused'}:{}),
             ...(ready?{pendingSendKind:old.operation.kind,operation:null}:{}),
             reason:inFlight?'Пауза после подтверждения текущей отправки':'Приостановлено пользователем'};
           await event('paused',record,tabId);
@@ -160,6 +164,13 @@
           return {record};
         }
         if(action==='resume') {
+          if(old.phase==='handoff'&&old.preHandoffPhase==='paused') {
+            if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
+            const record={...old,preHandoffPhase:'waiting',pauseRequested:false,reason:''};
+            await event('resumed',record,tabId);
+            await save(record);
+            return {record};
+          }
           if(old.phase!=='paused'||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
@@ -170,18 +181,13 @@
             if(!ready?.ok||ready.idle!==true)throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
           }
           let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
-          if(old.pendingSendKind) {
-            record={...record,phase:'preparing',pendingSendKind:null,
-              operation:operation(record,old.pendingSendKind,tabId,now())};
-          } else if(old.pendingCompletion) {
-            record={...record,pendingCompletion:null};
-            if(record.continuations>=record.maxContinuations) {
-              record={...record,phase:'stopped',reason:'Лимит продолжений исчерпан'};
-            } else {
-              record={...record,phase:'preparing',operation:operation(record,'continuation',tabId,now())};
-            }
-          } else if(old.manualOverride) {
-            record={...record,phase:'preparing',operation:operation(record,'continuation',tabId,now())};
+          const pendingKind=old.pendingSendKind||
+            (old.pendingCompletion||old.manualOverride?'continuation':null);
+          if(pendingKind) {
+            record={...record,pendingSendKind:null,pendingCompletion:null};
+            record=pendingKind==='continuation'&&record.continuations>=record.maxContinuations
+              ?{...record,phase:'stopped',reason:'Лимит продолжений исчерпан'}
+              :{...record,phase:'preparing',operation:operation(record,pendingKind,tabId,now())};
           }
           await event('resumed',record,tabId);
           await save(record);
@@ -307,11 +313,12 @@
       if(result.dispatch)await deliver(result.record);
       return {ok:result.ok,record:view(await getRaw(target))};
     }
-    async function manual({url,tabId}) {
+    async function manual({url,tabId,startedAt}) {
       const target=canonical(url);
       if(!target)return {ok:false};
       return serialize(async()=>{
         const record=await read(target);
+        if(record&&Number.isFinite(startedAt)&&record.startedAt>startedAt)return {ok:false};
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))
           return {ok:false};
         const inFlight=['sending','clicked'].includes(record.phase);
@@ -351,11 +358,31 @@
         if(!record||['completed','stopped','blocked','moved'].includes(record.phase))return;
         // The handoff record is persisted before the Goal phase. A worker can
         // stop in between; GET must be able to replay this exact transition.
-        if(record.phase==='handoff'&&record.handoffId===handoffId)return;
+        if(record.phase==='handoff'&&record.handoffId===handoffId) {
+          // The worker replays its own durable handoff key. Older Goal records
+          // lack this derived tab binding; fill it once without replaying sends.
+          if(record.handoffTabId===undefined&&Number.isInteger(tabId)&&tabId>=0)
+            await save({...record,handoffTabId:tabId});
+          return;
+        }
         if(!['waiting','paused','recovering'].includes(record.phase))throw Error('Goal отправляет сообщение; handoff остановлен');
-        const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId};
+        const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId,handoffTabId:tabId};
         await event('handoff_begin',next,tabId,{handoffId});
         await save(next);
+      });
+    }
+    async function handoffFailed({sourceUrl,handoffId,tabId,reason}) {
+      const source=canonical(sourceUrl);
+      if(!source||typeof handoffId!=='string'||!handoffId)return {ok:false};
+      return serialize(async()=>{
+        const record=await read(source);
+        if(!record||record.phase!=='handoff'||record.handoffId!==handoffId||
+            record.handoffTabId!==tabId)return {ok:false};
+        const next={...record,phase:'blocked',
+          reason:('Передача Goal остановлена: '+String(reason||'Не удалось подтвердить перенос')).slice(0,500)};
+        await event('handoff_failed',next,tabId,{handoffId});
+        await save(next);
+        return {ok:true,record:view(next)};
       });
     }
     async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
@@ -419,7 +446,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

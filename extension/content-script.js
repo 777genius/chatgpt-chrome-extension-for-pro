@@ -1,12 +1,13 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.0';
+  const SCRIPT_VERSION = '1.7.1';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
   let statusIndicator = null;
+  let inlineGoal = null;
   let deferredTaskObserver = null;
   let deferredObservedStart = 0;
   let manualSendIntent = null;
@@ -28,6 +29,7 @@
   function stopContext() {
     contextAlive = false;
     statusIndicator?.dispose();
+    inlineGoal?.dispose();
     deferredTaskObserver?.dispose();
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
     manualSendIntent = null;
@@ -98,6 +100,17 @@
     load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:isGenerating(),startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
 
 
+  inlineGoal=globalThis.ChatGPTGoalInline?.create({document,getUrl:()=>location.href,request:runtimeMessage,alive:runtimeAvailable,
+    subscribe:changed=>{
+      const listener=(changes,area)=>{
+        const url=globalThis.ChatGPTGoalPolicy?.canonical(location.href);
+        if(area==='local'&&url&&Object.hasOwn(changes,'chatgpt-goal:'+url))changed();
+      };
+      try{chrome.storage.onChanged?.addListener(listener);}catch{}
+      return ()=>{try{chrome.storage.onChanged?.removeListener(listener);}catch{}};
+    }})||null;
+
+
   function notifyPageReturned(event) {
     if((event&&event.isTrusted===false)||!pageIsActive()||returnedPageUrl===location.href)return;
     const url=location.href;
@@ -157,7 +170,9 @@
     if(!rendered||rendered.textContent!=='GOAL_COMPLETE'||
         rendered.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img'))return false;
     const semantic=roleNode.cloneNode(true);
-    semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"]').forEach(node=>node.remove());
+    // Fallback turns expose the speaker label as a screen reader heading,
+    // outside the answer itself. It is interface text in every locale.
+    semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
     return semantic.textContent.trim()==='GOAL_COMPLETE';
   }
 
@@ -444,6 +459,10 @@
       if(!sameChat()||composer()!==editor||isGenerating())throw Error('Чат изменён до подготовки');
       replaceEditorText(editor,text);
       inserted=true;
+      // Native paragraph normalization is asynchronous after insertText. Let
+      // it settle before exact comparison; any concurrent user edit still
+      // fails the unchanged checks below and is never overwritten.
+      await sleepUntilNextCheck();
       await waitForExactComposer(text,()=>sameChat()&&composer()===editor&&
         rawEditorText(editor)===text&&!isGenerating()&&!composerHasAttachments(editor));
       grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
@@ -458,6 +477,7 @@
       // Treat a lost click acknowledgement as an UNKNOWN outcome.
       rememberCompletionSendIntent();
       clicked=true;
+      manualSendIntent=null;
       const sent=await inspectComposer(text,'send',{operationId});
       if(sent?.ok===false&&!sent.unknown)clicked=false;
       if(!sent?.ok||!sent.clicked)throw Error(sent?.reason||'Нет подтверждения единственного клика');
@@ -521,7 +541,7 @@
     manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
-    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
+    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, attemptId:attempt, requestId, title:error.sessionTitle, ...details}, required);
     let clicked = false;
     let confirmed = false;
     const expectedToken = watchToken;
@@ -629,6 +649,7 @@
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true; // A lost reply may still mean the page received the click.
+      manualSendIntent=null;
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (sent?.duplicate) {
@@ -736,6 +757,8 @@
     if(startedAt-intent.at>10000){manualSendIntent=null;return;}
     if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
     manualSendIntent=null;
+    if(globalThis.__chatgptNotifierRequestStartedAt===startedAt&&
+        (globalThis.__chatgptNotifierRequestId||null)===(requestId||null))retryStates.delete(location.pathname);
     runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
   }
 
@@ -744,19 +767,13 @@
   document.addEventListener('click', (event) => {
     if (event.isTrusted && event.target instanceof Element &&
         event.target.closest('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')) {
-      retryStates.delete(location.pathname);
-      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       rememberManualStatusIntent();
-      void audit('retry.manual_reset',{input:'send-button'});
     }
   }, { capture: true, signal: listeners.signal });
   document.addEventListener('keydown', (event) => {
     if (event.isTrusted && event.key === 'Enter' && !event.shiftKey && !event.isComposing &&
         event.target instanceof Element && event.target.closest('#prompt-textarea, [data-composer-markdown]')) {
-      retryStates.delete(location.pathname);
-      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       rememberManualStatusIntent();
-      void audit('retry.manual_reset',{input:'enter'});
     }
   }, { capture: true, signal: listeners.signal });
 
@@ -929,6 +946,7 @@
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true;
+      manualSendIntent=null;
       const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,requireMax:true,fileName:record.asFile?record.fileName:null});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка истории не подтверждена');
@@ -1519,7 +1537,7 @@
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
     const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&currentRequest){deferredObservedStart=0;deferredTaskObserver?.requestStarted(message.startedAt);armForCurrentPrompt();}
-    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
+    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){void inlineGoal?.refresh();scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest)armForCurrentPrompt();
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();

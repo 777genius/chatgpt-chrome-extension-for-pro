@@ -3,7 +3,7 @@
 ## Scope
 Implement **Goal** only. Message queue / Steer is out of scope and remains unimplemented. No new API calls, external services, feature flags, or extra permissions.
 
-- User explicitly starts an objective and optional stop conditions from the popup in the selected ChatGPT conversation. Persistent controls: pause, resume, stop; finite continuation budget and deadline.
+- User explicitly starts an objective and optional stop conditions from the inline Goal control beside reasoning effort or the popup in the selected ChatGPT conversation. Persistent controls: pause, resume, stop; finite continuation budget and deadline.
 - The initial instruction and all later continuation messages are **explicitly authorized by this goal**. They use the existing native composer inspection and guarded one-click sender, *never* a second click implementation or automatic capture of the user's draft.
 - Completion requires a **new, request-bound, fully completed assistant answer** whose **entire text is exactly `GOAL_COMPLETE`**. No substring / Markdown / partial or streaming match. The marker is a model assertion, **not verification** of a GitHub merge or CI result.
 - A non-marker answer schedules one continuation with a stable operation ID. Claim and intent are persisted before dispatch. Any lost click acknowledgement or uncertain outcome blocks further sends until explicit user intervention.
@@ -24,3 +24,16 @@ Implement **Goal** only. Message queue / Steer is out of scope and remains unimp
 
 ## Merge gate
 Do not merge solely because CI is green. Browser E2E needs a designated test chat and authorized live sending; otherwise leave the PR draft and report it as unverified.
+
+## Browser validation for inline Goal
+
+Verified on real ChatGPT in a dedicated test conversation, using native mouse/keyboard input:
+
+- Initial instruction → completed non-marker answer → exactly one continuation → exact `GOAL_COMPLETE` → no further sends.
+- A native composer draft blocks Goal without changing or sending the draft.
+- One-continuation budget stops after that continuation, even when the answer remains incomplete.
+- Pause before a send cancels preparation. Pause during a response lets that response finish without continuing; Resume sends one continuation.
+- Turning the inline switch off stops Goal while the current native response can finish.
+- Replacing the content listener and a full extension reload preserve the same paused Goal ID, objective and budget without sending. Native hidden composers and screen reader speaker headings are covered by regressions.
+
+The native conversation-length limit was not forced in the short live test. Handoff enrollment, failure recovery, chronology, destination binding and budgets are covered by synthetic integration tests. A real native limit/handoff remains a separate pre-merge validation gap.

@@ -227,14 +227,15 @@ function controlChatComposer(options) {
   }
   const actualPrompt = controller.getChatGptPrompt();
   const prompt = actualPrompt?.prompt;
+  const systemHints = actualPrompt?.systemHints;
+  const noSystemHints = systemHints === undefined || (Array.isArray(systemHints) && systemHints.length === 0);
   const plainMatches = controller.getPlainText() === options.text && visibleText() === options.text;
   function literalSerializationMatches() {
     // Native Markdown mode escapes punctuation and wraps generated URL links.
     // Permit the native serialization only for an independently checked plain
     // document: no mentions, hidden nodes, custom links, formatting or hints.
     const doc = controller.view.state?.doc;
-    if (!doc?.toJSON || typeof controller.markdownEditor?.serialize !== 'function' ||
-        actualPrompt.systemHints?.length) return false;
+    if (!doc?.toJSON || typeof controller.markdownEditor?.serialize !== 'function') return false;
     const value = doc.toJSON();
     if (value.type !== 'doc' || value.marks?.length || !Array.isArray(value.content)) return false;
     const lines = [];
@@ -255,7 +256,9 @@ function controlChatComposer(options) {
     }
     return lines.join('\n') === options.text && controller.markdownEditor.serialize(doc) === prompt;
   }
-  const promptMatches = typeof prompt === 'string' && (prompt === options.text || (plainMatches && literalSerializationMatches()));
+  // Native hints can carry context beyond the independently checked text,
+  // including when Markdown serialization leaves that text unchanged.
+  const promptMatches = noSystemHints && typeof prompt === 'string' && (prompt === options.text || (plainMatches && literalSerializationMatches()));
   const matches = plainMatches && promptMatches;
   const ready = controller.submitReady === true && controller.pendingSubmit == null;
   const effort = Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;

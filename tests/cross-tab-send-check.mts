@@ -41,7 +41,7 @@ function boot() {
     messageChatUrl:(message:Value)=>message.url,
     statusReceipt:()=>({epoch:'fixture',order:1}),
     visitChatNotifications:async()=>({}),broadcastChatStatus:async()=>{}});
-  for(const code of [readFileSync('extension/journal-store.js','utf8'),readFileSync('extension/request-receipts.js','utf8'),readFileSync('extension/handoff-title.js','utf8'),pageSource,handoffSource,listenerSource])runInContext(code,worker);
+  for(const code of [readFileSync('extension/journal-store.js','utf8'),readFileSync('extension/request-receipts.js','utf8'),readFileSync('extension/handoff-title.js','utf8'),readFileSync('extension/goal-policy.js','utf8'),readFileSync('extension/goal-store.js','utf8'),'const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});',pageSource,handoffSource,listenerSource])runInContext(code,worker);
 }
 
 async function append(tabId:number,kind:string,operationId:string,extra:Value={}) {
@@ -89,6 +89,7 @@ assert.equal(restoration.record.draft,'Exact owner draft','another tab can recov
 assert.equal(restoration.claimed,true);
 await intent(loser,'retry-next-turn','/c/shared-source|user-turn-2');
 assert.equal((await send(loser,'retry-next-turn')).clicked,true,'a distinct later user turn can authorize its own retry');
+await append(loser,'retry.confirmed','retry-next-turn',{newPromptKey:'/c/shared-source|user-turn-3'});
 await append(loser,'retry.finished','retry-next-turn',{clicked:true,confirmed:true});
 assert.equal(clicks.length,2);
 addPage(9,'https://chatgpt.com/c/other-source');
@@ -97,6 +98,7 @@ assert.equal((await send(9,'retry-other-chat')).clicked,true,'equal DOM turn key
 
 addPage(10);await append(10,'retry.send_intent','legacy-unbound');
 assert.equal((await send(10,'legacy-unbound')).ok,false,'legacy intent without its failed turn binding fails closed');
+await append(10,'retry.failed','legacy-unbound',{clicked:false,confirmed:false});
 await intent(10,'wrong-source','/c/shared-source|user-turn-4');
 pages.get(10)!.url='https://chatgpt.com/c/switched-chat';
 assert.equal((await send(10,'wrong-source')).ok,false,'caller cannot move a persisted retry authorization to a different chat');
@@ -113,6 +115,7 @@ const refused=await send(12,'retry-no-click');
 assert.equal(refused.ok,false);assert.equal(Boolean(refused.unknown),false);
 pages.get(12)!.editor.textContent='доделай е2е';
 assert.equal((await send(12,'retry-no-click')).ok,false,'positive no-click proof does not rearm the consumed operation');
+await append(12,'retry.failed','retry-no-click',{clicked:false,confirmed:false});
 await append(12,'retry.finished','retry-no-click',{clicked:false,confirmed:false});
 await assert.rejects(intent(12,'retry-no-click'),/уже запускался/,'duplicate delivery of a consumed intent cannot rearm its old operation');
 boot();await intent(12,'retry-after-no-click');
@@ -121,6 +124,8 @@ assert.equal((await send(12,'retry-after-no-click')).clicked,true,'a proven pre-
 addPage(13,'https://chatgpt.com/c/manual-fixture');
 await plan(13,'crashed-preparation');await append(13,'draft.saved','crashed-preparation',{draft:'Crash backup'});
 boot();await append(13,'retry.manual_reset','manual-keydown');
+assert.equal((await message(13,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.manual_reset',sourceUrl:pages.get(13)!.url}})).ok,false,'a page event cannot reset state without a real manual request');
+assert.equal((await message(13,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.preparation_superseded',sourceUrl:pages.get(13)!.url}})).ok,false);
 assert.equal((await plan(13,'after-enter','/c/manual-fixture|new-turn')).duplicate,true,'raw Enter/reset without a request cannot supersede an old preparation');
 const manual={type:'CHATGPT_MANUAL_SEND',url:pages.get(13)!.url,requestId:'manual-request',startedAt:100};
 assert.equal((await message(13,manual)).ok,false,'unconfirmed manual message cannot release the preparation');

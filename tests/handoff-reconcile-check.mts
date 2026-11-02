@@ -48,7 +48,10 @@ function harness(dropReply=false) {
           if(routeAfterProof&&func.name==='inspectHandoffAcceptance'){location.href=routeAfterProof;routeAfterProof='';}
           return [{result}];
         }}}});
-    runInContext(pageCode+'\n'+titleCode+'\n'+stateCode+'\n'+listenerCode,context);
+    runInContext(pageCode+'\n'+titleCode+'\n'+readFileSync('extension/goal-policy.js','utf8')+'\n'+
+      readFileSync('extension/goal-store.js','utf8')+'\n'+
+      'const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});\n'+
+      stateCode+'\n'+listenerCode,context);
   }
   restart();
   function message(value:RecordValue) {

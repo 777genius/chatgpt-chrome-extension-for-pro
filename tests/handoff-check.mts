@@ -130,6 +130,10 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  class Transfer { items={add:(file:any)=>{this.files.push(file)}}; files:any[]=[]; }
  const runtime:any={id:'test-extension',onMessage:{addListener(){}},sendMessage:async(m:any)=>{
    if(m.type==='CHATGPT_RETRY_STATE')return {ok:true,state:restoredUnknown?{failures:[clock.now(),clock.now(),clock.now(),clock.now()],blocked:true,terminal:false,lastPromptKey:'/c/source|conversation-turn-0',lastAttemptId:'old-failed-request',reason:'4 retries exhausted'}:null};
+   if(m.type==='CHATGPT_GOAL_CONTEXT'){
+    (context as any).goalContextUrl=m.url;
+    return {ok:true,text:await runInContext('goalController.context(goalContextUrl)',context)};
+   }
    if(m.type==='CHATGPT_WAIT'){await new Promise<void>(resolve=>clock.setTimeout(resolve,m.delayMs));return {ok:true};}
    if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='inspect'&&m.options.fileName&&document.querySelector('[data-composer-attachments]'))return {ok:false,reason:'Owner attachment alongside history'};if(m.options.action==='send'){const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
    if(m.type==='CHATGPT_LOG_EVENT'){
@@ -177,7 +181,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
      if(!lateTarget)clock.setTimeout(()=>{loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';},300);
    }else{loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';}
  });
- runInContext(probe+'\n'+handoffWorker+'\n'+source,context);
+ runInContext(readFileSync('extension/goal-policy.js','utf8')+'\n'+readFileSync('extension/goal-store.js','utf8')+'\nconst goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});\n'+probe+'\n'+handoffWorker+'\n'+source,context);
  const alert=document.createElement('aside');alert.setAttribute('role','alert');alert.className='text-danger';alert.innerHTML=`<div>${restoredUnknown?'Unknown error':'最大長'}</div><button>新しいチャット</button>`;
  if(restoredUnknown)(alert.querySelector('button')! as any).__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries:messages.map(m=>({id:m.id,turn:{items:[m.role==='user'?{type:'user-message',messageId:m.id,message:m.text}:{type:'assistant-message',phase:'final_answer',messageId:m.id,content:m.text}]}}))},return:null}};
  alert.querySelector('button')!.addEventListener('click',()=>{
