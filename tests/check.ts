@@ -14,7 +14,7 @@ async function waitFor(predicate:()=>boolean) {
 const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><div aria-hidden="true">decorative</div><div>${text}</div><button>Повторить</button></aside>`;
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
 async function domCheck() {
-  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false) {
+  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false) {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
     Object.defineProperty(window.Node, 'DOCUMENT_POSITION_FOLLOWING', { value: 4, configurable: true });
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
@@ -49,7 +49,7 @@ async function domCheck() {
           if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
           return {ok:true,matches:true,ready:true};
         }
-        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(failJournal)return {ok:false};context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
+        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
         if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
         if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
         messages.push(message);
@@ -73,6 +73,14 @@ async function domCheck() {
       }
     };
   }
+  const duplicate = setup('Keep this owner draft',true,true,'',null,false,true);
+  await duplicate.fail('Failed request already owned by another tab');
+  assert.equal(duplicate.sends.length,0);
+  assert.equal(duplicate.document.querySelector('#prompt-textarea')!.textContent,'Keep this owner draft');
+  assert.equal(duplicate.getStopCalls(),0);
+  assert.equal(duplicate.logs.some(e=>e.kind==='draft.saved'||e.kind==='retry.failed'),false,'losing a shared claim must not overwrite draft metadata or block the winning retry');
+  assert.equal(duplicate.logs.some(e=>e.kind==='retry.duplicate_suppressed'),true);
+  assert.equal(duplicate.messages.length,0,'a duplicate loser must not paint an error or notify while another tab is recovering');
   const afterUpdate = setup('',true,true,'',{failures:[999900],lastPromptKey:'/c/example|conversation-turn-0',lastAttemptId:'old-observed-attempt',blocked:false});
   await afterUpdate.fail('Existing error after update');
   assert.equal(afterUpdate.sends.length,0,'reload must not repeat a previously observed prompt without a new request');
@@ -300,7 +308,7 @@ async function workerCheck() {
   const injectBefore=injections.length;
   assert.equal((await sendGuard({action:'send',text:'User draft',url:sender.tab.url})).ok,false);
   assert.equal(injections.length,injectBefore,'unlogged draft must not reach the page');
-  await runInContext("appendJournal({kind:'retry.send_intent',operationId:'only-once'}, {id:7})",workerContext);
+  await runInContext("appendJournal({kind:'retry.send_intent',operationId:'only-once',promptKey:'/c/example|user-turn'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
   assert.equal((await sendGuard({action:'send',text:'User draft',operationId:'only-once',url:sender.tab.url})).ok,false);
   assert.equal(injections.length,injectBefore,'even a logged operation cannot substitute a user draft');
   const options={action:'send',text:'доделай е2е',operationId:'only-once',url:sender.tab.url};

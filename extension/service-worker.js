@@ -446,6 +446,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'CHATGPT_COMPOSER_CONTROL') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     let pageDispatchStarted=false;
+    let retryBinding=null;
     (async () => {
       const options = message.options;
       if (!['inspect','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
@@ -455,6 +456,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!active || active.operationId !== options.operationId || Date.now() - active.at > 15000) throw new Error('Нет сохранённого разрешения на эту автоматическую отправку');
         if (active.kind === 'retry.send_intent') {
           if (options.text !== 'доделай е2е' || options.fileName) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
+          if(!active.sourceUrl||active.sourceUrl!==retryDraftUrl(options.url)||typeof active.promptKey!=='string'||!active.promptKey)throw new Error('Исходный запрос автоповтора не подтверждён');
+          retryBinding={sourceUrl:active.sourceUrl,promptKey:active.promptKey};
         } else if (active.kind === 'handoff.sending') {
           const key = handoffKey(sender.tab.id);
           const record = (await chrome.storage.local.get(key))[key];
@@ -468,6 +471,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })()
       .then(async results=>{
         const result=results[0]?.result || {ok:false,unknown:pageDispatchStarted,reason:'Редактор недоступен'};
+        if(pageDispatchStarted&&retryBinding&&result.ok===false&&!result.clicked&&!result.unknown) {
+          await appendJournal({kind:'send.not_clicked',operationId:message.options.operationId,...retryBinding},sender.tab);
+        }
         if(result.clicked) {
           // Preserve the actual native serialization, independently of the
           // content-script lifetime. A missing reply never authorizes a resend.
@@ -484,7 +490,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         sendResponse(result);
       })
-      .catch(error=>sendResponse({ok:false,unknown:pageDispatchStarted,reason:String(error.message || error)}));
+      .catch(error=>sendResponse({ok:false,unknown:pageDispatchStarted,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),reason:String(error.message || error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_JOURNAL_READ') {
@@ -498,7 +504,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!event || typeof event.kind !== 'string') return;
     appendJournal(event,sender.tab).then(result=>{
       sendResponse(result);
-    }).catch(error=>sendResponse({ok:false,error:String(error.message || error)}));
+    }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_INSPECT_ATTACHMENT') {
@@ -716,6 +722,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const request=await readRequestReceipt(sender.tab.id,{requestId:message.requestId,startedAt:message.startedAt,url,consume:true});
         if(!request)return {ok:false,reason:'Ручная отправка не подтверждена запросом'};
         receipt=request.receipt;
+        await appendJournal({kind:'retry.preparation_superseded',sourceUrl:url,requestId:message.requestId,startedAt:message.startedAt},sender.tab);
       }
       if(message.type==='CHATGPT_STATUS_GET'){
         let view=await readChatStatus(url);

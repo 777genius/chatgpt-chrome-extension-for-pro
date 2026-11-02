@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.6.5';
+  const SCRIPT_VERSION = '1.6.6';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -54,7 +54,10 @@
       kind, eventAt: Date.now(), sourceUrl: location.href, title: document.title,
       attemptId: globalThis.__chatgptNotifierAttemptId || '', ...details
     } });
-    if (required && !result?.ok) throw new Error('Не удалось записать журнал; автоматическая отправка остановлена');
+    if (required && !result?.ok) throw Object.assign(new Error(result?.duplicate
+      ? 'Этот запрос уже обрабатывается в другой вкладке'
+      : 'Не удалось записать журнал; автоматическая отправка остановлена'),
+      result?.duplicate ? {code:'RETRY_DUPLICATE'} : {});
     return result;
   }
   void audit('watcher.started');
@@ -536,6 +539,10 @@
       clicked = true; // A lost reply may still mean the page received the click.
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
+      if (sent?.duplicate) {
+        await logRetry('retry.duplicate_suppressed',{operationId});
+        return;
+      }
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка не подтверждена');
       void logRetry('retry.clicked',{operationId,text:RETRY_TEXT});
       const confirmationDeadline = Date.now() + 10000;
@@ -555,6 +562,10 @@
       }
       throw new Error('Не удалось подтвердить отправку');
     } catch (cause) {
+      if (cause.code==='RETRY_DUPLICATE') {
+        await logRetry('retry.duplicate_suppressed',{operationId});
+        return;
+      }
       await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:String(cause.message || cause)});
       state.blocked = true;
       state.reason = `Автопродолжение остановлено: ${cause.message}`;
@@ -586,6 +597,7 @@
           notifyError(error, state.reason);
         }
       }
+      if(runtimeAvailable())await logRetry('retry.finished',{operationId,clicked,confirmed});
     }
   }
 
@@ -756,27 +768,39 @@
         return node && isElementVisible(node) && turnNodes().length === 0 && !isGenerating() ? node : null;
       });
       const initialPath = location.pathname;
+      const initialUrl = location.href;
       const existing = rawEditorText(editor);
+      const verifyPreparation = () => {
+        if (!runtimeAvailable() || location.href !== initialUrl || composer() !== editor ||
+            rawEditorText(editor) !== existing || turnNodes().length || isGenerating()) {
+          throw new Error('Чат или черновик изменились во время подготовки передачи');
+        }
+      };
       // The built-in new-chat action can seed the last prompt. Anything else
       // may be a new draft and must not be silently overwritten.
-      if (normalize(existing) && existing !== record.lastUserText && existing !== record.draft && existing !== record.prompt) {
+      if (existing !== '' && existing !== record.lastUserText && existing !== record.draft && existing !== record.prompt) {
         throw new Error('В новом чате уже есть другой черновик');
       }
       await updateHandoff('preparing', { targetUrl: location.href });
+      verifyPreparation();
       await ensureMaxReasoning(record.id);
+      verifyPreparation();
       if (record.asFile) {
         const input = Array.from(pageRoot().querySelectorAll('input[type="file"]')).find((node) => !node.accept || /text|\.txt/.test(node.accept));
         if (!input) throw new Error('Не найдено поле для текстового файла');
         const existingFile = await runtimeMessage({ type: 'CHATGPT_INSPECT_ATTACHMENT', fileName: record.fileName });
+        verifyPreparation();
         if (existingFile?.status === 'missing') {
+          if (composerHasAttachments(editor)) throw new Error('В новом чате есть пользовательское вложение');
           const transfer = new DataTransfer();
           transfer.items.add(new File([record.text], record.fileName, { type: 'text/plain' }));
           input.files = transfer.files;
           input.dispatchEvent(new Event('change', { bubbles: true }));
         }
         await waitHandoff(async () => {
-          if (location.pathname !== initialPath) throw new Error('Открыт другой чат');
+          verifyPreparation();
           const file = await runtimeMessage({ type: 'CHATGPT_INSPECT_ATTACHMENT', fileName: record.fileName });
+          verifyPreparation();
           if (file?.status !== lastAttachmentStatus) {
             lastAttachmentStatus = file?.status || 'unknown';
             await audit('attachment.status',{operationId:record.id,fileName:record.fileName,status:lastAttachmentStatus});
@@ -784,7 +808,12 @@
           if (file?.status === 'error') throw new Error('Ошибка загрузки файла истории');
           return file?.ok && file.status === 'ready';
         }, 60000);
+        const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
+        verifyPreparation();
+        if (!attachments?.ok || !attachments.matches) throw new Error(attachments?.reason || 'Не подтверждено единственное вложение истории');
       }
+      verifyPreparation();
+      if (!record.asFile && composerHasAttachments(editor)) throw new Error('В новом чате есть пользовательское вложение');
       replaceEditorText(editor, record.prompt);
       let exactSince = 0;
       const button = await waitHandoff(() => {
@@ -837,17 +866,30 @@
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
     const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там два последних сообщения пользователя и два ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
+    const sourceEditor = composer();
+    const draft = sourceEditor ? rawEditorText(sourceEditor) : '';
+    if (sourceEditor && composerHasAttachments(sourceEditor)) throw new Error('В исходном чате есть пользовательское вложение; переход отменён');
     const record = {
       id: crypto.randomUUID(), createdAt: Date.now(), sourceUrl, sourceTitle:document.title, text, prompt, asFile, fileName,
-      draft: composer() ? rawEditorText(composer()) : '',
+      draft,
       lastUserText: info.messages.filter((item) => item.role === 'user').at(-1)?.text || ''
     };
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_BEGIN', record });
     if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить передачу');
     handoffRecord = result.record;
-    const button = alert.querySelector('button');
-    if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
-    if (location.href !== sourceUrl || !alert.isConnected) throw new Error('Исходный чат изменился; переход отменён');
+    let button;
+    try {
+      button = alert.querySelector('button');
+      if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
+      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor ||
+          sourceEditor && (rawEditorText(sourceEditor) !== draft || composerHasAttachments(sourceEditor))) {
+        throw new Error('Исходный чат или черновик изменились; переход отменён');
+      }
+    } catch (cause) {
+      // Cancellation before the native click must also survive reinjection.
+      await updateHandoff('failed', { reason: String(cause.message || cause) });
+      throw cause;
+    }
     // Use the real page action to preserve its mode/model behavior.
     if (!runtimeAvailable()) return;
     button.click();
