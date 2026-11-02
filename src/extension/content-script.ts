@@ -4,7 +4,7 @@
 // generated classic JavaScript retains the existing single-owner send guards.
 interface CSReceipt {epoch:string;order:number}
 interface CSAttempt {
-  id:string;url:string;path:string;token:number;startedAt:number;
+  id:string;url:string;path:string;token:number;startedAt:number|null|undefined;
   baselineKey:string;requestId?:string|null;promptKey?:string;httpCompleted?:boolean;
   goalNativeUserId?:string|null;goalNativeVerified?:boolean;
   checkpointWrite?:Promise<unknown>|null;
@@ -26,9 +26,9 @@ interface CSErrorInfo {
   recoveryBinding?:unknown;
 }
 interface CSRetryState {
-  blocked?:boolean;terminalHandled?:boolean;reason?:string;
-  remainingRetries?:number;failures?:number[];
-  lastAttempt?:{promptKey?:string;id?:string;attemptId?:string;at?:number};
+  blocked:boolean;terminalHandled?:boolean;reason:string;
+  remainingRetries?:number;failures:number[];
+  lastAttempt?:string;restoredPromptKey?:string;
   lastSuppressedNotice?:number;matches?:boolean;ready?:boolean;ok?:boolean;
 }
 interface CSHandoffRecord {
@@ -83,6 +83,10 @@ interface CSDeferredObserver {
 interface CSEditor extends HTMLElement {value?:string}
 interface CSPageCompletion {ok?:boolean;url?:string;promptKey?:string;assistantKey?:string;userId?:string;assistantId?:string;isLatest?:boolean;isReadOnly?:boolean;generating?:boolean;assistantCompleted?:boolean;assistantPhase?:string;hasError?:boolean;turnStatus?:string;reason?:string}
 interface CSGoalDispatch {type:string;url:string;goalId:string;operationId:string;text:string}
+interface CSArmOptions {
+  resumed?:boolean;completed?:boolean;nativeProgress?:boolean;
+  restored?:CSAttempt|null;
+}
 declare const chrome:CSChrome;
 declare const ChatGPTNotifierMemory:{createLatestTaskSlot():{replace(cleanup:()=>void):()=>void;cancel():void}};
 declare const ChatGPTHandoffTitle:{
@@ -118,7 +122,7 @@ declare global {
   let deferredTaskObserver:CSDeferredObserver|null = null;
   let deferredObservedStart = 0;
   let manualSendIntent:{at:number;url?:string;baselineKey?:string}|null = null;
-  let completionSendIntent:{at:number;baselineKey:string}|null = null;
+  let completionSendIntent:{at:number;baselineKey:string;path:string}|null = null;
   let completionAttempt:CSAttempt|null = null;
   let goalDispatchBusy = false;
   let goalDispatchQueue = Promise.resolve();
@@ -206,7 +210,7 @@ declare global {
     load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:isGenerating(),startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
 
 
-  function notifyPageReturned(event:Event):void {
+  function notifyPageReturned(event?:Event):void {
     if((event&&event.isTrusted===false)||!pageIsActive()||returnedPageUrl===location.href)return;
     const url=location.href;
     returnedPageUrl=url;
@@ -361,11 +365,11 @@ declare global {
   const RECOVERY_GRACE_MS = 3000;
   const RETRY_TEXT = 'доделай е2е';
   const RETRY_WINDOW_MS = 120000;
-  const retryStates = new Map();
+  const retryStates = new Map<string,CSRetryState>();
   let retryRestoredPath = '';
-  let retryRestoreTask = null;
+  let retryRestoreTask:Promise<void>|null = null;
   let retryTask = Promise.resolve();
-  const pendingDrafts = new Map();
+  const pendingDrafts = new Map<string,string>();
   let draftRestoreBusy = false;
   let draftRestorePath = '';
   let replacingDraft = false;
@@ -373,8 +377,12 @@ declare global {
 
   function retryState():CSRetryState {
     const key = location.pathname;
-    if (!retryStates.has(key)) retryStates.set(key, { failures: [], blocked: false, lastAttempt: '', reason: '' });
-    return retryStates.get(key);
+    let state=retryStates.get(key);
+    if (!state) {
+      state={failures:[],blocked:false,lastAttempt:'',reason:''};
+      retryStates.set(key,state);
+    }
+    return state;
   }
 
   function retryStateReady():boolean {
@@ -410,14 +418,15 @@ declare global {
   }
 
   function composer():CSEditor|null {
-    return Array.from(pageRoot().querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(isElementVisible) || null;
+    const editors=Array.from(pageRoot().querySelectorAll<HTMLElement>('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]'));
+    return (editors.find(isElementVisible) as CSEditor|undefined)||null;
   }
 
-  function editorText(editor:CSEditor|null):string {
+  function editorText(editor:CSEditor):string {
     return normalize(editor.value === undefined ? editor.textContent : editor.value);
   }
 
-  function rawEditorText(editor:CSEditor|null):string {
+  function rawEditorText(editor:CSEditor):string {
     if (editor.value !== undefined) return editor.value;
     if (!editor.querySelector('p, div, br, li')) return editor.textContent || '';
     // innerText adds layout-only newlines around rich URL widgets. Read the
@@ -451,7 +460,7 @@ declare global {
     }
   }
 
-  function composerHasAttachments(editor:CSEditor|null):boolean {
+  function composerHasAttachments(editor:CSEditor):boolean {
     const form=editor.closest('form, [data-composer-body]')||editor.parentElement;
     return Boolean(form?.querySelector('[data-testid*="attachment"], [data-testid="file-upload-progress"]')||form?.querySelector('[data-composer-attachments]')?.children.length);
   }
@@ -625,7 +634,7 @@ declare global {
     await audit('reasoning.selected',{operationId,previous,selected:'max'},true);
   }
 
-  async function retryAfterError(error:CSError,attempt:CSAttempt|null,path:string,promptKey:string,state:CSRetryState,requestId:string|null):Promise<void> {
+  async function retryAfterError(error:CSError,attempt:string,path:string,promptKey:string,state:CSRetryState,requestId:string|null):Promise<void> {
     manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
@@ -868,7 +877,7 @@ declare global {
     }
   }, { capture: true, signal: listeners.signal });
 
-  let handoffRecord = null;
+  let handoffRecord:CSHandoffRecord|null = null;
   let handoffBusy = false;
   let handoffReconcileBusy = false;
   let handoffLastCheckAt = -Infinity;
@@ -1289,7 +1298,7 @@ declare global {
     }
   }
 
-  function waitForAnswerBoundToLatestPrompt(isCurrent:()=>boolean,attempt:CSAttempt):void {
+  function waitForAnswerBoundToLatestPrompt(isCurrent:()=>boolean,attempt:CSAttempt):Promise<string|null> {
     return new Promise((resolve) => {
       let settled = false;
       let observer = null;
@@ -1541,7 +1550,7 @@ declare global {
     return true;
   }
 
-  function armForCurrentPrompt(options:Record<string,unknown>={}):void {
+  function armForCurrentPrompt(options:CSArmOptions={}):void {
     const id=globalThis.__chatgptNotifierAttemptId;
     const startedAt=globalThis.__chatgptNotifierRequestStartedAt;
     const requestId=globalThis.__chatgptNotifierRequestId||null;
