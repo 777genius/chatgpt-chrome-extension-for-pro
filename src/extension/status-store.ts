@@ -220,7 +220,7 @@ function updateDeferredChat(url: string,event: DeferredEvent,receipt: StatusRece
     if(!key||!['pending','unknown','resumed','none'].includes(event.phase))return {value:statusView(record)};
     const pendingReceipt=record.deferred?.observedThrough||record.deferred?.receipt;
     if(pendingReceipt&&!statusBefore(pendingReceipt,receipt))return {value:statusView(record)};
-    const legacyCard=record.deferred&&event.phase==='none'&&['historical-card','task-disabled'].includes(event.reason)&&
+    const legacyCard=record.deferred&&event.phase==='none'&&['historical-card','task-disabled'].includes(event.reason||'')&&
       record.deferred?.anchorKey===event.anchorKey&&record.deferred.cardKey.startsWith(`${event.anchorKey}|`);
     const matching=record.deferred?.cardKey===key||legacyCard;
     if(['pending','unknown'].includes(event.phase)) {
@@ -287,7 +287,7 @@ function stopChatLoading(url: string,startedAt: number,receipt: StatusReceipt,st
     const matching=record.status?.kind==='loading'&&record.status.eventAt===startedAt&&
       record.status.receipt?.epoch===generation.epoch&&record.status.receipt?.order===generation.order;
     if(!record.loadingStoppedThrough||!statusBefore(generation,record.loadingStoppedThrough))record.loadingStoppedThrough=generation;
-    if(matching&&statusBefore(record.status.receipt,receipt)){record.status=null;record.revision++;}
+    if(matching&&record.status&&statusBefore(record.status.receipt,receipt)){record.status=null;record.revision++;}
     return {write:true,value:statusView(record)};
   });
 }
