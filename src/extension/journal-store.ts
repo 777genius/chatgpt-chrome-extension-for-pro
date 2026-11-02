@@ -293,7 +293,7 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId||'']:sequence}:meta.retryDraftClaims } });
     journalFailure = '';
-    return { ok: true, sequence, sourceUrl:entry.sourceUrl,
+    return { ok: true as const, sequence, sourceUrl:entry.sourceUrl,
       ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)||''],draft:claimedDraft!.draft}}:{}) };
   });
   journalQueue = write;
@@ -302,7 +302,7 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
 function readRetryDraft(url: string): Promise<(RetryDraft & {draft:string}) | null> {
   const read=journalQueue.catch(()=>{}).then(async()=>{
     const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
-    return indexedRetryDraft(meta,url);
+    return indexedRetryDraft(meta ? journalMeta(meta) : null,url);
   });
   journalQueue=read;
   return read;
