@@ -99,6 +99,11 @@
     async function recoverTab(tab) {
       const url=canonical(tab?.url);
       if(!url||typeof tab?.id!=='number')return {ok:false};
+      const pending=await serialize(async()=>{
+        const current=await read(url);
+        return current?.earlyCompletion&&['waiting','paused'].includes(current.phase)?current.earlyCompletion:null;
+      });
+      if(pending)await completion(pending);
       const record=await serialize(async()=>{
         const current=await read(url);
         if(!current||current.phase!=='preparing'||current.operation?.status!=='reserved'||
@@ -207,7 +212,7 @@
       });
     }
     async function report({url,tabId,id,operationId,status,reason='',newPromptKey=''}) {
-      return serialize(async()=>{
+      const result=await serialize(async()=>{
         const record=await read(url);
         if(!record||record.id!==id||record.operation?.id!==operationId||
             record.operation.tabId!==tabId)return {ok:false,reason:'Операция Goal изменена'};
@@ -225,13 +230,15 @@
               newPromptKey===record.operation.baselineKey)
             throw Error('Не подтверждено новое пользовательское сообщение Goal');
           const stop=record.stopRequested,pause=record.pauseRequested;
+          const early=record.earlyCompletion?.promptKey===newPromptKey?record.earlyCompletion:null;
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
             expectedPromptKey:newPromptKey,handoffPending:false,operation:null,
+            earlyCompletion:stop?null:early,
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
           await save(next);
-          return {ok:true,record:view(next)};
+          return {ok:true,record:view(next),replay:early&&!stop?early:null};
         }
         if(status==='blocked') {
           if(!['preparing','sending','clicked','paused'].includes(record.phase))return {ok:false};
@@ -242,6 +249,11 @@
         }
         return {ok:false,reason:'Неподдерживаемый результат Goal'};
       });
+      // A fast answer may finish before the asynchronous send-ack arrives. Keep
+      // the response durably bound to the operation, then process after the
+      // confirmed new user turn. Recovery can replay the same record safely.
+      if(result.replay)await completion(result.replay);
+      return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason};
     }
     async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
       const target=canonical(url);
@@ -249,13 +261,24 @@
           !completionKey.startsWith(promptKey+'|')||typeof response!=='string')return {ok:false};
       const result=await serialize(async()=>{
         const record=await read(target);
-        if(!record||!['waiting','paused'].includes(record.phase)||record.operation||
-            record.lastCompletionKey===completionKey||
+        if(!record||record.lastCompletionKey===completionKey)return {ok:false};
+        if(['sending','clicked'].includes(record.phase)&&record.operation?.tabId===tabId&&
+            record.operation.status!=='reserved'&&nativeVerified===true&&
+            promptKey!==record.operation.baselineKey&&
+            promptKey.startsWith(new URL(target).pathname+'|')&&typeof userId==='string'&&userId) {
+          if(record.earlyCompletion)return {ok:false};
+          const next={...record,earlyCompletion:{url:target,tabId,completionKey,promptKey,response,
+            nativeVerified,rawExact,userId}};
+          await event('completion_staged',next,tabId,{completionKey,promptKey});
+          await save(next);
+          return {ok:true,staged:true};
+        }
+        if(!['waiting','paused'].includes(record.phase)||record.operation||
             (!record.handoffPending&&record.expectedPromptKey!==promptKey)||
             (record.handoffPending&&(!record.handoffAcceptedUserId||userId!==record.handoffAcceptedUserId)))
           return {ok:false};
         const outcome=policy.decision(record,response,rawExact,nativeVerified,now());
-        let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,handoffPending:false};
+        let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,handoffPending:false,earlyCompletion:null};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
         else if(outcome==='complete')next={...next,phase:'completed',reason:'Модель ответила точным маркером GOAL_COMPLETE'};
         else if(outcome==='budget'||outcome==='deadline')
