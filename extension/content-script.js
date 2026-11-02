@@ -420,11 +420,11 @@
     const sameChat=()=>runtimeAvailable()&&ChatGPTHandoffTitle.chatUrl(location.href)===url;
     const status=(value,extra={})=>runtimeMessage({type:'CHATGPT_GOAL_STATUS',url,goalId:id,
       operationId,status:value,...extra});
-    let editor=null,inserted=false,clicked=false,confirmed=false;
+    let editor=null,inserted=false,clicked=false,intentRequested=false;
     try {
       if(!sameChat()||typeof text!=='string'||!text||!id||!operationId)throw Error('Goal изменил чат или операцию');
       let grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
-      if(!grant?.ok)throw Error('Отправка Goal уже отменена');
+      if(!grant?.ok)return; // stale redelivery must never block the current operation
       if(isGenerating()||replacingDraft||pendingDrafts.has(location.pathname)||
           handoffBusy||['sending','awaiting-confirmation','preparing','navigating'].includes(handoffRecord?.stage)||
           currentErrors().length)throw Error('Чат занят или другой механизм восстановления активен');
@@ -442,6 +442,7 @@
       grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
       if(!grant?.ok||!sameChat()||composer()!==editor||rawEditorText(editor)!==text||
           composerHasAttachments(editor)||isGenerating())throw Error('Goal отменён до клика');
+      intentRequested=true;
       const intent=await runtimeMessage({type:'CHATGPT_GOAL_INTENT',url,goalId:id,
         operationId,text,baselineKey});
       if(!intent?.ok)throw Error(intent?.error||'Не удалось сохранить разрешение Goal');
@@ -466,7 +467,6 @@
             composer()===editor&&rawEditorText(editor)==='') {
           const result=await status('confirmed',{newPromptKey:freshKey});
           if(!result?.ok)throw Error(result?.error||'Goal не подтвердил новое сообщение');
-          confirmed=true;
           return;
         }
         await sleepUntilNextCheck();
@@ -474,7 +474,8 @@
       throw Error('Не подтверждено новое сообщение с точным текстом Goal');
     } catch(error) {
       const reason=(clicked?'Неизвестный исход клика: ':'Отправка отменена: ')+String(error?.message||error);
-      await status('blocked',{reason});
+      const stillReserved=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
+      if(clicked||intentRequested||stillReserved?.ok)await status('blocked',{reason});
       if(!clicked&&inserted&&sameChat()&&composer()===editor&&rawEditorText(editor)===text&&
           !composerHasAttachments(editor)&&!isGenerating()) {
         try {replaceEditorText(editor,'');}catch{}
