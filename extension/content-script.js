@@ -980,7 +980,7 @@
     if (state.terminalHandled) return;
     state.terminalHandled = true;
     state.blocked = true;
-    void audit('retry.blocked',{reason:info?.action === 'new-chat'?'Требуется новый чат':'Неизвестный тип ошибки',terminal:true});
+    void audit('retry.blocked',{reason:info?.action === 'new-chat'?'Требуется новый чат':'Неизвестный тип ошибки',terminal:true,goalHandoff:info?.action==='new-chat'});
     // A new-chat recovery action is terminal: never send a retry in this chat.
     notifyError(error, info?.action === 'new-chat' ? 'Требуется новый чат' : 'Автоповтор отключён: неизвестный тип ошибки');
     if (info?.ok && info.action === 'new-chat') {
