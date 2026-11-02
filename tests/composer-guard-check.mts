@@ -28,6 +28,21 @@ console.log('PASS: actual-model vs DOM race, user draft never clicked, queued se
 // Regression: native Markdown serialization changes only representation of
 // literal history. Draft/model divergence and hidden rich content still stop.
 attachment.remove();
+const historyFile={name:'history.txt',status:'ready'};
+attachment.innerHTML='<span>history.txt</span>';
+(attachment.firstElementChild as any).__reactFiber$attachment={memoizedProps:{attachment:historyFile}};
+document.querySelector('[data-composer-body]')!.append(attachment);
+prompt='';editor.textContent='';ready=false;
+assert.equal(control({action:'inspect',text:'',fileName:'history.txt'}).ok,true,'own history attachment can be inspected before an empty seed is submit-ready');
+assert.equal(control({action:'inspect',text:'',fileName:'history.txt'}).matches,true);
+assert.equal(control({action:'inspect',text:''}).matches,true,'ordinary text readiness inspection remains usable while the history file is attached');
+const extra=document.createElement('span');extra.textContent='owner-private.txt';
+(extra as any).__reactFiber$attachment={memoizedProps:{attachment:{name:'owner-private.txt',status:'ready'}}};attachment.append(extra);
+assert.equal(control({action:'inspect',text:'',fileName:'history.txt'}).ok,false,'inspection must reject an owner attachment added during history upload');
+assert.equal(clicks,1,'read-only attachment checks never click');
+extra.remove();historyFile.status='uploading';
+assert.equal(control({action:'inspect',text:'',fileName:'history.txt'}).ok,false,'inspection requires the one history file to finish uploading');
+attachment.remove();ready=true;
 const literal='--- History ---\nhttps://example.com/path';
 editor.innerHTML='<p>--- History ---</p><p><span text-link-href="https://example.com/path" data-rich-text-generated-autolink>https://example.com/path</span></p>';
 let doc:any={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'--- History ---'}]},

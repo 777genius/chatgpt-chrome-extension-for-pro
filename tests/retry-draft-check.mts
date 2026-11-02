@@ -14,7 +14,7 @@ const call=(code:string)=>runInContext(code,world) as Promise<any>;
 const url='https://chatgpt.com/c/retry-fixture';
 const tab={id:7,url};
 async function event(kind:string,extra:Record<string,unknown>={}) {
-  world.event={kind,operationId:'op-a',sourceUrl:url,...extra};world.tab=tab;
+  world.event={kind,operationId:'op-a',sourceUrl:url,promptKey:'/c/retry-fixture|'+(extra.operationId||'op-a'),...extra};world.tab=tab;
   return call('appendJournal(event,tab)');
 }
 async function read(){return call(`readRetryDraft('${url}?q=1#fragment')`);}
@@ -28,6 +28,7 @@ assert.equal(Number(first.claimed)+Number(second.claimed),1,'concurrent restorer
 world=boot();assert.equal((await claim(saved)).claimed,false,'crash after the claim cannot duplicate draft insertion');
 await event('retry.send_intent');
 await assert.rejects(event('send.authorized'),/восстановление/,'claim fences a late sender even when its intent arrives later');
+await event('retry.cancelled');
 await event('draft.saved',{operationId:'op-b',draft:'new draft'});
 await event('retry.send_intent',{operationId:'op-b'});
 await event('send.authorized',{operationId:'op-b'});

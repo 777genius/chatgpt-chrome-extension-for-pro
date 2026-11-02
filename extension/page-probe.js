@@ -259,8 +259,9 @@ function controlChatComposer(options) {
   const matches = plainMatches && promptMatches;
   const ready = controller.submitReady === true && controller.pendingSubmit == null;
   const effort = Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
-  if (options.action === 'inspect') return {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
-  if (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max')) {
+  const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
+  if (options.action === 'inspect' && !options.fileName) return inspection;
+  if (options.action !== 'inspect' && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max'))) {
     return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort};
   }
   const attachments = root.querySelector('[data-composer-attachments]');
@@ -276,6 +277,7 @@ function controlChatComposer(options) {
     }
     if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
+  if (options.action === 'inspect') return inspection;
   const button = Array.from(root.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.
