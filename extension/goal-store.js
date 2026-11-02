@@ -14,6 +14,10 @@
     };
     const key=url=>'chatgpt-goal:'+policy.canonical(url);
     const canonical=url=>policy.canonical(url);
+    const buffered=(record,plural,singular)=>[
+      ...(Array.isArray(record?.[plural])?record[plural]:[]),
+      ...(record?.[singular]?[record[singular]]:[])
+    ];
     function requireUrl(url) {
       const value=canonical(url);
       if(!value)throw Error('Goal доступен только в сохранённом чате ChatGPT');
@@ -236,11 +240,12 @@
               newPromptKey===record.operation.baselineKey)
             throw Error('Не подтверждено новое пользовательское сообщение Goal');
           const stop=record.stopRequested,pause=record.pauseRequested;
-          const early=record.earlyCompletion?.promptKey===newPromptKey?record.earlyCompletion:null;
+          const early=buffered(record,'earlyCompletions','earlyCompletion')
+            .find(item=>item.promptKey===newPromptKey)||null;
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
             expectedPromptKey:newPromptKey,handoffPending:false,operation:null,
-            earlyCompletion:stop?null:early,
+            earlyCompletion:stop?null:early,earlyCompletions:[],
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
           await save(next);
@@ -272,9 +277,11 @@
             record.operation.status!=='reserved'&&nativeVerified===true&&
             promptKey!==record.operation.baselineKey&&
             promptKey.startsWith(new URL(target).pathname+'|')&&typeof userId==='string'&&userId) {
-          if(record.earlyCompletion)return {ok:false};
-          const next={...record,earlyCompletion:{url:target,tabId,completionKey,promptKey,response,
-            nativeVerified,rawExact,userId}};
+          const saved=buffered(record,'earlyCompletions','earlyCompletion');
+          if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
+          const next={...record,earlyCompletion:null,
+            earlyCompletions:[...saved,{url:target,tabId,completionKey,promptKey,response,
+              nativeVerified,rawExact,userId}].slice(-6)};
           await event('completion_staged',next,tabId,{completionKey,promptKey});
           await save(next);
           return {ok:true,staged:true};
@@ -284,7 +291,8 @@
             (record.handoffPending&&(!record.handoffAcceptedUserId||userId!==record.handoffAcceptedUserId)))
           return {ok:false};
         const outcome=policy.decision(record,response,rawExact,nativeVerified,now());
-        let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,handoffPending:false,earlyCompletion:null};
+        let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
+          handoffPending:false,earlyCompletion:null,earlyCompletions:[]};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
         else if(outcome==='complete')next={...next,phase:'completed',reason:'Модель ответила точным маркером GOAL_COMPLETE'};
         else if(outcome==='budget'||outcome==='deadline')
@@ -358,9 +366,11 @@
       return serialize(async()=>{
         const old=await read(source);
         if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)return {ok:false};
-        if(old.handoffEarlyCompletion)return {ok:false};
-        const next={...old,handoffEarlyCompletion:{url:target,tabId,completionKey,promptKey,response,
-          nativeVerified,rawExact,userId}};
+        const saved=buffered(old,'handoffEarlyCompletions','handoffEarlyCompletion');
+        if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
+        const next={...old,handoffEarlyCompletion:null,
+          handoffEarlyCompletions:[...saved,{url:target,tabId,completionKey,promptKey,response,
+            nativeVerified,rawExact,userId}].slice(-6)};
         await event('handoff_completion_staged',next,tabId,{handoffId,completionKey,promptKey});
         await save(next);
         return {ok:true};
@@ -379,12 +389,14 @@
           throw Error('Нативный ID перенесённого пользовательского сообщения не подтверждён');
         if(existing&&!['completed','stopped','blocked','moved'].includes(existing.phase))
           throw Error('В новом чате уже есть другая активная цель');
-        const retained=old.handoffEarlyCompletion?.userId===acceptedUserId&&
-          old.handoffEarlyCompletion.url===target?old.handoffEarlyCompletion:null;
-        const moved={...old,phase:'moved',reason:'Цель перенесена в '+target,operation:null,handoffEarlyCompletion:null};
+        const retained=buffered(old,'handoffEarlyCompletions','handoffEarlyCompletion')
+          .find(item=>item.userId===acceptedUserId&&item.url===target)||null;
+        const moved={...old,phase:'moved',reason:'Цель перенесена в '+target,
+          operation:null,handoffEarlyCompletion:null,handoffEarlyCompletions:[]};
         const next={...old,url:target,phase:old.preHandoffPhase==='paused'?'paused':'waiting',
           reason:'',expectedPromptKey:null,handoffPending:true,handoffAcceptedUserId:acceptedUserId,
-          operation:null,pendingCompletion:null,earlyCompletion:retained,handoffEarlyCompletion:null};
+          operation:null,pendingCompletion:null,earlyCompletion:retained,earlyCompletions:[],
+          handoffEarlyCompletion:null,handoffEarlyCompletions:[]};
         await event('handoff_confirmed',next,tabId,{sourceUrl:source,targetUrl:target,handoffId});
         await storage.set({[key(source)]:moved,[key(target)]:next});
         return retained;
