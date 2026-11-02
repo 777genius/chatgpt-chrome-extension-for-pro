@@ -116,7 +116,7 @@ function render(): void {
     (journal?.storageError ? "\n⚠️ Ошибка записи: " + journal.storageError : "");
   element("more").hidden = entries.length <= limit;
 }
-async function refresh(): Promise<void> {
+async function refresh(): Promise<boolean> {
   try {
     const composed = (globalThis as typeof globalThis & {
       ChatGPTJournalModular?: { read(transport: {
@@ -128,6 +128,7 @@ async function refresh(): Promise<void> {
       sendMessage: (message) => chrome.runtime.sendMessage(message),
     }));
     render();
+    return true;
   } catch (error: unknown) {
     // A failed refresh must not let Export hand out a previously loaded
     // snapshot as though it were the current durable journal.
@@ -136,14 +137,15 @@ async function refresh(): Promise<void> {
     element("more").hidden = true;
     element("status").textContent = "Не удалось прочитать журнал: " +
       (error instanceof Error ? error.message : String(error));
+    return false;
   }
 }
 element("refresh").addEventListener("click", () => { void refresh(); });
 element("filter").addEventListener("input", () => { limit = 200; render(); });
 element("more").addEventListener("click", () => { limit += 200; render(); });
 element("export").addEventListener("click", async () => {
-  await refresh();
-  if (!journal) return;
+  const refreshed = await refresh();
+  if (!refreshed || !journal) return;
   const url = URL.createObjectURL(new Blob([JSON.stringify(journal, null, 2)], {
     type: "application/json;charset=utf-8",
   }));
