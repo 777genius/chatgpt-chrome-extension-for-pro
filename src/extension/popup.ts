@@ -11,10 +11,15 @@ interface PopupChrome {
 }
 declare const chrome: PopupChrome;
 
-function element<T extends HTMLElement>(id: string): T {
+function element(id: string): HTMLElement {
   const found = document.getElementById(id);
   if (!found) throw new Error("Missing popup element: " + id);
-  return found as T;
+  return found;
+}
+function buttonElement(id: string): HTMLButtonElement {
+  const found = element(id);
+  if (!(found instanceof HTMLButtonElement)) throw new Error("Popup button expected: " + id);
+  return found;
 }
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -24,8 +29,8 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const button = element<HTMLButtonElement>("test");
-const status = element<HTMLElement>("status");
+const button = buttonElement("test");
+const status = element("status");
 
 button.addEventListener("click", async () => {
   button.disabled = true;
@@ -41,7 +46,7 @@ button.addEventListener("click", async () => {
   }
 });
 
-element<HTMLButtonElement>("handoff").addEventListener("click", async () => {
+buttonElement("handoff").addEventListener("click", async () => {
   const result = record(await chrome.runtime.sendMessage({ type: "CHATGPT_HANDOFF_DOWNLOAD" }));
   if (!result?.ok || typeof result.text !== "string") {
     status.textContent = "В этой вкладке пока нет сохранённой передачи.";
@@ -57,12 +62,12 @@ element<HTMLButtonElement>("handoff").addEventListener("click", async () => {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
 
-element<HTMLButtonElement>("journal").addEventListener("click", () => {
+buttonElement("journal").addEventListener("click", () => {
   void chrome.tabs.create({ url: chrome.runtime.getURL("journal.html") });
 });
 
-const titleRecovery = element<HTMLElement>("title-recovery");
-const recoverTitle = element<HTMLButtonElement>("recover-title");
+const titleRecovery = element("title-recovery");
+const recoverTitle = buttonElement("recover-title");
 interface RecoveryInfo {
   operationId: string;
   tabId: number;
@@ -79,7 +84,7 @@ void chrome.runtime.sendMessage({ type: "CHATGPT_HANDOFF_TITLE_INFO" }).then((in
     operationId: value.operationId, tabId: value.tabId,
     targetUrl: value.targetUrl, desiredTitle: value.desiredTitle,
   };
-  element<HTMLElement>("desired-title").textContent = value.desiredTitle;
+  element("desired-title").textContent = value.desiredTitle;
   titleRecovery.hidden = false;
 }).catch(() => {});
 
