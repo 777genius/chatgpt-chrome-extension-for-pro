@@ -1,19 +1,19 @@
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,writeFile,chmod,lstat,readdir,rm,symlink} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,chmod,lstat,readdir,rm,symlink,open,mkdir,rename} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {randomBytes} from 'node:crypto';
 import {createServer} from 'node:http';
-import {spawnSync,execFile} from 'node:child_process';
+import {spawnSync,execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import {pathToFileURL} from 'node:url';
 import {runInNewContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
-import {runMemory,parseArgs,openStore,isolateKey,connect,MemoryFault,PAGE_GUARD,type Call,type Options} from '../scripts/chrome-memory.mts';
+import {runMemory,parseArgs,openStore,acquireLock,isolateKey,connect,MemoryFault,PAGE_GUARD,type Call,type Options} from '../scripts/chrome-memory.mts';
 
 const root=await mkdtemp(join(tmpdir(),'chrome-memory-test-'));
 const mb=1024**2;
-type Fixture={id:string;url:string;isolate:string;heap:number;visibility:'hidden'|'visible';focused:boolean;generating:boolean;activityKnown:boolean;media:boolean;invalidHeap?:boolean};
+type Fixture={id:string;url:string;guardUrl?:string;isolate:string;heap:number;visibility:'hidden'|'visible';focused:boolean;generating:boolean;activityKnown:boolean;media:boolean;invalidHeap?:boolean};
 function page(id:string,isolate=id):Fixture {return {id,url:`https://example.test/${id}`,isolate,heap:400*mb,visibility:'hidden',focused:false,generating:false,activityKnown:true,media:false};}
 function fake(pages:Fixture[],hook?:(method:string,session?:string)=>void) {
   const calls:{method:string;params:Record<string,unknown>;session?:string}[]=[];
@@ -30,7 +30,7 @@ function fake(pages:Fixture[],hook?:(method:string,session?:string)=>void) {
     if(method==='Memory.getDOMCounters')return {documents:1,nodes:500,jsEventListeners:30};
     if(method==='Runtime.evaluate') {
       assert.equal(params.expression,PAGE_GUARD);
-      return {result:{value:{url:current.url,title:'Fixture',visibility:current.visibility,focused:current.focused,ready:'complete',generating:current.generating,activityKnown:current.activityKnown,media:current.media}}};
+      return {result:{value:{url:current.guardUrl??current.url,title:'Fixture',visibility:current.visibility,focused:current.focused,ready:'complete',generating:current.generating,activityKnown:current.activityKnown,media:current.media}}};
     }
     if(method==='HeapProfiler.collectGarbage') {
       gc++;if(hang)return new Promise(()=>{});
@@ -45,6 +45,80 @@ let serial=0;
 const options=(overrides:Partial<Options>={}):Options=>({...parseArgs([]),stateDir:join(root,`state-${++serial}`),timeoutMs:100,...overrides});
 const ledger=async(dir:string)=>JSON.parse(await readFile(join(dir,'ledger.json'),'utf8'));
 try {
+  // Each regression must fail independently on the reviewed implementation.
+  const regressions:Array<[string,()=>Promise<void>]>=[
+    ['integer timeout',async()=>{assert.throws(()=>parseArgs(['--timeout-ms','1.5']),/invalid-options/);}],
+    ['non-http peer census',async()=>{
+      const blank=page('blank','selected');blank.url='';blank.guardUrl='about:blank';blank.focused=true;
+      const f=fake([page('selected'),blank]),report=await runMemory(options({collect:true}),f.call);
+      assert.equal(report.pages.length,2,'empty/about:blank pages must participate in the peer census');
+      assert.ok(f.calls.some(call=>call.method==='Runtime.getIsolateId'&&call.session==='session-blank'));
+      assert.equal(f.gc,0,'a focused non-HTTP shared peer cannot be hidden from the collection guard');
+      assert.notEqual(report.pages.find(page=>page.target.targetId==='blank')?.reason,'url-changed','empty target URL is the about:blank document identity');
+    }],
+    ['unknown non-http peers',async()=>{
+      const peer=page('internal');peer.url='chrome://settings';
+      const f=fake([page('selected'),peer],(method,session)=>{if(method==='Runtime.getIsolateId'&&session==='session-internal')throw new MemoryFault('isolate-unknown');});
+      const report=await runMemory(options({collect:true,includeActive:true}),f.call);
+      assert.equal(report.unmeasuredPeerCount,1);assert.equal(f.gc,0);
+    }],
+    ['non-http direct eligibility',async()=>{
+      const blank=page('blank');blank.url='about:blank';const f=fake([blank]);
+      const report=await runMemory(options({collect:true,includeActive:true,target:'blank'}),f.call);
+      assert.equal(report.pages.length,1);assert.equal(f.gc,0);assert.equal(report.groups[0].reason,'non-http-page');
+    }],
+    ['existing renderer peer joins',async()=>{
+      for(const selected of [false,true])for(const afterIntent of [false,true]) {
+        const peer=page('peer');peer.focused=true;let lists=0;
+        const f=fake([page('selected'),peer],method=>{if(method==='Target.getTargets'&&++lists===(afterIntent?4:2))peer.isolate='selected';});
+        const report=await runMemory(options({collect:true,...(selected?{target:'selected'}:{})}),f.call);
+        assert.equal(f.gc,0,'an existing page joining the selected renderer must stop GC even without target/URL changes');
+        assert.equal(report.groups.find(group=>group.isolateId==='selected')?.reason,'isolate-changed');
+      }
+    }],
+    ['lock setup failure cleanup',async()=>{
+      for(const operation of ['writeFile','sync'] as const) {
+        const directory=join(root,`failed-lock-${operation}`);await mkdir(directory,{mode:0o700});
+        const probe=await open(join(root,'handle-probe'),'a');const prototype=Object.getPrototypeOf(probe);await probe.close();
+        const original=prototype[operation];prototype[operation]=async()=>{throw new Error('synthetic-lock-setup-failure');};
+        try {await assert.rejects(acquireLock(directory,'failed'),/synthetic-lock-setup-failure/);}
+        finally {prototype[operation]=original;}
+        assert.deepEqual(await readdir(directory),[],'a failed lock setup must remove its own file');
+        const release=await acquireLock(directory,'next');await release();
+      }
+    }],
+    ['exact owned lock cleanup',async()=>{
+      const directory=join(root,'replaced-lock');await mkdir(directory,{mode:0o700});
+      const release=await acquireLock(directory,'original'),path=join(directory,'lock.json');
+      await rename(path,join(directory,'original-lock.json'));
+      await writeFile(path,'replacement',{mode:0o600});
+      await assert.rejects(release(),/lock-changed/);
+      assert.equal(await readFile(path,'utf8'),'replacement','cleanup must preserve a replacement lock');
+      const failedDirectory=join(root,'replaced-during-setup');await mkdir(failedDirectory,{mode:0o700});
+      const failedPath=join(failedDirectory,'lock.json'),probe=await open(join(root,'handle-probe'),'a');
+      const prototype=Object.getPrototypeOf(probe);await probe.close();const original=prototype.sync;
+      prototype.sync=async()=>{await rename(failedPath,join(failedDirectory,'original-lock.json'));await writeFile(failedPath,'replacement',{mode:0o600});throw new Error('synthetic-setup-replacement');};
+      try {await assert.rejects(acquireLock(failedDirectory,'failed'),/lock-changed/);}
+      finally {prototype.sync=original;}
+      assert.equal(await readFile(failedPath,'utf8'),'replacement','failed setup cannot delete a replacement lock');
+    }],
+    ['signal lock release',async()=>{
+      for(const signal of ['SIGINT','SIGTERM'] as const) {
+        const directory=join(root,`signal-${signal}`),moduleURL=pathToFileURL(resolve('scripts/chrome-memory.mts')).href;
+        const child=spawn(process.execPath,['--input-type=module','-e',`const {openStore}=await import(${JSON.stringify(moduleURL)});const store=await openStore(${JSON.stringify(directory)},'signal-run');await store.save();console.log('ready');setInterval(()=>{},1000);`],{stdio:['ignore','pipe','pipe'],timeout:5000,killSignal:'SIGKILL'});
+        const closed=new Promise<{code:number|null;signal:NodeJS.Signals|null}>(yes=>child.once('close',(code,signal)=>yes({code,signal})));
+        try {
+          await new Promise<void>((yes,no)=>{child.once('error',no);child.once('close',()=>no(new Error('child exited before lock acquisition')));child.stdout.once('data',()=>yes());});
+          child.kill(signal);const exit=await closed;
+          assert.deepEqual(await readdir(directory),['ledger.json'],'handled termination releases the lock and preserves the ledger');
+          assert.equal(exit.code,signal==='SIGINT'?130:143);
+        } finally {if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');}
+      }
+    }],
+  ];
+  const failures:string[]=[];
+  for(const [name,check] of regressions)try{await check();}catch(error){failures.push(`${name}: ${String(error)}`);}
+  assert.deepEqual(failures,[],'review regressions');
   const base=parseArgs([]);assert.equal(base.collect,false);assert.equal(base.maxTabs,3);assert.equal(base.minHeapMB,256);
   assert.equal(base.allowUnmeasuredPeers,false);
   for(const flags of [['--allow-unmeasured-peers'],['--collect','--allow-unmeasured-peers'],['--include-active','--allow-unmeasured-peers']])assert.throws(()=>parseArgs(flags),/invalid-options/);
@@ -58,7 +132,7 @@ try {
   {
     const f=fake([page('idle')]),o=options();
     const report=await runMemory(o,f.call);
-    assert.equal(f.gc,0,'default inspect must never collect');assert.equal(report.pages.length,1,'only HTTP page targets are inspected');
+    assert.equal(f.gc,0,'default inspect must never collect');assert.equal(report.pages.length,1,'worker targets are excluded from the page census');
     assert.equal((await lstat(o.stateDir)).mode&0o777,0o700);assert.equal((await lstat(report.reportPath)).mode&0o777,0o600);
     assert.match(report.note,/does not prove physical RAM/);
     assert.ok(f.calls.some(call=>call.method==='Target.detachFromTarget'));

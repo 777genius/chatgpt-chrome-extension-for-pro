@@ -21,13 +21,18 @@ await evaluate("globalThis.second={...card,cardKey:'task-two',anchorKey:'turn-tw
 assert.equal((await evaluate('readChatStatus(url)')).status.kind,'deferred');
 const resumed=await evaluate("updateDeferredChat(url,{...second,phase:'resumed',generating:true,startedAt:500},statusReceipt())");
 assert.equal(resumed.status.kind,'loading','real native resumption replaces the clock with loading');
-assert.equal((await evaluate('stopChatLoading(url,500,statusReceipt())')).status,null);
+ctx.resumedReceipt=structuredClone(resumed.status.receipt);
+assert.equal((await evaluate('stopChatLoading(url,500,statusReceipt(),resumedReceipt)')).status,null);
 assert.equal((await evaluate("updateDeferredChat(url,{...second,phase:'resumed',generating:true,startedAt:500},statusReceipt())")).status,null,'duplicate resumption cannot revive a stopped generation');
 await evaluate("globalThis.third={...card,cardKey:'task-three'};updateDeferredChat(url,third,statusReceipt())");
+const beforeCancelledSend=await evaluate('readChatStatus(url)');
 await evaluate('stopChatLoading(url,600,statusReceipt())');
-assert.equal((await evaluate("updateDeferredChat(url,{...third,phase:'resumed',generating:true,startedAt:600},statusReceipt())")).status,null,'stop before resume write consumes the pending card');
+const afterCancelledSend=await evaluate('readChatStatus(url)');
+assert.deepEqual(afterCancelledSend,beforeCancelledSend,'an unbound cancelled retry cannot consume or hide a pending scheduled task');
+assert.equal((await evaluate("updateDeferredChat(url,{...third,phase:'pending'},statusReceipt())")).status.kind,'deferred','the same card remains eligible after cancel-before-send');
+assert.equal((await evaluate("updateDeferredChat(url,{...third,phase:'resumed',generating:true,startedAt:600},statusReceipt())")).status.kind,'loading','the genuine later scheduled continuation can still resume');
 assert.equal((await evaluate("updateDeferredChat('https://chatgpt.com/c/other',card,statusReceipt())")).status.kind,'deferred');
-assert.equal((await evaluate('readChatStatus(url)')).status,null,'another chat has independent waiting state');
+assert.equal((await evaluate('readChatStatus(url)')).status.kind,'loading','another chat has independent waiting state');
 
 await evaluate("globalThis.errorURL='https://chatgpt.com/c/newer-error';updateDeferredChat(errorURL,card,statusReceipt());reserveChatNotification(errorURL,7,'error',700,statusReceipt())");
 assert.equal((await evaluate("updateDeferredChat(errorURL,{...card,phase:'resumed',generating:true,startedAt:800},statusReceipt())")).status.kind,'error','an old card resumption cannot replace a newer genuine error with observed loading');
@@ -41,4 +46,6 @@ await evaluate("globalThis.orderURL='https://chatgpt.com/c/observation-order';gl
 assert.equal((await evaluate("updateDeferredChat(orderURL,{...card,phase:'none'},staleNone)")).status.kind,'deferred','a stale none event cannot clear a newer card observation');
 await evaluate('globalThis.staleStop=statusReceipt();updateDeferredChat(orderURL,card,statusReceipt())');
 assert.equal((await evaluate('stopChatLoading(orderURL,1100,staleStop)')).status.kind,'deferred','a stop captured before a later same-card observation cannot consume that card');
-console.log('Deferred state: scheduler result, unknown card, real error, new request, resumed generation, stop races and per-chat isolation passed.');
+await evaluate("globalThis.legacyURL='https://chatgpt.com/c/legacy-card';reserveChatNotification(legacyURL,7,'success',1200,statusReceipt());updateDeferredChat(legacyURL,{...card,cardKey:'turn-one|legacy-task'},statusReceipt())");
+assert.equal((await evaluate("updateDeferredChat(legacyURL,{...card,phase:'none',cardKey:'[\"turn-one\",\"\",0]',reason:'historical-card'},statusReceipt())")).status.kind,'success','a historical native card clears its old-format persisted clock after upgrade');
+console.log('Deferred state: scheduler result, unknown card, real error, new request, resumed generation, stop races, legacy card identity and per-chat isolation passed.');

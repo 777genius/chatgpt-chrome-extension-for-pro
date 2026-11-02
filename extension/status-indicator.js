@@ -99,6 +99,7 @@ globalThis.ChatGPTStatusIndicator=Object.freeze({
     const route=()=>{void refresh();};
     window.addEventListener('popstate',route);
     void refresh();
-    return Object.freeze({accept,refresh,tick,dispose,loadingStartedAt:()=>status?.kind==='loading'?status.eventAt:null});
+    return Object.freeze({accept,refresh,tick,dispose,loadingStartedAt:()=>status?.kind==='loading'?status.eventAt:null,
+      loadingGeneration:()=>status?.kind==='loading'?{startedAt:status.eventAt,startReceipt:status.receipt?{...status.receipt}:null}:null});
   }
 });

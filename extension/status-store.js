@@ -42,13 +42,15 @@ function migrateChatStatuses() {
         }
         if(['notification.requested','response.complete'].includes(row.kind)) {
           const isError=row.kind==='notification.requested';
-          if(!url||!Number.isInteger(row.tabId)){notices.delete(row.tabId);continue;}
+          if(!url||!Number.isInteger(row.tabId))continue;
           const state=stateFor(url);
           state.sequence=sequence;state.revision=sequence;
           // The old journal proves a result, but cannot prove whether it was
           // viewed. Do not invent unread history while importing it.
           state.status={kind:isError?'error':'success',eventAt:at(row),sequence,receipt:{epoch:'journal',order:sequence},unread:false};
-          notices.set(row.tabId,{url,isError,title:`${isError?'❌ ':''}${cleanSessionTitle(row.title)}`,preview:truncateResponse(row.response)});
+          const pending=notices.get(row.tabId)||[];
+          pending.push({url,isError,title:`${isError?'❌ ':''}${cleanSessionTitle(row.title)}`,preview:truncateResponse(row.response)});
+          notices.set(row.tabId,pending);
         } else if(row.kind==='retry.manual_reset'&&url&&Number.isInteger(row.tabId)) {
           manuals.set(row.tabId,{url,at:at(row)});
         } else if(row.kind==='request.started'&&row.automatic===false&&url) {
@@ -63,14 +65,15 @@ function migrateChatStatuses() {
           }
         } else if(row.kind==='notification.result'&&row.warning!==true&&row.notification==='fulfilled'&&active.has(row.notificationId)&&
             /^chatgpt-prompt-bound:\d+:/.test(row.notificationId)) {
-          const notice=notices.get(row.tabId),id=row.notificationId;
-          const matches=notice&&url===notice.url&&row.isError===notice.isError&&
+          const pending=notices.get(row.tabId)||[],id=row.notificationId;
+          const matches=pending.filter(notice=>url===notice.url&&row.isError===notice.isError&&
             String(row.title||'').replace(/\s+/g,' ').trim()===notice.title&&truncateResponse(row.message)===notice.preview&&
-            Number(/^chatgpt-prompt-bound:(\d+):/.exec(id)[1])===row.tabId;
-          if(!matches||bindings.has(id)&&bindings.get(id).url!==url) {
+            Number(/^chatgpt-prompt-bound:(\d+):/.exec(id)[1])===row.tabId);
+          if(matches.length!==1||bindings.has(id)&&bindings.get(id).url!==url) {
             bindings.delete(id);uncertain.add(id);continue;
           }
           if(uncertain.has(id))continue;
+          notices.set(row.tabId,pending.filter(notice=>notice!==matches[0]));
           bindings.set(id,{id,url,tabId:row.tabId,sequence,receipt:{epoch:'journal',order:sequence},state:'created'});
           stateFor(url).sequence=Math.max(stateFor(url).sequence,sequence);
         }
@@ -96,7 +99,9 @@ function migrateChatStatuses() {
 function statusBefore(value,fence) {
   if(!value)return true;
   if(value.epoch===fence.epoch)return value.order<=fence.order;
-  return value.epoch!==statusEpoch;
+  // Only this worker's receipts are known to follow retained prior epochs.
+  // Two historical workers have no trustworthy ordering after another restart.
+  return fence.epoch===statusEpoch&&value.epoch!==statusEpoch;
 }
 function statusView(record) {
   const pending=record.deferred,status=record.status;
@@ -118,7 +123,9 @@ function updateDeferredChat(url,event,receipt) {
     if(!key||!['pending','unknown','resumed','none'].includes(event.phase))return {value:statusView(record)};
     const pendingReceipt=record.deferred?.observedThrough||record.deferred?.receipt;
     if(pendingReceipt&&!statusBefore(pendingReceipt,receipt))return {value:statusView(record)};
-    const matching=record.deferred?.cardKey===key;
+    const legacyCard=record.deferred&&event.phase==='none'&&['historical-card','task-disabled'].includes(event.reason)&&
+      record.deferred?.anchorKey===event.anchorKey&&record.deferred.cardKey.startsWith(`${event.anchorKey}|`);
+    const matching=record.deferred?.cardKey===key||legacyCard;
     if(['pending','unknown'].includes(event.phase)) {
       if((record.consumedDeferredCards||[]).includes(key)||event.phase==='unknown'&&!matching)return {value:statusView(record)};
       if(matching&&record.deferred.phase===event.phase){record.deferred.observedThrough=receipt;return {write:true,value:statusView(record)};}
@@ -128,7 +135,7 @@ function updateDeferredChat(url,event,receipt) {
     if(event.phase==='resumed')consumeDeferredCard(record,key);
     if(!matching)return {write:event.phase==='resumed',value:statusView(record)};
     const newerActive=record.status&&['error','loading'].includes(record.status.kind)&&statusBefore(record.deferred.receipt,record.status.receipt);
-    consumeDeferredCard(record,key);delete record.deferred;
+    consumeDeferredCard(record,record.deferred.cardKey);consumeDeferredCard(record,key);delete record.deferred;
     if(!newerActive&&event.phase==='resumed'&&event.generating===true&&Number.isFinite(event.startedAt)&&event.startedAt>0&&(!record.status||statusBefore(record.status.receipt,receipt))) {
       record.status={kind:'loading',eventAt:event.startedAt,receipt,observed:true};
     }
@@ -174,18 +181,14 @@ function markChatLoading(url,eventAt,receipt) {
 }
 function stopChatLoading(url,startedAt,receipt,startReceipt=null) {
   return withChatStatus(url,record=>{
-    const matching=record.status?.kind==='loading'&&record.status.eventAt===startedAt;
-    const generation=matching?record.status.receipt:startReceipt;
-    if(!generation){
-      const pending=record.deferred;
-      const newerActive=record.status&&pending&&['loading','error'].includes(record.status.kind)&&statusBefore(pending.receipt,record.status.receipt);
-      if(pending&&!newerActive&&statusBefore(pending.observedThrough||pending.receipt,receipt)&&Number.isFinite(startedAt)&&startedAt>0){
-        consumeDeferredCard(record,record.deferred.cardKey);delete record.deferred;
-        if(record.status?.kind!=='error')record.status=null;record.revision++;
-        return {write:true,value:statusView(record)};
-      }
-      return {value:statusView(record)};
-    }
+    // Millisecond timestamps can identify multiple requests. Only the caller's
+    // bound generation receipt can authorize a stop; an unbound cancelled send
+    // says nothing about a scheduled task that is still waiting.
+    const generation=startReceipt;
+    if(!generation||typeof generation.epoch!=='string'||!Number.isSafeInteger(generation.order)||generation.order<=0||
+        !Number.isFinite(startedAt)||startedAt<=0||!statusBefore(generation,receipt))return {value:statusView(record)};
+    const matching=record.status?.kind==='loading'&&record.status.eventAt===startedAt&&
+      record.status.receipt?.epoch===generation.epoch&&record.status.receipt?.order===generation.order;
     if(!record.loadingStoppedThrough||!statusBefore(generation,record.loadingStoppedThrough))record.loadingStoppedThrough=generation;
     if(matching&&statusBefore(record.status.receipt,receipt)){record.status=null;record.revision++;}
     return {write:true,value:statusView(record)};

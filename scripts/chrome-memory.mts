@@ -22,6 +22,8 @@ const missing=(error:unknown)=>typeof error==='object'&&error!==null&&'code' in 
 const owned=(stat:{uid:number})=>!process.getuid||stat.uid===process.getuid();
 const finite=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
 const httpPage=(target:Target)=>target.type==='page'&&/^https?:\/\//.test(target.url);
+// CDP reports an empty target URL for some initial about:blank documents.
+const sameDocumentURL=(target:Target,url:string)=>target.url===url||target.url===''&&url==='about:blank';
 
 async function privateDirectory(path:string) {
   await mkdir(path,{recursive:true,mode:0o700});
@@ -52,14 +54,28 @@ async function atomicJSON(path:string,value:unknown) {
 export async function acquireLock(stateDir:string,runId:string) {
   const path=join(stateDir,'lock.json');
   const file=await open(path,'wx',0o600).catch(()=>fault('state-locked'));
-  const identity=await file.stat();
-  try {await file.writeFile(JSON.stringify({schema:1,runId,at:Date.now(),pid:process.pid}));await file.sync();}
-  finally {await file.close();}
-  return async()=>{
-    const current=await lstat(path);
-    if(current.ino!==identity.ino||current.dev!==identity.dev)fault('lock-changed');
-    await unlink(path);
+  let identity:Awaited<ReturnType<typeof file.stat>>|undefined,cleanup:Promise<void>|undefined,interrupted=false;
+  const release=()=>{
+    cleanup??=(async()=>{
+      process.removeListener('SIGINT',onInterrupt);process.removeListener('SIGTERM',onTerminate);
+      identity??=await file.stat();
+      const current=await lstat(path);
+      if(current.ino!==identity.ino||current.dev!==identity.dev)fault('lock-changed');
+      await unlink(path);
+    })();
+    return cleanup;
   };
+  const stop=(status:number)=>{interrupted=true;void release().then(()=>process.exit(status),()=>process.exit(status));};
+  const onInterrupt=()=>stop(130),onTerminate=()=>stop(143);
+  process.once('SIGINT',onInterrupt);process.once('SIGTERM',onTerminate);
+  try {
+    identity=await file.stat();
+    await file.writeFile(JSON.stringify({schema:1,runId,at:Date.now(),pid:process.pid}));await file.sync();await file.close();
+    return Object.assign(release,{interrupted:()=>interrupted});
+  } catch(error) {
+    try {await release();}finally{await file.close().catch(()=>{});}
+    throw error;
+  }
 }
 async function readLedger(path:string):Promise<Ledger> {
   let value;
@@ -176,12 +192,15 @@ export async function runMemory(options:Options,raw:Call,now=Date.now):Promise<R
   const runId=randomUUID(),reportPath=join(options.stateDir,`report-${runId}.json`);
   const report:Report={schema:1,runId,mode:options.collect?'collect':'inspect',startedAt:now(),maxIsolates:options.maxTabs,allowUnmeasuredPeers:options.allowUnmeasuredPeers,unmeasuredPeerCount:0,sharedActivityUnverified:false,pages:[],groups:[],errors:[],reportPath,
     note:'Heap used/allocated are V8 isolate measurements. OS RSS is not measured; a smaller JS heap does not prove physical RAM was released.'};
-  let release:(()=>Promise<void>)|undefined;
-  const call:Call=(method,params={},sessionId)=>bounded(raw(method,params,sessionId),options.timeoutMs);
+  let release:Awaited<ReturnType<typeof acquireLock>>|undefined;
+  const call:Call=(method,params={},sessionId)=>{
+    if(release?.interrupted())fault('interrupted');
+    return bounded(raw(method,params,sessionId),options.timeoutMs);
+  };
   const targets=async()=>{
     const result=await call('Target.getTargets') as {targetInfos:Target[]};
     if(!Array.isArray(result?.targetInfos))fault('invalid-target-list');
-    return result.targetInfos.filter(target=>typeof target?.targetId==='string'&&typeof target.url==='string'&&httpPage(target));
+    return result.targetInfos.filter(target=>typeof target?.targetId==='string'&&typeof target.url==='string'&&target.type==='page');
   };
   const isolate=async(session:string)=>{
     const result=await call('Runtime.getIsolateId',{},session) as {id:string};
@@ -210,8 +229,8 @@ export async function runMemory(options:Options,raw:Call,now=Date.now):Promise<R
         page.sessionId=attached.sessionId;page.isolateId=await isolate(page.sessionId);
         if(options.target&&target.targetId!==options.target){page.reason='target-not-selected';continue;}
         page.sample=await sample(page.sessionId);
-        if(page.sample.guard.url!==target.url)fault('url-changed');
-        page.reason=guardReason(page.sample.guard,options.includeActive)||undefined;
+        if(!sameDocumentURL(target,page.sample.guard.url))fault('url-changed');
+        page.reason=!httpPage(target)?'non-http-page':guardReason(page.sample.guard,options.includeActive)||undefined;
       }catch(error){page.reason=code(error);}
     }
     const groups=new Map<string,Page[]>();
@@ -240,11 +259,13 @@ export async function runMemory(options:Options,raw:Call,now=Date.now):Promise<R
       const recheck=async()=>{
         const current=await targets();
         if(signature(current)!==initialSignature)fault('target-set-changed');
+        // An existing page can move into this renderer without changing its URL
+        // or the target list. Revalidate the entire initially measured census.
+        for(const page of report.pages)if(page.isolateId&&await isolate(page.sessionId!)!==page.isolateId)fault('isolate-changed');
         for(const page of pages) {
           if(!current.some(target=>target.targetId===page.target.targetId&&target.url===page.target.url))fault('url-changed');
-          if(await isolate(page.sessionId!)!==isolateId)fault('isolate-changed');
           const state=await guard(page.sessionId!);
-          if(state.url!==page.target.url)fault('url-changed');
+          if(!sameDocumentURL(page.target,state.url))fault('url-changed');
           const reason=guardReason(state,options.includeActive);if(reason)fault(reason);
         }
         if(signature(await targets())!==initialSignature)fault('target-set-changed');
@@ -261,7 +282,7 @@ export async function runMemory(options:Options,raw:Call,now=Date.now):Promise<R
         ledger.entries[key]={...ledger.entries[key],state:'done',at:now(),gc:true};await store.save();
         try {
           await recheck();const after=await sample(primary.sessionId!);
-          if(await isolate(primary.sessionId!)!==isolateId||after.guard.url!==primary.target.url)fault('after-identity-changed');
+          if(await isolate(primary.sessionId!)!==isolateId||!sameDocumentURL(primary.target,after.guard.url))fault('after-identity-changed');
           row.after=after;row.heapUsedDeltaBytes=after.heap.usedSize-row.before.heap.usedSize;row.heapAllocatedDeltaBytes=after.heap.totalSize-row.before.heap.totalSize;
         }
         catch(error){row.error=code(error);}
@@ -313,7 +334,7 @@ export function parseArgs(args:string[]):Options {
     else if(numbers[arg]){const value=Number(args[++index]);if(!Number.isFinite(value)||(numbers[arg]==='minHeapMB'?value<0:value<=0))fault('invalid-options');options[numbers[arg]]=value;}
     else fault('invalid-options');
   }
-  if(options.bridgeConfig&&options.cdp||!Number.isInteger(options.maxTabs)||options.maxTabs>100||options.timeoutMs<1||options.timeoutMs>120000||options.allowUnmeasuredPeers&&(!options.includeActive||!options.collect))fault('invalid-options');
+  if(options.bridgeConfig&&options.cdp||!Number.isInteger(options.maxTabs)||options.maxTabs>100||!Number.isInteger(options.timeoutMs)||options.timeoutMs<1||options.timeoutMs>120000||options.allowUnmeasuredPeers&&(!options.includeActive||!options.collect))fault('invalid-options');
   options.stateDir=resolve(options.stateDir);return options;
 }
 export async function main(args=process.argv.slice(2)) {

@@ -149,3 +149,25 @@ for(const focused of [true,false]) {
   initial.resolve({focused:!focused});await settle();
   assert.deepEqual(applied,[focused],'a newer focus event wins over a stale initial window snapshot');
 }
+
+// Execute the whole worker after suspension: persisted loading must enroll
+// without a page visit, reinjection or a new request.
+{
+  const callbacks=new Map<number,()=>void>();let next=0;
+  const ticks:Tick[]=[];
+  const url='https://chatgpt.com/c/loading';
+  const storage:Record<string,any>={'chatgpt-status:migration':{schema:1},['chatgpt-status:'+url]:{url,revision:2,status:{kind:'loading',eventAt:12,receipt:{epoch:'prior',order:1}}}};
+  const event={addListener(){}};
+  const chrome={runtime:{getManifest:()=>({version:'test'}),onInstalled:event,onStartup:event,onMessage:event},
+    storage:{local:{get:async(keys:string|string[])=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,structuredClone(storage[key])])),set:async(value:Record<string,unknown>)=>Object.assign(storage,value)}},
+    tabs:{query:async()=>[{id:7,url}],get:async()=>({id:7,url}),sendMessage:async(_id:number,message:Tick)=>{ticks.push(message);return {ok:true};},onRemoved:event},
+    windows:{getLastFocused:async()=>({focused:true})},webRequest:{onBeforeRequest:event,onCompleted:event,onErrorOccurred:event},notifications:{onClicked:event}};
+  const world=createContext({chrome,URL,console,
+    setTimeout:(fn:()=>void)=>{const id=++next;callbacks.set(id,fn);return id;},clearTimeout:(id:number)=>callbacks.delete(id)});
+  world.importScripts=(file:string)=>runInContext(readFileSync('extension/'+file,'utf8'),world);
+  runInContext(workerSource,world);await settle();await settle();await settle();
+  assert.equal(callbacks.size,1,'persisted loading re-enrolls in the shared animation clock after worker restart');
+  const [id,fn]=callbacks.entries().next().value!;callbacks.delete(id);fn();await settle();
+  assert.equal(ticks.length,1);assert.equal(ticks[0].url,url);assert.equal(ticks[0].type,'CHATGPT_STATUS_TICK');
+  runInContext('statusAnimation.dispose()',world);assert.equal(callbacks.size,0);
+}

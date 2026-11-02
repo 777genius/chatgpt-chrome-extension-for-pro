@@ -194,7 +194,7 @@ completed.advance(1000);
 completed.poll();
 completed.advance(1000);
 completed.poll();
-for(let i=0;i<8;i++)await Promise.resolve();
+await new Promise<void>(resolve=>setImmediate(resolve));
 assert.equal(completed.intervals.size, 0, 'natural completion clears its polling');
 assert.equal(completed.activeObservers.size, 1);
 assert.equal(completed.sent.filter(message => message.type === 'CHATGPT_RESPONSE_COMPLETE').length, 1,

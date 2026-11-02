@@ -6,6 +6,11 @@ const content = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' +
   readFileSync('extension/content-script.js', 'utf8');
 const worker = readFileSync('extension/service-worker.js', 'utf8');
 const pause = () => new Promise(resolve => setTimeout(resolve, 220));
+async function waitFor(predicate:()=>boolean) {
+  const deadline=Date.now()+8000;
+  while(!predicate()&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.ok(predicate(),'expected durable transition did not finish');
+}
 const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><div aria-hidden="true">decorative</div><div>${text}</div><button>Повторить</button></aside>`;
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
 async function domCheck() {
@@ -16,6 +21,7 @@ async function domCheck() {
       return this.hidden || this.style.display === 'none' ? [] : [{}];
     }});
     const messages: any[] = [], sends: string[] = [], logs: any[] = [];
+    const draftStorage:Record<string,any>={};
     let failJournal = false;let stopCalls=0;
     let now = 1000000, sequence = 0;
     const editor = document.querySelector('#prompt-textarea');
@@ -31,7 +37,22 @@ async function domCheck() {
       URL, AbortController, crypto: globalThis.crypto, Event: window.Event, HTMLTextAreaElement: window.HTMLTextAreaElement,
       MutationObserver: window.MutationObserver, location: { pathname: '/c/example',href:'https://chatgpt.com/c/example' }, performance,
       Date: clock, setTimeout, clearTimeout, setInterval, clearInterval,
-      chrome: { runtime: { id: 'test-extension', sendMessage: async (message: any) => { if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry}; if(message.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,message.delayMs));return {ok:true};} if(message.type === 'CHATGPT_STOP_RECOVERY'){stopCalls++;assert.equal(editor!.textContent,'Сохранить мой черновик','stop must precede replacing the draft');editor!.textContent='';document.querySelector('[data-test-modern-stop]')?.remove();if(!keepRecovery)document.querySelector('[role=status]')?.remove();return {ok:true,stopped:true};} if(message.type === 'CHATGPT_COMPOSER_CONTROL'){if(message.options.action==='send'){document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}return {ok:true,matches:true,ready:true};} if(message.type === 'CHATGPT_LOG_EVENT') {logs.push(message.event);return {ok:!failJournal};} if(message.type === 'CHATGPT_INSPECT_ERROR') return {ok:true,action:'retry'}; if(message.type === 'CHATGPT_HANDOFF_GET') return {ok:true,record:null}; messages.push(message); }, onMessage: { addListener() {} } } } });
+      chrome: { storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime: {id:'test-extension',getManifest:()=>({version:'fixture'}),sendMessage:async(message:any)=>{
+        if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
+        if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return {ok:false};
+        if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
+        if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
+        if(message.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,message.delayMs));return {ok:true};}
+        if(message.type==='CHATGPT_STOP_RECOVERY'){stopCalls++;assert.equal(editor!.textContent,'Сохранить мой черновик','stop must precede replacing the draft');editor!.textContent='';document.querySelector('[data-test-modern-stop]')?.remove();if(!keepRecovery)document.querySelector('[role=status]')?.remove();return {ok:true,stopped:true};}
+        if(message.type==='CHATGPT_COMPOSER_CONTROL'){
+          if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
+          return {ok:true,matches:true,ready:true};
+        }
+        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(failJournal)return {ok:false};context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
+        if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
+        if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
+        messages.push(message);
+      },onMessage:{addListener(){}}}} });
     document.querySelector('button[data-testid="send-button"]')?.addEventListener('click', () => {
       sends.push(editor!.textContent!);
       if (!confirmSend) { setTimeout(() => { now += 11000; }, 50); return; }
@@ -41,6 +62,7 @@ async function domCheck() {
       if(keepRecovery){const status=main.querySelector('[role=status]');if(status)main.append(status);}
       runInContext(`globalThis.__chatgptNotifierAttemptId = '${sequence}'; globalThis.__chatgptNotifierRequestStartedAt = ${now}`, context);
     });
+    runInContext(readFileSync('extension/journal-store.js','utf8'),context);
     runInContext(content, context);
     return { messages, sends, document, context, logs, getStopCalls(){return stopCalls;}, breakJournal(){failJournal=true;},
       advance(ms: number) { now += ms; },
@@ -64,8 +86,8 @@ async function domCheck() {
   assert.match(unknownAfterUpdate.messages[0].retryReason,/Не удалось подтвердить отправку/);
   assert.equal(unknownAfterUpdate.logs.filter(e=>e.kind==='retry.suppressed').length,1);
   unknownAfterUpdate.document.querySelector('aside')!.remove();await pause();
-  await unknownAfterUpdate.fail('Время ожидания доставки сообщения истекло. Попробуйте снова.');
-  assert.equal(unknownAfterUpdate.messages.length,1,'remounting the same suppressed error must not spam alerts');
+  await unknownAfterUpdate.fail('Delivery timed out. Please retry.');
+  assert.equal(unknownAfterUpdate.messages.length,1,'rewording a suppressed error for the same prompt must not spam alerts');
   assert.equal(unknownAfterUpdate.logs.filter(e=>e.kind==='retry.planned').length,0);
 
   const restoredBlock=setup('',true,true,'',{failures:[],blocked:true,reason:'Saved sticky stop'});
@@ -122,13 +144,13 @@ async function domCheck() {
   recovery.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div role="status"><span class="text-chatgpt-recovery">接続を回復しています</span></div>');
   const stop=recovery.document.createElement('button');stop.type='button';stop.setAttribute('data-test-modern-stop','');stop.innerHTML='<svg class="icon-primary-action"><path d="M4.5 5.75C4.5 test-stop-icon"></path></svg>';const body=recovery.document.querySelector('form')!;body.setAttribute('data-composer-body','');body.append(stop);
   await pause();assert.equal(recovery.sends.length,0,'transient recovery must not immediately retry');
-  recovery.advance(3500);await new Promise(r=>setTimeout(r,3700));
+  recovery.advance(3500);await waitFor(()=>recovery.logs.some(event=>event.kind==='draft.restored'));
   assert.deepEqual(recovery.sends,['доделай е2е']);assert.equal(recovery.getStopCalls(),1,'a stalled recovery must stop once before continuing');
   assert.equal(recovery.document.querySelector('#prompt-textarea')!.textContent,'Сохранить мой черновик');
   assert.ok(recovery.logs.some(e=>e.kind==='error.detected'&&e.error==='接続を回復しています'));
   const lingering=setup('',true,true,'',null,true);
   lingering.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div role="status"><span class="text-chatgpt-recovery">Recovery</span></div>');
-  await pause();lingering.advance(3500);await new Promise(r=>setTimeout(r,3700));
+  await pause();lingering.advance(3500);await waitFor(()=>lingering.logs.some(event=>event.kind==='retry.confirmed'));
   assert.equal(lingering.sends.length,1);
   await new Promise(r=>setTimeout(r,700));
   assert.equal(lingering.logs.filter(e=>e.kind==='error.detected').length,1,'old recovery banner must get a new grace period for the new request');
@@ -240,7 +262,7 @@ async function workerCheck() {
   assert.equal(injections.at(-1).target.tabId, 8);
   assert.equal(injections.at(-1).args[0], 123456);
   const tabWorld: any = {};
-  runInContext(`(${injections.at(-1).func.toString()})(123456)`, createContext(tabWorld));
+  runInContext(`(${injections.at(-1).func.toString()})(...${JSON.stringify(injections.at(-1).args)})`, createContext(tabWorld));
   assert.equal(tabWorld.__chatgptNotifierRequestStartedAt, 123456);
   const beforeSteer=injections.length;
   callbacks.before({tabId:8,method:'POST',timeStamp:123999,requestId:'steer-test',documentUrl:'https://chatgpt.com/c/example',url:'https://chatgpt.com/backend-api/f/steer_turn'});await pause();
@@ -451,6 +473,7 @@ async function notificationStatusCheck() {
   await h.request('CHATGPT_PAGE_RETURNED',a);
   assert.equal((await h.request('CHATGPT_STATUS_GET',a)).status.unread,false,'visit acknowledges the result even before OS creation resolves');
   tabs[7].active=false;
+  h.startRequest(a);
   await h.emit(7,'pending-new',false);
   const fresh=pending.shift()!;
   old.resolve(old.id);fresh.resolve(fresh.id);await flush();
@@ -464,6 +487,7 @@ async function notificationStatusCheck() {
   gate=new Promise<void>(resolve=>{release=resolve;});
   const visit=h.request('CHATGPT_PAGE_RETURNED',a);
   tabs[7].active=false;
+  h.startRequest(a);
   await h.emit(7,'after-return',false);
   const afterReturn=notices.at(-1)!.id;
   tabs[7].active=true;

@@ -2,7 +2,7 @@
 
 **Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
-Version **1.5.1** · Chrome / Chromium **116+** · No build required
+Version **1.6.1** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -17,6 +17,7 @@ Version **1.5.1** · Chrome / Chromium **116+** · No build required
 | **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. |
 | **Chat-limit handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. |
 | **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the new chat to be saved before renaming. |
+| **Reload recovery** | Saves request/response bindings and elapsed-time metadata locally. Reattaches to existing tabs after an extension reload; restores safe draft backups without repeating uncertain sends. |
 | **Persistent activity log** | Records chat IDs, source/destination URLs, send intents, sent text, confirmations, retry counts, and stop reasons. Preserves recovery copies across extension updates. |
 | **Safe recovery** | Recognizes a completed response after a failed network stream or extension worker restart. Service warnings do not replace response status. Reports visible errors even when retries are blocked. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
 
@@ -43,7 +44,7 @@ npm run memory -- --cdp http://127.0.0.1:9222
 npm run memory -- --cdp http://127.0.0.1:9222 --collect --max-tabs 3
 ```
 
-Requires Node.js 26+ and an existing local debugging connection. An existing authenticated connection can be reused with `--bridge-config`. Shared heaps are collected once; cooldowns and private reports prevent blind repeats. JavaScript heap savings do **not** guarantee lower physical RAM usage. [Options and safety behavior](docs/memory-cleanup.md).
+Requires Node.js 26+ and an existing local debugging connection. An existing authenticated connection can be reused with `--bridge-config`. Shared heaps are collected once; a private ledger enforces cooldowns and unknown-outcome blocks; reports record results. JavaScript heap savings do **not** guarantee lower physical RAM usage. [Options and safety behavior](docs/memory-cleanup.md).
 
 Strict mode refuses collection when another page's shared heap identity is unknown. `--collect --include-active --allow-unmeasured-peers` is an explicit alternative for measurable heaps; shared activity with unreachable pages remains unverified. Private macOS shortcuts can provide separate **Inspect** and **Clean available memory** actions, using the same private ledger at `$HOME/.local/state/chatgpt-chrome-memory`. [Shortcut behavior and reports](docs/memory-cleanup.md#daily-use-on-macos).
 

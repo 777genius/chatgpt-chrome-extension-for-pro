@@ -17,6 +17,7 @@ async function check(mode:Mode) {
   const editor=document.querySelector('#prompt-textarea')!;editor.textContent=originalDraft;
   const button=document.querySelector('[data-testid="send-button"]')! as HTMLButtonElement;
   const logs:Message[]=[],notifications:Message[]=[],sends:string[]=[];
+  const draftStorage:Record<string,any>={};
   const intervals=new Set<()=>void>();
   let time=1000000,stoppedAt=0,sendAt=0,stops=0,edited=false,resumed=false,nativeInspects=0;
   let receiver:((message:Message)=>void)|undefined;
@@ -26,10 +27,12 @@ async function check(mode:Mode) {
     Date:class extends Date{static now(){return time;}},performance:{now:()=>time},
     // Page timers remain disabled: every readiness wait must use the worker.
     setTimeout:()=>0,clearTimeout(){},setInterval:(fn:()=>void)=>{intervals.add(fn);return fn;},clearInterval:(fn:()=>void)=>{intervals.delete(fn);},
-    chrome:{runtime:{id:'test-extension',onMessage:{addListener:(fn:(message:Message)=>void)=>{receiver=fn;},removeListener(){}},sendMessage:async(message:Message)=>{
+    chrome:{storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime:{id:'test-extension',getManifest:()=>({version:'fixture'}),onMessage:{addListener:(fn:(message:Message)=>void)=>{receiver=fn;},removeListener(){}},sendMessage:async(message:Message)=>{
       if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:null};
+      if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
+      if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
       if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
-      if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);return {ok:true};}
+      if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
       if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
       if(message.type==='CHATGPT_STOP_RECOVERY'){
         stops++;assert.equal(editor.textContent,originalDraft,'native stop must precede changing the owner draft');
@@ -52,6 +55,8 @@ async function check(mode:Mode) {
         assert.equal(message.options.text,'доделай е2е');assert.equal(editor.textContent,'доделай е2е');assert.equal(button.disabled,false);
         assert.ok(time-stoppedAt>=18000,'native model readiness must be checked after DOM button readiness');
         assert.equal(logs.filter(event=>event.kind==='retry.send_intent').length,1,'one durable intent precedes the single guarded send');
+        context.authorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};
+        await runInContext('appendJournal(authorization,{id:7,url:location.href})',context);
         sends.push(editor.textContent);sendAt=time;editor.textContent='';
         const turn=document.createElement('article');turn.setAttribute('data-testid','conversation-turn-retry');turn.setAttribute('data-turn','user');turn.textContent='доделай е2е';document.querySelector('main')!.append(turn);
         context.__chatgptNotifierAttemptId='retry-request';return {ok:true,clicked:true};
@@ -59,12 +64,13 @@ async function check(mode:Mode) {
       if(['CHATGPT_RESPONSE_COMPLETE','CHATGPT_RESPONSE_ERROR'].includes(message.type))notifications.push(message);
       return {ok:true};
     }}}});
+  runInContext(readFileSync('extension/journal-store.js','utf8'),context);
   runInContext(source,context);
   // A watcher for the original interrupted request must be retired when its
   // recovery error is observed, even though its partial answer remains mounted.
   receiver?.({type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED'});
   const recovery=document.createElement('div');recovery.setAttribute('role','status');recovery.innerHTML='<span class="text-chatgpt-recovery">Recovery status</span>';document.querySelector('main')!.append(recovery);
-  for(let i=0;i<1000&&!logs.some(event=>['retry.confirmed','retry.failed','retry.cancelled'].includes(event.kind));i++)await new Promise<void>(resolve=>setImmediate(resolve));
+  for(let i=0;i<1000&&!logs.some(event=>event.kind==='draft.restored');i++)await new Promise<void>(resolve=>setImmediate(resolve));
   context.__chatgptNotifierDispose();
   assert.equal(stops,1);assert.equal(notifications.filter(item=>item.type==='CHATGPT_RESPONSE_COMPLETE').length,0,'stopping recovery must not announce the existing partial answer as success');
   assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.timeoutMs===60000),'a successful recovery stop grants one bounded 60-second readiness budget');

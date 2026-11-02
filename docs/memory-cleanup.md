@@ -14,7 +14,7 @@ npm run memory -- --cdp http://127.0.0.1:9222
 npm run memory -- --bridge-config /path/to/private/bridge.json
 ```
 
-The bridge file must be private and contain its local `port` and `token`. Credentials are not printed or copied into reports. Direct CDP access requires the browser's normal access authorization.
+The bridge file must be private and contain its local `port` and `token`. Credentials are not printed or copied into reports. This authenticated bridge is separate from direct CDP: a direct loopback CDP endpoint does not necessarily authenticate clients or display an authorization prompt. Use an endpoint you already control and keep it local; the utility does not add authentication to it.
 
 ## Daily use on macOS
 
@@ -47,7 +47,7 @@ npm run memory -- --cdp http://127.0.0.1:9222 --collect --target TARGET_ID
 
 Collection may briefly pause a page's JavaScript thread. By default, visible/focused or generating pages are skipped; a missing ChatGPT composer is treated as unknown activity, not proof that a tab is idle. `--include-active` is an explicit opt-in, not permission to bypass identity or measurement failures. Pages playing audio or video remain skipped.
 
-`--max-tabs` limits the number of **shared JavaScript heaps** collected. Multiple tabs in one V8 isolate count once. Target URL and isolate identity are rechecked immediately before collection. Each selected isolate receives one collection request; missing, changed or unmeasurable targets are skipped.
+`--max-tabs` limits the number of **shared JavaScript heaps** collected. Multiple tabs in one V8 isolate count once. All page targets participate in the peer census, including internal pages and blank pages; non-HTTP pages are never eligible for direct collection, and a known shared non-HTTP peer blocks its heap. An empty CDP target URL is accepted only when the page guard reports `about:blank`. Target URLs and every initially measured page's isolate identity are rechecked immediately before collection, including unselected peers. Each selected isolate receives one collection request; missing, changed or unmeasurable targets are skipped.
 
 If unrelated pages cannot report their isolate identity, strict mode refuses collection: it cannot verify shared activity. To explicitly collect the measurable heaps anyway:
 
@@ -62,6 +62,8 @@ This mode does not directly collect unmeasurable targets, but they might share a
 The default minimum heap is 256 MiB and the successful-run cooldown is 10 minutes. An intent is saved before each request. An uncertain result is recorded and skipped on subsequent runs instead of being blindly retried. A state-directory lock prevents overlapping cleanup runs.
 
 Cooldown timestamps reflect the actual completed operation, not the time a launcher was installed. A stale `intent` or `unknown` outcome remains blocked even after ten minutes. Do not delete the ledger or lock to force a repeat without first resolving the earlier operation.
+
+Normal completion, lock setup failure, `SIGINT` and `SIGTERM` release only the lock file whose device/inode identity the process acquired. Termination preserves the ledger; an in-flight GC can therefore remain an unresolved intent. A crash, `SIGKILL` or machine shutdown can leave `lock.json` behind. There is no automatic stale-lock removal based on a PID: PIDs can be reused. For manual recovery, stop both shortcuts, inspect the private lock's `runId`, timestamp and PID, and verify that the original run has ended and no cleanup process is using that state directory. Preserve the lock and ledger as private recovery copies, then move only that verified stale lock out of the state directory. Keep the ledger in place and resolve any `intent`/`unknown` operation before considering further collection.
 
 Use `--state-dir` for a dedicated private ledger/report directory. Reports may contain browsing URLs and titles; keep them out of Git and shared folders. The full option list is available with `npm run memory -- --help`.
 

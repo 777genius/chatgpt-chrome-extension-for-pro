@@ -12,6 +12,49 @@ function journalChatId(value) {
   try { const url = new URL(value); return url.origin === 'https://chatgpt.com' ? url.pathname.match(/\/c\/([^/]+)/)?.[1] || null : null; }
   catch { return null; }
 }
+function retryDraftUrl(value) {
+  try { const url=new URL(value); return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)?`${url.origin}${url.pathname.replace(/\/$/,'')}`:null; }
+  catch { return null; }
+}
+function retryDraftMetadata(meta) {
+  // Historical backups remain in the immutable journal. They lack a durable
+  // restoration claim, so importing them could insert an already-used draft.
+  return meta.retryDraftSchema===1?meta:{...meta,retryDraftSchema:1,retryDraftByChat:{},retryDraftClaims:{}};
+}
+function reduceRetryDraft(drafts,event) {
+  const url=retryDraftUrl(event.sourceUrl||event.observedTabUrl||event.url);
+  if(!url)return drafts;
+  const current=drafts[url],operationId=event.operationId;
+  if(event.kind==='draft.saved'&&operationId&&typeof event.draft==='string'&&event.draft) {
+    if(current?.operationId===operationId&&current.claimedAt)return drafts;
+    const previous=current?.operationId===operationId?current:{};
+    return {...drafts,[url]:{...previous,operationId,sourceUrl:url,
+      savedSequence:event.sequence,phase:previous.phase||'saved'}};
+  }
+  if(!current||(operationId&&operationId!==current.operationId))return drafts;
+  if(event.kind==='draft.replaced')return {...drafts,[url]:{...current,replacementProven:true}};
+  if(event.kind==='recovery.stop_result'&&event.stopped===true)return {...drafts,[url]:{...current,stopProven:true}};
+  let phase=current.phase;
+  if(event.kind==='retry.send_intent')phase='intent';
+  if(['send.authorized','send.dispatched','draft.restore_deferred'].includes(event.kind))phase='unknown';
+  if(event.kind==='retry.confirmed')phase='confirmed';
+  if(event.kind==='retry.cancelled'||event.kind==='retry.failed'&&event.clicked===false)phase='not-clicked';
+  if(event.kind==='retry.manual_reset')phase='superseded';
+  if(event.kind==='draft.restored')phase='restored';
+  if(event.kind==='draft.restore_intent')return {...drafts,[url]:{...current,phase:'claimed',claimedAt:event.recordedAt,claimSequence:event.sequence}};
+  return phase===current.phase?drafts:{...drafts,[url]:{...current,phase}};
+}
+function retryDraftClaimable(record) {
+  return Boolean(record&&!record.claimedAt&&['saved','intent','not-clicked','confirmed'].includes(record.phase));
+}
+async function indexedRetryDraft(meta,url) {
+  const record=meta?.retryDraftSchema===1?meta.retryDraftByChat?.[retryDraftUrl(url)]:null;
+  if(!record||!Number.isInteger(record.savedSequence)||record.savedSequence<1)return null;
+  const key=`${JOURNAL_PREFIX}${String(record.savedSequence).padStart(12,'0')}`;
+  const entry=(await chrome.storage.local.get(key))[key];
+  return entry?.kind==='draft.saved'&&entry.operationId===record.operationId&&retryDraftUrl(entry.sourceUrl)===record.sourceUrl&&
+    typeof entry.draft==='string'&&entry.draft?{...record,draft:entry.draft}:null;
+}
 function reduceRetrySummary(retryByChat, event) {
   const chatId = journalChatId(event.sourceUrl || event.observedTabUrl || event.url);
   if (!chatId) return retryByChat;
@@ -78,7 +121,7 @@ async function retryMetadata(meta) {
 }
 function appendJournal(event, tab = {}) {
   const write = journalQueue.catch(() => {}).then(async () => {
-    const meta = await retryMetadata((await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META] || { sequence: 0, startedAt: Date.now() });
+    const meta = retryDraftMetadata(await retryMetadata((await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META] || { sequence: 0, startedAt: Date.now() }));
     const sequence = meta.sequence + 1;
     const tabId = tab.id ?? event.tabId ?? null;
     const tabs = {...meta.tabs};
@@ -89,6 +132,12 @@ function appendJournal(event, tab = {}) {
     const active = { ...meta.active };
     const requests = { ...meta.requests };
     let operationId = event.operationId || null;
+    const savedDraft=meta.retryDraftByChat[retryDraftUrl(sourceUrl)];
+    if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft.operationId!==operationId||savedDraft.savedSequence!==event.savedSequence)) {
+      throw Object.assign(new Error('Восстановление черновика уже выполнено или исход отправки неизвестен'),{journalPolicy:true});
+    }
+    const claimedDraft=event.kind==='draft.restore_intent'?await indexedRetryDraft(meta,sourceUrl):null;
+    if(event.kind==='draft.restore_intent'&&!claimedDraft)throw Object.assign(new Error('Не найдена точная сохранённая копия черновика'),{journalPolicy:true});
     if (event.kind === 'tab.updated') operationId ||= active[tabId]?.operationId || null;
     if (event.kind === 'request.started') {
       operationId ||= Date.now() - (active[tabId]?.at || 0) < 120000 ? active[tabId]?.operationId || null : null;
@@ -97,6 +146,7 @@ function appendJournal(event, tab = {}) {
     if (['request.completed','request.failed'].includes(event.kind)) operationId ||= requests[event.requestId]?.operationId || null;
     if (['retry.send_intent','handoff.sending'].includes(event.kind)) active[tabId] = {operationId,kind:event.kind,at:Date.now()};
     if (event.kind === 'send.authorized') {
+      if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
       if (!active[tabId] || active[tabId].operationId !== operationId || active[tabId].consumed) throw Object.assign(new Error('Повторная автоматическая отправка запрещена'),{journalPolicy:true});
       active[tabId] = {...active[tabId],consumed:true};
     }
@@ -112,14 +162,35 @@ function appendJournal(event, tab = {}) {
       sourceUrl:requestSource || sourceUrl, sourceChatId:journalChatId(requestSource || sourceUrl), targetUrl, targetChatId: journalChatId(targetUrl),
       observedTabUrl: tab.url || '', observedChatId: journalChatId(tab.url) };
     if (event.kind === 'tab.closed') delete tabs[tabId];
+    const retryDraftByChat=reduceRetryDraft(meta.retryDraftByChat,entry);
     await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
       [JOURNAL_META]: { ...meta, sequence, active, requests, tabs, lastAt: entry.recordedAt,
-        retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry) } });
+        retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
+        retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims } });
     journalFailure = '';
-    return { ok: true, sequence, sourceUrl:entry.sourceUrl };
+    return { ok: true, sequence, sourceUrl:entry.sourceUrl,
+      ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)],draft:claimedDraft.draft}}:{}) };
   });
   journalQueue = write;
   return write.catch((error) => { if (!error.journalPolicy) {journalFailure = String(error?.message || error); console.error('Journal write failed', journalFailure);} throw error; });
+}
+function readRetryDraft(url) {
+  const read=journalQueue.catch(()=>{}).then(async()=>{
+    const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+    return indexedRetryDraft(meta,url);
+  });
+  journalQueue=read;
+  return read;
+}
+async function claimRetryDraft(url,operationId,savedSequence,tab={}) {
+  const sourceUrl=retryDraftUrl(url);
+  if(!sourceUrl)return {ok:false,claimed:false};
+  try {
+    const result=await appendJournal({kind:'draft.restore_intent',sourceUrl,operationId,savedSequence},tab);
+    return {ok:true,claimed:true,record:result.record};
+  } catch(error) {
+    return {ok:false,claimed:false,error:String(error.message||error)};
+  }
 }
 async function readRetryState(url) {
   // A first read after upgrading may precede initializeJournal's append. Put
