@@ -103,7 +103,13 @@
         const current=await read(url);
         return current?.earlyCompletion&&['waiting','paused'].includes(current.phase)?current.earlyCompletion:null;
       });
-      if(pending)await completion(pending);
+      if(pending) {
+        // completion() already dispatches the continuation when appropriate.
+        // Falling through to reserved recovery would send a second dispatch
+        // message for the same operation ID during this worker startup.
+        await completion(pending);
+        return {ok:true,replayed:true};
+      }
       const record=await serialize(async()=>{
         const current=await read(url);
         if(!current||current.phase!=='preparing'||current.operation?.status!=='reserved'||
