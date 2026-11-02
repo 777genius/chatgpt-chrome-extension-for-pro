@@ -35,6 +35,22 @@ for (const file of files) {
 }
 const scanner = new Bun.Transpiler({ loader: "js", target: "browser" });
 const js = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
+const legacy = join(root, "extension");
+const typed = join(root, "src", "extension");
+for (const name of js) {
+  if (!existsSync(join(typed, name.replace(/\.js$/, ".ts")))) {
+    const original = readFileSync(join(legacy, name));
+    const output = readFileSync(join(dir, name));
+    if (!original.equals(output)) {
+      throw new Error("Unported legacy script was silently changed by the build: " + name);
+    }
+  }
+}
+for (const name of ["manifest.json", "popup.html", "journal.html", "offscreen.html"]) {
+  if (readFileSync(join(legacy, name), "utf8") !== readFileSync(join(dir, name), "utf8")) {
+    throw new Error("Chrome MV3 entry or permissions changed during build: " + name);
+  }
+}
 for (const file of js) {
   const bytes = readFileSync(join(dir, file), "utf8");
   const scanned = scanner.scan(bytes);
