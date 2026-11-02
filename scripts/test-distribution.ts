@@ -34,7 +34,7 @@ try {
     .filter((name) => name === "check.ts" || name.endsWith("-check.ts")).sort();
   for (const name of tests) {
     console.log("\n[compiled MV3] " + name);
-    const outcome = spawnSync(process.execPath, ["tests/" + name], {
+    const outcome = spawnSync("node", ["tests/" + name], {
       cwd: fixture,
       stdio: "inherit",
       timeout: 120_000,
