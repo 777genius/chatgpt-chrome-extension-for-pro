@@ -344,6 +344,9 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(state(env).phase,'waiting','chat-limit event is not terminal for Goal');
   const id=state(env).id,deadline=state(env).deadlineAt;
   await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'handoff-fixture',tabId:7});
+  await env.fresh().handoffBegin({sourceUrl:URL_A,handoffId:'handoff-fixture',tabId:7});
+  assert.equal(env.events.filter((event:any)=>event.kind==='goal.handoff_begin').length,1,
+    'worker resume reuses the same durable handoff phase and operation');
   assert.equal(state(env).phase,'handoff');
   assert.match(await env.store.context(URL_A),/Активная цель/);
   await env.store.stageHandoffCompletion({sourceUrl:URL_A,targetUrl:URL_B,
