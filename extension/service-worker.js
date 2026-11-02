@@ -329,11 +329,20 @@ async function handleHandoffMessage(message, tabId) {
         // handoff that the Goal cannot follow.
         // Both cleanup steps must be attempted. Neither cleanup failure may
         // replace the original preparation error with a misleading exception.
-        await Promise.allSettled([
+        const [failedRecordSaved]=await Promise.allSettled([
           chrome.storage.local.set({[key]:{...record,stage:'failed',
             reason:'Goal handoff could not be prepared: '+String(error?.message||error)}}),
           chrome.storage.local.remove(marker)
         ]);
+        // Only after the terminal failed record is durable can we drop the
+        // shared source claim: no native navigation/click was attempted.
+        // If the failed-record write was uncertain, leave the claim fenced.
+        if(failedRecordSaved.status==='fulfilled') {
+          try {
+            await appendJournal({kind:'handoff.pre_navigation_cancelled',
+              operationId:record.id,sourceUrl:record.sourceUrl},{id:tabId,url:record.sourceUrl});
+          } catch {}
+        }
         throw error;
       }
       return { ok: true, record: { ...record, stage: 'navigating' } };
