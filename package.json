@@ -35,7 +35,8 @@
     "linkedom": "0.18.15",
     "typescript": "7.0.2",
     "@get-modular/conformance": "0.5.1",
-    "@agent-teams/engineering-foundation": "3.1.0"
+    "@agent-teams/engineering-foundation": "3.1.0",
+    "@types/bun": "1.4.3"
   },
   "dependencies": {
     "@get-modular/core": "0.7.1",
