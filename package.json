@@ -18,18 +18,28 @@
     "test:handoff": "node tests/handoff-check.mts",
     "typecheck": "tsc --noEmit",
     "check:syntax": "node scripts/syntax.mts",
-    "check": "bun run build && bun run check:syntax && bun run check:built && bun run typecheck && bun run test",
+    "check": "bun run build && bun run check:syntax && bun run check:built && bun run typecheck && bun run test && bun run foundation:check && bun run foundation:assert-dev-only && bun run foundation:assert-registry",
     "foundation:check": "agent-teams-foundation check",
     "foundation:status": "agent-teams-foundation status",
     "foundation:attach": "agent-teams-foundation attach",
     "foundation:detach": "agent-teams-foundation detach",
     "foundation:assert-dev-only": "agent-teams-foundation assert-dev-only",
     "foundation:assert-registry": "agent-teams-foundation assert-registry",
-    "check:built": "bun scripts/check-build.ts"
+    "check:built": "bun scripts/check-build.ts",
+    "check:changed": "agent-teams-foundation agent-workflow check-changed --consumer .",
+    "check:fast": "bun run build && bun run check:built && bun run typecheck && bun run test"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
     "linkedom": "0.18.15",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "@get-modular/conformance": "0.5.1",
+    "@agent-teams/engineering-foundation": "3.1.0"
+  },
+  "dependencies": {
+    "@get-modular/core": "0.7.1",
+    "@get-modular/assembly": "0.7.1",
+    "@get-modular/resources": "0.2.1",
+    "@get-modular/observation": "0.2.0"
   }
 }
