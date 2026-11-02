@@ -1,0 +1,36 @@
+schemaVersion: 2
+packageManager: bun
+instructions:
+  canonical: AGENTS.md
+  claude: CLAUDE.md
+  gemini: GEMINI.md
+  copilot: .github/copilot-instructions.md
+scripts:
+  changed: check:changed
+  fast: check:fast
+  full: check
+changedChecks:
+  - id: code
+    script: check:fast
+    extensions: [.ts, .mts, .js, .json, .yaml, .yml, .html]
+    passPaths: false
+  - id: docs
+    script: check:fast
+    extensions: [.md]
+    passPaths: false
+fullScanPaths:
+  - AGENTS.md
+  - package.json
+  - bun.lock
+  - .github/workflows
+  - architecture
+  - docs
+  - src
+  - extension
+  - scripts
+  - tests
+  - tsconfig.json
+  - foundation.config.yaml
+  - CLAUDE.md
+  - GEMINI.md
+  - .github/copilot-instructions.md
