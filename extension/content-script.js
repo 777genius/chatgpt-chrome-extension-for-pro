@@ -1,11 +1,19 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.2.10';
+  const SCRIPT_VERSION = '1.6.1';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
+  let statusIndicator = null;
+  let deferredTaskObserver = null;
+  let deferredObservedStart = 0;
+  let manualSendIntent = null;
+  let completionSendIntent = null;
+  let completionAttempt = null;
+  let completionRecoveryTimer = null;
+  let returnedPageUrl = '';
   const listeners = new AbortController();
   const answerWaitSlot = ChatGPTNotifierMemory.createLatestTaskSlot();
   const recoveryFirstSeen = new Map();
@@ -17,6 +25,10 @@
   }
   function stopContext() {
     contextAlive = false;
+    statusIndicator?.dispose();
+    deferredTaskObserver?.dispose();
+    if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
+    manualSendIntent = null;
     listeners.abort();
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
     answerWaitSlot.cancel();
@@ -77,13 +89,22 @@
       ? Date.now() - startedAt : null;
   }
 
-  function notifyPageReturned() {
-    runtimeMessage({ type: 'CHATGPT_PAGE_RETURNED' }).catch(() => {});
+  statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,
+    load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:isGenerating(),startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
+
+
+  function notifyPageReturned(event) {
+    if((event&&event.isTrusted===false)||!pageIsActive()||returnedPageUrl===location.href)return;
+    const url=location.href;
+    returnedPageUrl=url;
+    runtimeMessage({type:'CHATGPT_PAGE_RETURNED',url}).then(result=>{if(!result?.ok&&returnedPageUrl===url)returnedPageUrl='';});
   }
 
-  window.addEventListener('focus', notifyPageReturned, { capture: true, signal: listeners.signal });
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') notifyPageReturned();
+  window.addEventListener('focus', event=>{returnedPageUrl='';void statusIndicator?.refresh();deferredTaskObserver?.refresh();notifyPageReturned(event);}, { capture: true, signal: listeners.signal });
+  window.addEventListener('blur',()=>{returnedPageUrl='';},{capture:true,signal:listeners.signal});
+  document.addEventListener('visibilitychange', event => {
+    returnedPageUrl='';
+    if (document.visibilityState === 'visible') {void statusIndicator?.refresh();deferredTaskObserver?.refresh();notifyPageReturned(event);}
   }, { capture: true, signal: listeners.signal });
   document.addEventListener('pointerdown', notifyPageReturned, { capture: true, passive: true, signal: listeners.signal });
   document.addEventListener('keydown', notifyPageReturned, { capture: true, passive: true, signal: listeners.signal });
@@ -216,6 +237,8 @@
   let retryRestoreTask = null;
   let retryTask = Promise.resolve();
   const pendingDrafts = new Map();
+  let draftRestoreBusy = false;
+  let draftRestorePath = '';
   let replacingDraft = false;
   let stoppingRecovery = false;
 
@@ -249,8 +272,12 @@
 
   function notifyError(error, retryReason = '') {
     runtimeMessage({
-      type: 'CHATGPT_RESPONSE_ERROR', ...error, retryReason
+      type: 'CHATGPT_RESPONSE_ERROR', ...error, url:error.sourceUrl||location.href, retryReason
     }).catch(() => {});
+  }
+  function notifyOperationWarning(error,retryReason='',warningKind='handoff') {
+    void runtimeMessage({type:'CHATGPT_OPERATION_WARNING',...error,url:error.sourceUrl||location.href,retryReason,
+      warningKind,operationId:handoffRecord?.id||''});
   }
 
   function composer() {
@@ -295,20 +322,47 @@
     }
   }
 
-  function restoreDraft(operationId = null) {
+  function composerHasAttachments(editor) {
+    const form=editor.closest('form, [data-composer-body]')||editor.parentElement;
+    return Boolean(form?.querySelector('[data-testid*="attachment"], [data-testid="file-upload-progress"]')||form?.querySelector('[data-composer-attachments]')?.children.length);
+  }
+
+  async function restoreDraft(operationId = null, startup = false) {
+    if(draftRestoreBusy)return;
     const path = location.pathname;
-    const draft = pendingDrafts.get(path);
-    if (!draft) return;
+    if(startup&&draftRestorePath===path)return;
+    const url=location.href;
+    const localDraft=pendingDrafts.get(path);
+    if(!startup&&!localDraft)return;
     const editor = composer();
     if (!editor || !isElementVisible(editor)) return;
+    if(startup)draftRestorePath=path;
+    if(composerHasAttachments(editor))return;
     const current = rawEditorText(editor);
-    // Retain text entered during the send as well as the original draft.
-    const restored = !normalize(current) || normalize(current) === RETRY_TEXT
-      ? draft : `${draft}\n\n${current}`;
-    // Keep the backup until the editor accepted the restoration.
-    replaceEditorText(editor, restored);
-    pendingDrafts.delete(path);
-    void audit('draft.restored', {operationId,draftChars:draft.length, restoredChars:restored.length});
+    if(startup&&current!==''&&current!==RETRY_TEXT)return;
+    draftRestoreBusy=true;
+    try {
+      const result=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url});
+      const record=result?.ok&&result.record;
+      if(!record||operationId&&record.operationId!==operationId||localDraft&&record.draft!==localDraft)return;
+      // A saved backup alone does not prove automation changed the editor.
+      // Unknown sends stay parked even when their retry text is still visible.
+      if(!['saved','intent','not-clicked','confirmed'].includes(record.phase)||record.claimedAt){if(localDraft)pendingDrafts.delete(path);return;}
+      if(startup&&!record.replacementProven&&!record.stopProven&&current!==RETRY_TEXT)return;
+      if(!runtimeAvailable()||location.pathname!==path||composer()!==editor||rawEditorText(editor)!==current||composerHasAttachments(editor))return;
+      const claim=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_CLAIM',url,operationId:record.operationId,savedSequence:record.savedSequence});
+      if(!claim?.claimed) {if(localDraft)pendingDrafts.delete(path);return;}
+      pendingDrafts.delete(path);
+      // The durable claim precedes insertion. A crash or concurrent edit here
+      // keeps the journal copy and cannot insert the old draft a second time.
+      if(!runtimeAvailable()||location.pathname!==path||composer()!==editor||rawEditorText(editor)!==current||composerHasAttachments(editor))return;
+      const draft=claim.record?.draft;
+      if(typeof draft!=='string'||draft!==record.draft)return;
+      const restored=current===draft?draft:current===''||current===RETRY_TEXT?draft:`${draft}\n\n${current}`;
+      if(current!==restored)replaceEditorText(editor,restored);
+      pendingDrafts.delete(path);
+      void audit('draft.restored',{operationId:record.operationId,draftChars:draft.length,restoredChars:restored.length});
+    } finally {draftRestoreBusy=false;}
   }
 
   function sendButton() {
@@ -368,7 +422,8 @@
     await audit('reasoning.selected',{operationId,previous,selected:'max'},true);
   }
 
-  async function retryAfterError(error, attempt, path, promptKey, state) {
+  async function retryAfterError(error, attempt, path, promptKey, state, requestId) {
+    manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
     const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
@@ -387,6 +442,7 @@
     };
     const stillCurrent = () => runtimeAvailable() && watchToken === expectedToken && location.pathname === path && retryState() === state && !state.blocked &&
       (globalThis.__chatgptNotifierAttemptId || '') === attempt &&
+      (globalThis.__chatgptNotifierRequestId||null)===requestId &&
       (!error.recovery || recoveryStopped || currentErrors().some(node=>node.querySelector('.text-chatgpt-recovery'))) &&
       (latestPromptSnapshot()?.promptKey || path) === promptKey;
     try {
@@ -439,6 +495,7 @@
       replaced = true;
       replacingDraft = true;
       replaceEditorText(editor, RETRY_TEXT);
+      if(draft)await logRetry('draft.replaced',{operationId},true);
       let stableSince=0;
       while(Date.now()<deadline) {
         if (!stillCurrent()) return;
@@ -473,6 +530,7 @@
       await logRetry('retry.send_intent',{operationId,text:RETRY_TEXT,promptKey},true);
       if (!stillCurrent() || Date.now()>=deadline || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
       if (!runtimeAvailable()) return;
+      rememberCompletionSendIntent();
       clicked = true; // A lost reply may still mean the page received the click.
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
@@ -500,13 +558,16 @@
       state.reason = `Автопродолжение остановлено: ${cause.message}`;
       notifyError(error, state.reason);
     } finally {
-      if (!clicked) void logRetry('retry.cancelled',{operationId,reason:'Отправка не выполнялась'});
+      if (!clicked) {
+        void logRetry('retry.cancelled',{operationId,reason:'Отправка не выполнялась'});
+        if(recoveryStopped&&!isGenerating())void runtimeMessage({type:'CHATGPT_GENERATION_STOPPED',url:sourceUrl,startedAt:Number(attempt),requestId});
+      }
       else if (!confirmed && !state.blocked) void logRetry('retry.failed',{operationId,clicked:true,confirmed:false,reason:'Контекст чата изменился; результат отправки неизвестен'});
       replacingDraft = false;
       if (replaced && runtimeAvailable() && location.pathname === path) {
         try {
           if (pendingDrafts.has(path)) {
-            if (!clicked || (globalThis.__chatgptNotifierAttemptId || '') !== attempt) restoreDraft(operationId);
+            if (!clicked || (globalThis.__chatgptNotifierAttemptId || '') !== attempt) await restoreDraft(operationId);
             else {
               pendingDrafts.delete(path);
               void logRetry('draft.restore_deferred',{operationId,reason:'Нет подтверждения начала запроса; черновик сохранён в журнале'});
@@ -529,7 +590,8 @@
   function handleError(error, promptKey) {
     const state = retryState();
     const attempt = globalThis.__chatgptNotifierAttemptId || '';
-    const attemptKey = `${promptKey}|${attempt}`;
+    const requestId=globalThis.__chatgptNotifierRequestId||null;
+    const attemptKey = `${promptKey}|${requestId||attempt}`;
     // Rewording/remounting one error does not count as another failed request.
     if (state.lastAttempt === attemptKey) return;
     state.lastAttempt = attemptKey;
@@ -545,14 +607,39 @@
     }
     if(state.remainingRetries!=null)state.remainingRetries--;
     const path = location.pathname;
-    retryTask = retryTask.then(() => retryAfterError(error, attempt, path, promptKey, state));
+    retryTask = retryTask.then(() => retryAfterError(error, attempt, path, promptKey, state, requestId));
   }
 
-  // A deliberate manual send starts a new run; automated clicks are untrusted.
+  function rememberCompletionSendIntent() {
+    completionSendIntent={path:location.pathname,at:Date.now(),baselineKey:latestPromptSnapshot()?.promptKey||''};
+    void runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'intent',url:location.href,at:completionSendIntent.at,baselineKey:completionSendIntent.baselineKey});
+  }
+
+  function rememberManualStatusIntent() {
+    const button=sendButton();
+    if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return;
+    rememberCompletionSendIntent();
+    manualSendIntent={url:ChatGPTHandoffTitle.chatUrl(location.href),at:Date.now(),attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
+  }
+  function confirmManualStatusIntent(startedAt,requestId) {
+    const intent=manualSendIntent;
+    if(!intent)return;
+    if(!intent.url||ChatGPTHandoffTitle.chatUrl(location.href)!==intent.url){manualSendIntent=null;return;}
+    // Bound the actual send time, not delivery of the worker's confirmation.
+    if(!Number.isFinite(startedAt)||startedAt<intent.at)return;
+    if(startedAt-intent.at>10000){manualSendIntent=null;return;}
+    if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
+    manualSendIntent=null;
+    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
+  }
+
+  // Reset the indicator only after a trusted send intent produces a request.
+  // Enter configured as a newline and automated retries do not acknowledge it.
   document.addEventListener('click', (event) => {
     if (event.isTrusted && event.target instanceof Element &&
         event.target.closest('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')) {
       retryStates.delete(location.pathname);
+      rememberManualStatusIntent();
       void audit('retry.manual_reset',{input:'send-button'});
     }
   }, { capture: true, signal: listeners.signal });
@@ -560,6 +647,7 @@
     if (event.isTrusted && event.key === 'Enter' && !event.shiftKey && !event.isComposing &&
         event.target instanceof Element && event.target.closest('#prompt-textarea, [data-composer-markdown]')) {
       retryStates.delete(location.pathname);
+      rememberManualStatusIntent();
       void audit('retry.manual_reset',{input:'enter'});
     }
   }, { capture: true, signal: listeners.signal });
@@ -622,7 +710,7 @@
   function scheduleHandoffCheck() {
     if(handoffCheckScheduled||!['sending','awaiting-confirmation'].includes(handoffRecord?.stage))return;
     handoffCheckScheduled=true;
-    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,2000-(performance.now()-handoffLastCheckAt))}).then(async result=>{
+    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,Math.ceil(2000-(performance.now()-handoffLastCheckAt)))}).then(async result=>{
       handoffCheckScheduled=false;
       if(result?.ok&&runtimeAvailable()) {
         try {await reconcileHandoff();}catch{}
@@ -633,7 +721,7 @@
   async function awaitHandoffConfirmation(reason) {
     if(handoffRecord?.stage==='awaiting-confirmation'&&handoffRecord.awaitingNotifiedAt)return;
     const result=await updateHandoff('awaiting-confirmation',{reason});
-    if(result.notifyAwaiting)notifyError({sessionTitle:document.title,response:'Передача ожидает подтверждения нового чата. Повторная отправка отключена; история и черновик сохранены в расширении.'},'Ожидание подтверждения отправки');
+    if(result.notifyAwaiting)notifyOperationWarning({sessionTitle:document.title,response:'Передача ожидает подтверждения нового чата. Повторная отправка отключена; история и черновик сохранены в расширении.'},'Ожидание подтверждения отправки');
   }
 
   window.addEventListener('focus',scheduleHandoffCheck,{signal:listeners.signal});
@@ -652,6 +740,7 @@
   }
 
   async function submitHandoff() {
+    manualSendIntent = null;
     if (handoffBusy || !handoffRecord || !['navigating', 'preparing'].includes(handoffRecord.stage)) return;
     if (location.href === handoffRecord.sourceUrl) return;
     handoffBusy = true;
@@ -712,6 +801,7 @@
       await updateHandoff('sending', { targetUrl: location.href });
       if (location.pathname !== initialPath || rawEditorText(editor) !== record.prompt) throw new Error('Содержимое нового чата изменилось перед отправкой');
       if (!runtimeAvailable()) return;
+      rememberCompletionSendIntent();
       clicked = true;
       const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,requireMax:true,fileName:record.asFile?record.fileName:null});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
@@ -724,7 +814,7 @@
         try {await awaitHandoffConfirmation(String(cause.message||cause));}catch{}
       } else {
         try { await updateHandoff('failed', { reason: String(cause.message || cause) }); } catch {}
-        notifyError({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
+        notifyOperationWarning({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
       }
     } finally {
       handoffBusy = false;
@@ -762,20 +852,36 @@
     await submitHandoff();
   }
 
+  function notifySuppressedError(error,state,promptKey,attemptId) {
+    const reason=state.blocked
+      ? state.reason||'Автоповтор остановлен сохранённым запретом отправки'
+      : 'Запрос уже обрабатывался до обновления расширения; повторная отправка не выполняется';
+    const key=`${attemptId}|${promptKey}|${reason}`;
+    if(state.lastSuppressedNotice===key)return;
+    state.lastSuppressedNotice=key;
+    void audit('retry.suppressed',{reason,promptKey,attemptId,error:error.response,blocked:Boolean(state.blocked)});
+    notifyError(error,reason);
+  }
+
   async function routeError(error, promptKey, alert) {
     const sourcePath = location.pathname;
     const attemptId = globalThis.__chatgptNotifierAttemptId || '';
+    const requestId=globalThis.__chatgptNotifierRequestId||null;
+    error={...error,requestId,attemptId};
     // A pre-existing error already observed before an extension update is not
     // a new failed request. A real/manual request gets a new attempt or prompt.
-    if(!attemptId&&retryState().restoredPromptKey===promptKey)return;
+    if(!attemptId&&retryState().restoredPromptKey===promptKey){
+      notifySuppressedError(error,retryState(),promptKey,attemptId);
+      return;
+    }
     let info;
     try {
       info = await runtimeMessage({ type: 'CHATGPT_INSPECT_ERROR',
         alertIndex: Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert), captureHistory: true });
     } catch {}
-    if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId) return;
+    if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId || (globalThis.__chatgptNotifierRequestId||null)!==requestId) return;
     await audit('error.detected',{error:error.response,action:info?.action || 'unknown',promptKey,durationMs:error.durationMs,attemptId});
-    if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId) return;
+    if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId || (globalThis.__chatgptNotifierRequestId||null)!==requestId) return;
     if (info?.ok && info.action === 'retry') {
       handleError(error, promptKey);
       return;
@@ -789,7 +895,7 @@
     notifyError(error, info?.action === 'new-chat' ? 'Требуется новый чат' : 'Автоповтор отключён: неизвестный тип ошибки');
     if (info?.ok && info.action === 'new-chat') {
       try { await beginHandoff(error, info, alert); }
-      catch (cause) { notifyError(error, String(cause.message || cause)); }
+      catch (cause) { notifyOperationWarning(error, String(cause.message || cause)); }
     }
   }
 
@@ -812,7 +918,7 @@
     if (!record?.naming || record.stage!=='sent' || !ChatGPTHandoffTitle.chatUrl(record.targetUrl) ||
         ChatGPTHandoffTitle.chatUrl(record.targetUrl)!==ChatGPTHandoffTitle.chatUrl(location.href)) return;
     const result=await runtimeMessage({type:'CHATGPT_HANDOFF_RENAME',id:record.id});
-    if(result?.ok===false) notifyError({sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`});
+    if(result?.ok===false) notifyOperationWarning({sourceUrl:record.targetUrl,sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`},'','title');
   }
 
   function currentErrors() {
@@ -836,7 +942,7 @@
     errorScanTimer = null;
     if (!runtimeAvailable()) { stopContext(); return; }
     if (!replacingDraft && pendingDrafts.has(location.pathname)) {
-      try { restoreDraft(); } catch {}
+      void restoreDraft().catch(()=>{});
     }
     const next = new Set();
     const errors = currentErrors();
@@ -871,6 +977,7 @@
         durationMs: consumeDuration(),
         sessionTitle: document.title,
         response: errorText,
+        sourceUrl:location.href,
         recovery: Boolean(alert.querySelector('.text-chatgpt-recovery')),
         fingerprint
       }, promptKey, alert);
@@ -893,6 +1000,7 @@
 
   errorObserver = new MutationObserver((records) => {
     if(['sending','awaiting-confirmation'].includes(handoffRecord?.stage))scheduleHandoffCheck();
+    if(!replacingDraft&&draftRestorePath!==location.pathname)void restoreDraft(null,true).catch(()=>{});
     // Ignore unrelated streaming mutations unless an error is already visible
     // or an error component was inserted/changed.
     if (pendingDrafts.has(location.pathname) || visibleErrors.size || records.some((record) => {
@@ -906,6 +1014,15 @@
     subtree: true, childList: true, characterData: true, attributes: true,
     attributeFilter: ['class', 'role', 'hidden', 'style', 'aria-hidden']
   });
+  deferredTaskObserver=globalThis.ChatGPTDeferredTaskStatus?.create({document,getUrl:()=>location.href,alive:runtimeAvailable,
+    readMetadata:({url})=>runtimeMessage({type:'CHATGPT_DEFERRED_PROBE',url}).then(reply=>reply?.snapshot??null),
+    isGenerating:()=>isGenerating()&&currentErrors().length===0,
+    onChange:event=>{
+      const generating=event.phase==='resumed'&&isGenerating()&&currentErrors().length===0;
+      if(generating)deferredObservedStart=Date.now();
+      void runtimeMessage({type:'CHATGPT_DEFERRED_TASK',url:event.url,event:{...event,generating,startedAt:generating?deferredObservedStart:null}}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
+      if(event.phase==='resumed'&&(isGenerating()||event.reason==='request-started'))scheduleActiveCompletionRecovery();
+    }})||null;
   checkErrors();
   void resumeSavedHandoff();
 
@@ -921,7 +1038,7 @@
     }
   }
 
-  function waitForAnswerBoundToLatestPrompt(isCurrent) {
+  function waitForAnswerBoundToLatestPrompt(isCurrent, attempt) {
     return new Promise((resolve) => {
       let settled = false;
       let observer = null;
@@ -933,6 +1050,8 @@
       let stableText = '';
       let stableSince = 0;
       let generationEndedAt = 0;
+      let completionProbeBusy=false, lastCompletionProbeAt=0;
+      const blockedProbeReasons=new Set();
       const startedAt = Date.now();
 
       const cleanupScheduledCheck = () => {
@@ -973,9 +1092,14 @@
           return;
         }
 
-        // Safety valve: a stop button that never clears must not wedge the
-        // watcher. Abort without notifying, because the answer never finished.
-        if (Date.now() - startedAt >= GENERATION_HARD_CAP_MS) {
+        const snapshot=latestPromptSnapshot();
+        if(!attempt.promptKey&&snapshot){
+          const bound=bindAttemptPrompt(attempt,{...snapshot,url:attempt.url,attemptId:globalThis.__chatgptNotifierAttemptId});
+          if(bound){attempt.promptKey=bound.promptKey;persistCompletionAttempt(attempt);void audit('completion.bound',{promptKey:attempt.promptKey,startedAt:attempt.startedAt});}
+        }
+        // Only unbound attempts expire. A confirmed long-running answer keeps
+        // its observer until completion, stop, route change or a newer request.
+        if (!attempt.promptKey && Date.now() - startedAt >= GENERATION_HARD_CAP_MS) {
           finish(null);
           return;
         }
@@ -989,7 +1113,7 @@
           return;
         }
 
-        const text = answerBoundToLatestPrompt();
+        const text = attempt.promptKey&&snapshot?.promptKey===attempt.promptKey?snapshot.response:'';
         if (!text) {
           stableText = '';
           stableSince = 0;
@@ -1005,7 +1129,24 @@
 
         // Generation ended and the text stopped changing. Only now is the
         // answer actually finished, so a late repaint cannot cut it short.
-        if (now - stableSince >= STREAM_SETTLE_MS) finish(text);
+        if (now - stableSince >= STREAM_SETTLE_MS && !completionProbeBusy && now-lastCompletionProbeAt>=1000) {
+          completionProbeBusy=true;lastCompletionProbeAt=now;
+          void runtimeMessage({type:'CHATGPT_COMPLETION_PROBE',url:attempt.url,startedAt:attempt.startedAt,requestId:attempt.requestId,boundPromptKey:attempt.promptKey})
+            .then(native=>{
+              if(!isCurrent()||settled)return;
+              if(native?.ok===false){
+                const reason=String(native.reason||'unknown');
+                if(!blockedProbeReasons.has(reason)){blockedProbeReasons.add(reason);void audit('completion.probe_blocked',{promptKey:attempt.promptKey,startedAt:attempt.startedAt,reason});}
+              }
+              const latest=latestPromptSnapshot();
+              if(latest?.promptKey!==attempt.promptKey||latest.response!==text||isGenerating()||currentErrors().length)return;
+              if((native?.assistantKey===latest.assistantKey&&completedAttemptEvidence(attempt,{...native,attemptId:attempt.id})) ||
+                  (attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
+                void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
+                finish(text);
+              }
+            }).catch(()=>{}).finally(()=>{completionProbeBusy=false;});
+        }
       };
 
       const scheduleCheck = () => {
@@ -1048,22 +1189,23 @@
         }
         const now = Date.now();
         if (generationEndedAt === 0) generationEndedAt = now;
-        if (now - generationEndedAt >= FINAL_TURN_WAIT_MS) {
-          finish(answerBoundToLatestPrompt() || 'Response finished.');
-        }
+        if (now - generationEndedAt >= FINAL_TURN_WAIT_MS) check();
       }, STREAM_POLL_MS);
 
       check();
     });
   }
 
-  function sendCompletion(snapshot) {
+  function sendCompletion(snapshot, attempt) {
     const fingerprint = `${snapshot.promptKey}|${snapshot.assistantKey}|${snapshot.response.slice(0, 1000)}`;
     if (fingerprint === lastSentFingerprint) return;
 
     lastSentFingerprint = fingerprint;
+    deferredTaskObserver?.refresh();
     runtimeMessage({
       type: 'CHATGPT_RESPONSE_COMPLETE',
+      attemptId:attempt.id,completionStartedAt:attempt.startedAt,requestId:attempt.requestId,
+      url:location.href,
       durationMs: consumeDuration(),
       sessionTitle: document.title,
       response: snapshot.response,
@@ -1075,31 +1217,92 @@
     }).catch(() => {});
   }
 
-  function armForCurrentPrompt() {
-    if (Date.now() < suppressUntilEpoch) return;
-    const token = watchToken;
-    const path = location.pathname;
-    const attempt = globalThis.__chatgptNotifierAttemptId;
-    const requestStartedAt = globalThis.__chatgptNotifierRequestStartedAt;
-    const isCurrent = () => {
-      if (!runtimeAvailable()) { stopContext(); return false; }
-      return token === watchToken && path === location.pathname && attempt === globalThis.__chatgptNotifierAttemptId &&
-        requestStartedAt === globalThis.__chatgptNotifierRequestStartedAt;
+  function scheduleActiveCompletionRecovery() {
+    if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
+    const id=globalThis.__chatgptNotifierAttemptId,path=location.pathname,token=watchToken;
+    const scheduledAt=Date.now();
+    let observedGeneration=false;
+    const retry=async()=>{
+      completionRecoveryTimer=null;
+      if(!runtimeAvailable()||id!==globalThis.__chatgptNotifierAttemptId||path!==location.pathname||token!==watchToken)return;
+      let recovered=false;
+      try{recovered=await recoverActiveCompletion()===true;}catch{}
+      const generating=isGenerating();
+      observedGeneration ||= generating;
+      // Keep observing a long-running request through temporary probe failures.
+      // Before controls mount, allow only a short startup grace period.
+      if(!recovered&&!currentErrors().length&&(generating||!observedGeneration&&Date.now()-scheduledAt<30000))
+        completionRecoveryTimer=setTimeout(retry,Date.now()-scheduledAt<5000?1000:5000);
     };
-    waitForAnswerBoundToLatestPrompt(isCurrent)
-      .then((text) => {
-        if (!isCurrent() || !text) return;
-        const resolved = latestPromptSnapshot();
-        if (resolved?.response) {
-          sendCompletion(resolved);
-        } else {
-          sendCompletion({
-            promptKey: '',
-            assistantKey: '',
-            response: text
-          });
-        }
-      });
+    void retry();
+  }
+
+  async function recoverActiveCompletion() {
+    if(!runtimeAvailable()||!isGenerating()||currentErrors().length)return;
+    const id=globalThis.__chatgptNotifierAttemptId,startedAt=globalThis.__chatgptNotifierRequestStartedAt;
+    const path=location.pathname,token=watchToken,snapshot=latestPromptSnapshot();
+    if(!id||!snapshot?.promptKey)return;
+    const native=await runtimeMessage({type:'CHATGPT_COMPLETION_PROBE',url:location.origin+path,startedAt,requestId:globalThis.__chatgptNotifierRequestId||null});
+    if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||id!==globalThis.__chatgptNotifierAttemptId||
+        startedAt!==globalThis.__chatgptNotifierRequestStartedAt||latestPromptSnapshot()?.promptKey!==snapshot.promptKey||
+        !native?.ok||native.promptKey!==snapshot.promptKey||native.turnStatus!=='in_progress'||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.generating)return;
+    armForCurrentPrompt({resumed:true,nativeProgress:true});
+    return true;
+  }
+
+  function persistCompletionAttempt(attempt) {
+    const metadata={type:'CHATGPT_COMPLETION_CHECKPOINT',action:'update',url:attempt.url,startedAt:attempt.startedAt,requestId:attempt.requestId,
+      baselineKey:attempt.baselineKey,promptKey:attempt.promptKey,httpCompleted:attempt.httpCompleted};
+    attempt.checkpointWrite=(attempt.checkpointWrite||Promise.resolve()).then(()=>runtimeMessage(metadata)).catch(()=>null);
+  }
+
+  async function restoreCompletionCheckpoint() {
+    const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
+    const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
+    if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||initial!==globalThis.__chatgptNotifierAttemptId||initialRequestId!==globalThis.__chatgptNotifierRequestId)return;
+    const record=result?.ok&&result.record;
+    if(!record||record.url!==(ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/')||record.state!=='active'||typeof record.baselineKey!=='string'||
+        !Number.isFinite(record.startedAt)||record.attemptId!==String(record.startedAt))return;
+    if(initial&&initial!==record.attemptId&&(!Number.isFinite(Number(initial))||Number(initial)>record.startedAt))return;
+    globalThis.__chatgptNotifierAttemptId=record.attemptId;
+    globalThis.__chatgptNotifierRequestStartedAt=record.startedAt;
+    globalThis.__chatgptNotifierRequestId=record.requestId||null;
+    globalThis.__chatgptNotifierRequestReceipt=record.receipt||null;
+    armForCurrentPrompt({restored:record});
+    void audit('completion.checkpoint_restored',{promptKey:record.promptKey,startedAt:record.startedAt,bound:Boolean(record.promptKey)});
+  }
+
+  function armForCurrentPrompt(options={}) {
+    const id=globalThis.__chatgptNotifierAttemptId;
+    const startedAt=globalThis.__chatgptNotifierRequestStartedAt;
+    const requestId=globalThis.__chatgptNotifierRequestId||null;
+    if(completionAttempt&&completionAttempt.id===id&&completionAttempt.requestId===requestId&&completionAttempt.token===watchToken&&!options.resumed){
+      if(options.completed){completionAttempt.httpCompleted=true;persistCompletionAttempt(completionAttempt);}
+      return;
+    }
+    const intent=completionSendIntent;
+    if(!intent&&!options.resumed&&!options.restored)return;
+    if(options.resumed&&!options.nativeProgress)return;
+    if(!options.resumed&&!options.restored&&(intent.path!==location.pathname||!Number.isFinite(startedAt)||startedAt<intent.at||startedAt-intent.at>10000))return;
+    completionSendIntent=null;
+    const snapshot=latestPromptSnapshot();
+    const attempt={id,requestId,startedAt,token:watchToken,path:location.pathname,url:ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/',
+      baselineKey:options.restored?options.restored.baselineKey:options.resumed?'':intent.baselineKey,promptKey:options.restored?options.restored.promptKey:options.resumed?snapshot?.promptKey||'':'',httpCompleted:Boolean(options.completed||options.restored?.httpCompleted)};
+    if(!id)return;
+    completionAttempt=attempt;
+    persistCompletionAttempt(attempt);
+    const isCurrent=()=>{
+      if(!runtimeAvailable()){stopContext();return false;}
+      if(attempt.path==='/'&&/^\/c\//.test(location.pathname)){attempt.path=location.pathname;attempt.url=location.origin+location.pathname;persistCompletionAttempt(attempt);}
+      return completionAttempt===attempt&&attempt.token===watchToken&&attempt.path===location.pathname&&
+        attempt.id===globalThis.__chatgptNotifierAttemptId&&attempt.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&attempt.requestId===(globalThis.__chatgptNotifierRequestId||null);
+    };
+    waitForAnswerBoundToLatestPrompt(isCurrent,attempt).then(async text=>{
+      await attempt.checkpointWrite;
+      if(!isCurrent()||!text)return;
+      const resolved=latestPromptSnapshot();
+      if(resolved?.response&&resolved.promptKey===attempt.promptKey)sendCompletion(resolved,attempt);
+    });
   }
 
   function isStopButton(node) {
@@ -1110,6 +1313,12 @@
   document.addEventListener('click', (event) => {
     if (!isStopButton(event.target)) return;
     if (stoppingRecovery && !event.isTrusted) return;
+    if(event.isTrusted){
+      const generation=statusIndicator?.loadingGeneration?.(),captured=globalThis.__chatgptNotifierRequestReceipt;
+      const exact=!generation||generation.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&generation.startReceipt?.epoch===captured?.epoch&&generation.startReceipt?.order===captured?.order;
+      void runtimeMessage({type:'CHATGPT_GENERATION_STOPPED',url:location.href,startedAt:generation?.startedAt||deferredObservedStart||Number(globalThis.__chatgptNotifierAttemptId),
+        requestId:exact?globalThis.__chatgptNotifierRequestId||null:null,startReceipt:generation?.startReceipt||null});
+    }
     // A manual stop is not a successful completion. The next conversation
     // request will arm the watcher again.
     watchToken += 1;
@@ -1117,9 +1326,19 @@
     suppressUntilEpoch = Date.now() + 1500;
   }, { capture: true, signal: listeners.signal });
 
-  function onRuntimeMessage(message) {
-    if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED') armForCurrentPrompt();
+  function onRuntimeMessage(message,sender,sendResponse) {
+    if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_STATUS_TICK'){sendResponse?.({ok:statusIndicator?.tick(message)||false});return;}
+    if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
+    const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&currentRequest){deferredObservedStart=0;deferredTaskObserver?.requestStarted(message.startedAt);armForCurrentPrompt();}
+    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
+    if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest)armForCurrentPrompt();
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
+  void restoreDraft(null,true).catch(()=>{});
+  void restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{if(runtimeAvailable()&&!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();});
 })();
