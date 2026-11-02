@@ -146,6 +146,14 @@ function appendJournal(event, tab = {}) {
     if (['request.completed','request.failed'].includes(event.kind)) operationId ||= requests[event.requestId]?.operationId || null;
     if (['retry.send_intent','handoff.sending','goal.send_intent'].includes(event.kind)) {
       const chatUrl=retryDraftUrl(event.kind==='handoff.sending'?event.targetUrl||tab.url:sourceUrl);
+      // The Goal's intent state is saved BEFORE its journal grant. A crash
+      // between these two writes would leave no active journal entry, so
+      // competing retries must also consult that durable operation claim.
+      if(chatUrl&&event.kind!=='goal.send_intent') {
+        const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
+        if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
+          throw Object.assign(new Error('Цель удерживает незавершённую отправку в этом чате'),{journalPolicy:true});
+      }
       // All automatic senders share one canonical-chat lock, not just one tab
       // slot. Unknown outcomes remain fenced after a tab closes or a worker
       // restarts. Read legacy entries through their saved tab URL.
