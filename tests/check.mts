@@ -40,10 +40,11 @@ async function domCheck() {
       chrome: { storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime: {id:'test-extension',getManifest:()=>({version:'fixture'}),sendMessage:async(message:any)=>{
         if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
         if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return {ok:false};
+        if(message.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS')return {ok:true,changed:false};
         if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
         if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
         if(message.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,message.delayMs));return {ok:true};}
-        if(message.type==='CHATGPT_STOP_RECOVERY'){stopCalls++;assert.equal(editor!.textContent,'Сохранить мой черновик','stop must precede replacing the draft');editor!.textContent='';document.querySelector('[data-test-modern-stop]')?.remove();if(!keepRecovery)document.querySelector('[role=status]')?.remove();return {ok:true,stopped:true};}
+        if(message.type==='CHATGPT_STOP_RECOVERY'){stopCalls++;assert.equal(editor!.textContent,draft,'stop must precede replacing the draft');editor!.textContent='';document.querySelector('[data-test-modern-stop]')?.remove();if(!keepRecovery)document.querySelector('[role=status]')?.remove();return {ok:true,stopped:true};}
         if(message.type==='CHATGPT_COMPOSER_CONTROL'){
           if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
           return {ok:true,matches:true,ready:true};
@@ -149,6 +150,7 @@ async function domCheck() {
   assert.equal(recovery.document.querySelector('#prompt-textarea')!.textContent,'Сохранить мой черновик');
   assert.ok(recovery.logs.some(e=>e.kind==='error.detected'&&e.error==='接続を回復しています'));
   const lingering=setup('',true,true,'',null,true);
+  const lingeringStop=lingering.document.createElement('button');lingeringStop.type='button';lingeringStop.setAttribute('data-test-modern-stop','');lingeringStop.innerHTML=stop.innerHTML;const lingeringBody=lingering.document.querySelector('form')!;lingeringBody.setAttribute('data-composer-body','');lingeringBody.append(lingeringStop);
   lingering.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div role="status"><span class="text-chatgpt-recovery">Recovery</span></div>');
   await pause();lingering.advance(3500);await waitFor(()=>lingering.logs.some(event=>event.kind==='retry.confirmed'));
   assert.equal(lingering.sends.length,1);

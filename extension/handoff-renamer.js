@@ -61,10 +61,16 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
     const recoverFailed=record.titleStatus==='failed'&&recoverTemporaryTarget&&targetAlias&&noSaveIntent&&
       record.titleReason==='Открыт другой чат; переименование отменено';
     if(record.titleStatus==='failed'&&!recoverFailed)return {ok:true,skipped:true};
+    if(record.titleStatus==='waiting') {
+      if(!noSaveIntent||record.titlePreparationVersion!==1)return {ok:false,reason:'Нет подтверждения безопасного продолжения переименования'};
+      if(record.titlePrepareAttempts>=3||Date.now()<record.titleRetryAfter)return {ok:true,waiting:true,retryable:record.titlePrepareAttempts<3};
+    }
     if ((!url&&!targetAlias) || url===ChatGPTHandoffTitle.chatUrl(record.sourceUrl)) return {ok:false,reason:'Не сохранён адрес нового чата'};
     if(targetAlias&&!noSaveIntent)return {ok:false,reason:'Предыдущая попытка переименования не подтверждена; повторная запись отключена'};
     const pending={id,url,title:record.naming.title,ack:false,failure:''};
     let deadline=0;
+    const previousAttempts=record.titlePrepareAttempts||0;
+    const notReady=reason=>Object.assign(new Error(reason),{titleRetryable:true});
     const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
     async function update(titleStatus,extra={},additionalRecords={}) {
       const current=(await chrome.storage.local.get(key))[key];
@@ -82,7 +88,7 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
       return result[0]?.result||{ok:false,reason:'Страница не ответила'};
     }
     try {
-      if(!targetAlias)await update('waiting');
+      await update('waiting',{titlePreparationVersion:1,titlePrepareAttempts:(record.titlePrepareAttempts||0)+1,titleRetryable:false});
       // A conversation URL may be allocated before the server exposes actions.
       const notBefore=(record.sentAt||Date.now())+10000;
       while(Date.now()<notBefore) await wait(Math.min(1000,notBefore-Date.now()));
@@ -107,22 +113,32 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
       let snapshot;
       while(Date.now()<deadline) {
         snapshot=await probe('inspect');
+        if(snapshot.ok&&snapshot.streaming===true) {
+          // A long first response is not a failed rename preparation. Let a
+          // later completion/focus event try again without spending its budget.
+          await update('waiting',{titleRetryable:true,titlePrepareAttempts:previousAttempts,titleRetryAfter:0});
+          return {ok:true,waiting:true,retryable:true};
+        }
+        if(snapshot.ok&&snapshot.ready&&typeof snapshot.title==='string') {
+          if(!Object.hasOwn(record,'titlePreparationTitle'))await update('waiting',{titlePreparationTitle:snapshot.title});
+          else if(snapshot.title!==record.titlePreparationTitle)throw new Error('Название изменилось во время ожидания; переименование отменено');
+        }
         if(snapshot.ok&&snapshot.ready)break;
         if(snapshot.ok===false&&snapshot.reason==='chat-changed')throw new Error(snapshot.reason);
         await wait(1000);
       }
-      if(!snapshot?.ready)throw new Error('Новый чат ещё не готов к переименованию');
+      if(!snapshot?.ready)throw notReady('Новый чат ещё не готов к переименованию');
       if(snapshot.title===pending.title)throw new Error('Название уже изменено без подтверждения журнала');
       const previousTitle=snapshot.title;
       for(const action of ['open','select','fill']) {
-        if(Date.now()>=deadline)throw new Error('Истекло время переименования');
+        if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');
         let result;
-        do {if(Date.now()>=deadline)throw new Error('Истекло время переименования');result=await probe(action,{previousTitle});if(!result.ok&&result.retryable)await wait(250);} while(!result.ok&&result.retryable&&Date.now()<deadline);
-        if(!result.ok)throw new Error(result.reason);
+        do {if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');result=await probe(action,{previousTitle});if(!result.ok&&result.retryable)await wait(250);} while(!result.ok&&result.retryable&&Date.now()<deadline);
+        if(!result.ok)throw result.retryable?notReady(result.reason):new Error(result.reason);
         await wait(250);
       }
       // Durable intent before one click. A lost reply never causes a second save.
-      if(Date.now()>=deadline)throw new Error('Истекло время переименования');
+      if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');
       await update('saving',{previousTitle,titleSaveStartedAt:Date.now()});
       pendingTitles.set(tabId,pending);
       let saved;
@@ -141,6 +157,11 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
       }
       throw new Error('Сервер не подтвердил новое название');
     } catch(error) {
+      if(error.titleRetryable&&record.titlePreparationVersion===1&&!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt')) {
+        const retryable=record.titlePrepareAttempts<3;
+        await update('waiting',{titleReason:String(error.message||error),titleRetryable:retryable,titleRetryAfter:Date.now()+10000});
+        return {ok:true,waiting:true,retryable,reason:String(error.message||error)};
+      }
       await update('failed',{titleReason:String(error.message||error)});
       return {ok:false,reason:String(error.message||error)};
     } finally {

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.6.1';
+  const SCRIPT_VERSION = '1.6.3';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -536,7 +536,7 @@
     try {
       await logRetry('retry.planned', {operationId,text:RETRY_TEXT,error:error.response,
         failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,promptKey},true);
-      if (error.recovery && isGenerating()) {
+      if (error.recovery) {
         if (!stillCurrent()) return;
         const beforeStop = composer();
         recoveryDraft = beforeStop ? rawEditorText(beforeStop) : null;
@@ -547,11 +547,11 @@
         stoppingRecovery = true;
         suppressUntilEpoch = Date.now() + 1500;
         try {
-          result = await runtimeMessage({type:'CHATGPT_STOP_RECOVERY',operationId,url:sourceUrl,
+          result = await runtimeMessage({type:'CHATGPT_STOP_RECOVERY',operationId,url:sourceUrl,attemptId:attempt,requestId,promptKey,
             alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert)});
         } finally { stoppingRecovery = false; }
-        if (!result?.ok) throw new Error(result?.reason || 'Не удалось остановить зависшее ожидание');
-        recoveryStopped = Boolean(result.stopped);
+        if (!result?.ok || result.stopped!==true) throw new Error(result?.reason || 'Нативная остановка прерванного ответа не подтверждена; автопродолжение отменено');
+        recoveryStopped = true;
       }
       // The native stop can clear its banner before the composer becomes
       // writable. Share one bounded budget across stop settling, button and
@@ -768,6 +768,7 @@
     if(handoffFinishBusy||record?.stage!=='sent'||ChatGPTHandoffTitle.chatUrl(location.href)!==ChatGPTHandoffTitle.chatUrl(record.targetUrl))return;
     handoffFinishBusy=true;
     try {
+      void reconcileLegacyCompletionStatus().catch(()=>{});
       const editor=composer();
       if(record.draft&&!record.draftRestoreClaimedAt&&editor&&isElementVisible(editor)) {
         // Claim the restoration before its effect. A restart cannot insert an
@@ -814,9 +815,9 @@
     if(result.notifyAwaiting)notifyOperationWarning({sessionTitle:document.title,response:'Передача ожидает подтверждения нового чата. Повторная отправка отключена; история и черновик сохранены в расширении.'},'Ожидание подтверждения отправки');
   }
 
-  window.addEventListener('focus',scheduleHandoffCheck,{signal:listeners.signal});
+  window.addEventListener('focus',()=>{scheduleHandoffCheck();void renameHandoff();},{signal:listeners.signal});
   window.addEventListener('popstate',scheduleHandoffCheck,{signal:listeners.signal});
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')scheduleHandoffCheck();},{signal:listeners.signal});
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){scheduleHandoffCheck();void renameHandoff();}},{signal:listeners.signal});
 
   async function waitHandoff(check, timeoutMs = 20000) {
     const deadline = Date.now() + timeoutMs;
@@ -1007,10 +1008,12 @@
 
   async function renameHandoff() {
     const record=handoffRecord;
-    if (!record?.naming || record.stage!=='sent' || !ChatGPTHandoffTitle.chatUrl(record.targetUrl) ||
+    if (isGenerating() || record?.titleRetryPaused || record?.titleStatus==='confirmed' || !record?.naming || record.stage!=='sent' || !ChatGPTHandoffTitle.chatUrl(record.targetUrl) ||
         ChatGPTHandoffTitle.chatUrl(record.targetUrl)!==ChatGPTHandoffTitle.chatUrl(location.href)) return;
     const result=await runtimeMessage({type:'CHATGPT_HANDOFF_RENAME',id:record.id});
-    if(result?.ok===false) notifyOperationWarning({sourceUrl:record.targetUrl,sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`},'','title');
+    if(result?.ok&&result.title)record.titleStatus='confirmed';
+    if(result?.waiting&&result.retryable===false)record.titleRetryPaused=true;
+    if(result?.ok===false){record.titleRetryPaused=true;notifyOperationWarning({sourceUrl:record.targetUrl,sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`},'','title');}
   }
 
   function currentErrors() {
@@ -1296,6 +1299,7 @@
 
     lastSentFingerprint = fingerprint;
     deferredTaskObserver?.refresh();
+    void renameHandoff();
     runtimeMessage({
       type: 'CHATGPT_RESPONSE_COMPLETE',
       attemptId:attempt.id,completionStartedAt:attempt.startedAt,requestId:attempt.requestId,
@@ -1350,6 +1354,11 @@
     const metadata={type:'CHATGPT_COMPLETION_CHECKPOINT',action:'update',url:attempt.url,startedAt:attempt.startedAt,requestId:attempt.requestId,
       baselineKey:attempt.baselineKey,promptKey:attempt.promptKey,httpCompleted:attempt.httpCompleted};
     attempt.checkpointWrite=(attempt.checkpointWrite||Promise.resolve()).then(()=>runtimeMessage(metadata)).catch(()=>null);
+  }
+
+  async function reconcileLegacyCompletionStatus() {
+    const result=await runtimeMessage({type:'CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS',url:location.href});
+    if(runtimeAvailable()&&result?.changed)statusIndicator?.accept(result);
   }
 
   async function restoreCompletionCheckpoint() {
@@ -1462,7 +1471,7 @@
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
   const initialDraftRecovery=restoreDraft(null,true).catch(()=>{});
   const initialCompletionRecovery=restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{
-    if(runtimeAvailable()&&!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();
+    if(!runtimeAvailable())return;void reconcileLegacyCompletionStatus().catch(()=>{});if(!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();
   });
   void Promise.all([initialDraftRecovery,initialCompletionRecovery]).then(()=>{
     if(runtimeAvailable())return runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
