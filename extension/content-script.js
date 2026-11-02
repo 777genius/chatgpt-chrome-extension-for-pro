@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.6.1';
+  const SCRIPT_VERSION = '1.6.2';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -678,6 +678,7 @@
     if(handoffFinishBusy||record?.stage!=='sent'||ChatGPTHandoffTitle.chatUrl(location.href)!==ChatGPTHandoffTitle.chatUrl(record.targetUrl))return;
     handoffFinishBusy=true;
     try {
+      void reconcileLegacyCompletionStatus().catch(()=>{});
       const editor=composer();
       if(record.draft&&!record.draftRestoreClaimedAt&&editor&&isElementVisible(editor)) {
         // Claim the restoration before its effect. A restart cannot insert an
@@ -1256,6 +1257,11 @@
     attempt.checkpointWrite=(attempt.checkpointWrite||Promise.resolve()).then(()=>runtimeMessage(metadata)).catch(()=>null);
   }
 
+  async function reconcileLegacyCompletionStatus() {
+    const result=await runtimeMessage({type:'CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS',url:location.href});
+    if(runtimeAvailable()&&result?.changed)statusIndicator?.accept(result);
+  }
+
   async function restoreCompletionCheckpoint() {
     const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
     const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
@@ -1340,5 +1346,5 @@
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
   void restoreDraft(null,true).catch(()=>{});
-  void restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{if(runtimeAvailable()&&!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();});
+  void restoreCompletionCheckpoint().catch(()=>{}).finally(()=>{if(!runtimeAvailable())return;void reconcileLegacyCompletionStatus().catch(()=>{});if(!completionAttempt&&isGenerating())scheduleActiveCompletionRecovery();});
 })();

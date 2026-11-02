@@ -2,6 +2,7 @@
 importScripts('page-probe.js');
 importScripts('completion-probe.js');
 importScripts('completion-checkpoint.js');
+importScripts('legacy-handoff-status.js');
 importScripts('request-receipts.js');
 importScripts('watcher-bootstrap.js');
 importScripts('journal-store.js');
@@ -520,6 +521,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if(message?.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS') {
+    const url=messageChatUrl(message,sender);
+    if(!url){sendResponse?.({ok:false});return false;}
+    reconcileLegacyHandoffStatus(sender.tab.id,url).then(view=>sendResponse?.({ok:true,changed:Boolean(view),...(view||{})})).catch(()=>sendResponse?.({ok:false}));
+    return true;
+  }
   if(message?.type==='CHATGPT_COMPLETION_CHECKPOINT') {
     const tabId=sender.tab?.id,url=completionCheckpointUrl(sender.tab?.url);
     if(sender.frameId>0||typeof tabId!=='number'||!url||completionCheckpointUrl(message.url)!==url){sendResponse?.({ok:false});return false;}
@@ -675,6 +682,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const url=messageChatUrl(message,sender);
     let receipt=statusReceipt();
     if(!url){sendResponse?.({ok:false,reason:'Чат изменился'});return false;}
+    if(message.type==='CHATGPT_GENERATION_STOPPED')cancelLegacyHandoffStatus(sender.tab.id);
     (async()=>{
       const tab=await chrome.tabs.get(sender.tab.id);
       if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'Чат изменился'};
@@ -730,6 +738,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
+  legacyHandoffStatusFences.delete(tabId);
   manualRequestReceiptsByTab.delete(tabId);
   void forgetRequestReceipts(tabId).catch(()=>{});
   statusAnimation.remove(tabId);
