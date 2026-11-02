@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.6.4';
+  const SCRIPT_VERSION = '1.7.0';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
