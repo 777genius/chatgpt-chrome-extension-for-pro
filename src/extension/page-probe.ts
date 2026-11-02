@@ -351,13 +351,18 @@ function controlChatComposer(options:ComposerOptions) {
   const attachments = root.querySelector('[data-composer-attachments]');
   if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};
   if (options.fileName) {
+    // Never authorize a history send when an extra unrecognized attachment
+    // chip is present. Fiber metadata is not guaranteed to be readable.
+    if (!attachments || attachments.children.length !== 1) {
+      return {ok:false,reason:'Нельзя подтвердить единственное вложение истории'};
+    }
     const found = new Set<NativeAttachment>();
     for (const node of attachments?.querySelectorAll('*') || []) {
       const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
       const observed:unknown=key?Reflect.get(node,key):null;
       for(let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;fiber&&i<5;i++,fiber=fiber.return??null){
         const attachment=fiber.memoizedProps?.attachment;
-        if(attachment?.name)found.add(attachment);
+        if(attachment)found.add(attachment); // unnamed native files must also fail closed
       }
     }
     if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
