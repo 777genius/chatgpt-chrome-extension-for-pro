@@ -13,6 +13,7 @@
   let completionSendIntent = null;
   let completionAttempt = null;
   let goalDispatchBusy = false;
+  let goalDispatchQueue = Promise.resolve();
   let completionRecoveryTimer = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
@@ -1423,13 +1424,17 @@
   function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
     if(message?.type==='CHATGPT_GOAL_DISPATCH') {
-      if(!message.url||ChatGPTHandoffTitle.chatUrl(location.href)!==message.url||goalDispatchBusy){
+      if(!message.url||ChatGPTHandoffTitle.chatUrl(location.href)!==message.url){
         sendResponse?.({ok:false});
         return;
       }
-      goalDispatchBusy=true;
       sendResponse?.({ok:true});
-      void dispatchGoal(message);
+      // A second operation must wait for cleanup of a cancelled preparation.
+      // Both operations independently require a fresh worker-owned grant.
+      goalDispatchQueue=goalDispatchQueue.catch(()=>{}).then(async()=>{
+        goalDispatchBusy=true;
+        await dispatchGoal(message);
+      });
       return;
     }
     if(message?.type==='CHATGPT_STATUS_TICK'){sendResponse?.({ok:statusIndicator?.tick(message)||false});return;}
