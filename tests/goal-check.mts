@@ -288,16 +288,22 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'handoff-fixture',tabId:7});
   assert.equal(state(env).phase,'handoff');
   assert.match(await env.store.context(URL_A),/Активная цель/);
-  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7});
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7,acceptedUserId:'handoff-user-1'});
   assert.equal(state(env).phase,'moved');
   assert.equal(state(env,URL_B).id,id);
   assert.equal(state(env,URL_B).deadlineAt,deadline);
   assert.equal(state(env,URL_B).handoffPending,true);
-  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7});
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7,acceptedUserId:'handoff-user-1'});
   assert.equal(state(env,URL_B).phase,'waiting');
   env.tabs[7]=URL_B;
+  const unrelated=await env.store.completion({url:URL_B,tabId:7,
+    completionKey:'/c/goal-fixture-b|manual-user|assistant-0',
+    promptKey:'/c/goal-fixture-b|manual-user',response:'GOAL_COMPLETE',
+    userId:'manual-user-id',nativeVerified:true,rawExact:true});
+  assert.equal(unrelated.ok,false,'unrelated native final response cannot complete handoff Goal');
+  assert.equal(state(env,URL_B).phase,'waiting');
   await env.store.completion({url:URL_B,tabId:7,completionKey:'/c/goal-fixture-b|user-1|assistant-1',
-    promptKey:'/c/goal-fixture-b|user-1',response:'GOAL_COMPLETE',nativeVerified:true,rawExact:true});
+    promptKey:'/c/goal-fixture-b|user-1',response:'GOAL_COMPLETE',userId:'handoff-user-1',nativeVerified:true,rawExact:true});
   assert.equal(state(env,URL_B).phase,'completed');
   assert.equal(env.messages.length,1);
 }
