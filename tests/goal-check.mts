@@ -1,0 +1,209 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+
+// The coordinator and policy are the actual classic scripts loaded by Chrome.
+const require=createRequire(import.meta.url);
+const policy:any=require('../extension/goal-policy.js');
+const {create}:any=require('../extension/goal-store.js');
+
+const URL_A='https://chatgpt.com/c/goal-fixture-a';
+const URL_B='https://chatgpt.com/c/goal-fixture-b';
+let sequence=0;
+type Env={data:Record<string,any>;messages:{tabId:number,message:any}[];events:any[];
+  tabs:Record<number,string>;time:number;store:any;fresh:()=>any;failWrite:boolean};
+function fixture():Env {
+  const env:Env={data:{},messages:[],events:[],tabs:{7:URL_A,8:URL_A},time:1000000,store:null,
+    fresh:()=>null,failWrite:false};
+  const storage={
+    async get(key:string){return {[key]:structuredClone(env.data[key])};},
+    async set(value:Record<string,unknown>){
+      if(env.failWrite)throw Error('Synthetic storage failure');
+      Object.assign(env.data,structuredClone(value));
+    }
+  };
+  const tabs={
+    async get(tabId:number){return {id:tabId,url:env.tabs[tabId]};},
+    async sendMessage(tabId:number,message:any){env.messages.push({tabId,message});return {ok:true};}
+  };
+  const journal=async(event:any)=>{env.events.push(structuredClone(event));return {ok:true};};
+  env.fresh=()=>create({storage,tabs,appendJournal:journal,now:()=>env.time,
+    uuid:()=>`fixture-operation-${++sequence}`});
+  env.store=env.fresh();
+  return env;
+}
+const key=(url:string)=>'chatgpt-goal:'+url;
+const state=(env:Env,url=URL_A)=>env.data[key(url)];
+async function begin(env:Env) {
+  const response=await env.store.start({url:URL_A,tabId:7,goal:'Complete review, CI and merge',
+    rules:'All changes must actually be merged',maxContinuations:2,maxMinutes:60});
+  assert.equal(response.ok,true);
+  assert.equal(env.messages.length,1);
+  assert.match(env.messages[0].message.text,/GOAL_COMPLETE/);
+  return state(env);
+}
+async function confirm(env:Env,promptKey='/c/goal-fixture-a|user-1',url=URL_A) {
+  const record=state(env,url),op=record.operation;
+  assert.ok(op,'one reserved operation');
+  assert.equal((await env.store.check({url,tabId:op.tabId,id:record.id,operationId:op.id})).ok,true);
+  assert.equal((await env.store.check({url,tabId:8,id:record.id,operationId:op.id})).ok,false);
+  await env.store.intent({url,tabId:op.tabId,id:record.id,operationId:op.id,text:op.text,
+    baselineKey:'/c/goal-fixture-a|old-user'});
+  assert.equal((await env.store.authorize({url,tabId:op.tabId,id:record.id,operationId:op.id,text:op.text})).ok,true);
+  await assert.rejects(()=>env.store.intent({url,tabId:op.tabId,id:record.id,operationId:op.id,text:op.text}),/разрешённой/);
+  await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'clicked'});
+  await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'confirmed',newPromptKey:promptKey});
+  assert.equal(state(env,url).expectedPromptKey,promptKey);
+  assert.equal(state(env,url).phase,'waiting');
+}
+const answer=(env:Env,values:Record<string,unknown>={})=>{
+  const record=state(env),promptKey=record.expectedPromptKey;
+  return env.store.completion({url:URL_A,tabId:7,completionKey:promptKey+'|assistant-1',
+    promptKey,response:'Still working',nativeVerified:true,rawExact:false,...values});
+};
+
+assert.equal(policy.exactMarker('GOAL_COMPLETE',true,true),true);
+for(const value of [' GOAL_COMPLETE','GOAL_COMPLETE ','GOAL_COMPLETE\nDone','`GOAL_COMPLETE`','Done GOAL_COMPLETE'])
+  assert.equal(policy.exactMarker(value,true,true),false);
+assert.equal(policy.exactMarker('GOAL_COMPLETE',false,true),false);
+assert.equal(policy.exactMarker('GOAL_COMPLETE',true,false),false);
+assert.equal(policy.canonical('https://chatgpt.com/c/goal-fixture-a/'),URL_A);
+assert.equal(policy.canonical('https://evil.example/c/goal-fixture-a'),'');
+assert.throws(()=>policy.settings({goal:'',maxContinuations:20,maxMinutes:90}));
+assert.throws(()=>policy.settings({goal:'x',maxContinuations:0,maxMinutes:90}));
+assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infinity}));
+
+// Initial goal persisted before dispatch; restart never creates a second click.
+{
+  const env=fixture(),record=await begin(env);
+  assert.equal(record.phase,'preparing');
+  assert.equal((await env.fresh().get(URL_A))?.goal,record.goal);
+  await assert.rejects(()=>env.store.start({url:URL_A,tabId:8,goal:'duplicate',rules:'',
+    maxContinuations:2,maxMinutes:60}),/уже запущена/);
+  assert.equal(env.messages.length,1);
+  await confirm(env);
+  assert.equal(state(env).continuations,0);
+  const done=await answer(env,{response:'GOAL_COMPLETE',rawExact:true});
+  assert.equal(done.ok,true);
+  assert.equal(state(env).phase,'completed');
+  assert.equal(env.messages.length,1,'exact final answer sends no continuation');
+  assert.equal((await answer(env,{response:'GOAL_COMPLETE',rawExact:true})).ok,false);
+}
+
+// Partial marker, Markdown marker and unverified transport may not stop.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await answer(env,{response:'GOAL_COMPLETE is the marker',rawExact:false});
+  assert.equal(state(env).phase,'preparing');
+  assert.equal(env.messages.length,2);
+  await Promise.all([answer(env),answer(env)]);
+  assert.equal(env.messages.length,2,'duplicate completion cannot cause another click');
+  await confirm(env,'/c/goal-fixture-a|user-2');
+  assert.equal(state(env).continuations,1);
+  await env.store.completion({url:URL_A,tabId:7,completionKey:'/c/goal-fixture-a|user-2|assistant-2',
+    promptKey:'/c/goal-fixture-a|user-2',response:'GOAL_COMPLETE',nativeVerified:true,rawExact:false});
+  assert.equal(state(env).phase,'preparing','formatted/partial marker is not exact');
+  assert.equal(env.messages.length,3);
+  await confirm(env,'/c/goal-fixture-a|user-3');
+  assert.equal(state(env).continuations,2);
+  await env.store.completion({url:URL_A,tabId:7,completionKey:'/c/goal-fixture-a|user-3|assistant-3',
+    promptKey:'/c/goal-fixture-a|user-3',response:'Still not done',nativeVerified:true,rawExact:false});
+  assert.equal(state(env).phase,'stopped','finite continuation budget');
+  assert.equal(env.messages.length,3);
+}
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await answer(env,{response:'GOAL_COMPLETE',rawExact:true,nativeVerified:false});
+  assert.equal(state(env).phase,'blocked','transport fallback cannot complete Goal');
+  assert.equal(env.messages.length,1);
+}
+
+// Two tabs delivering the same bound completion race through one durable claim.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  const result=await Promise.all([answer(env),env.store.completion({
+    url:URL_A,tabId:8,completionKey:'/c/goal-fixture-a|user-1|assistant-1',
+    promptKey:'/c/goal-fixture-a|user-1',response:'Still working',nativeVerified:true,rawExact:false})]);
+  assert.equal(result.filter((item:any)=>item.ok).length,1);
+  assert.equal(env.messages.length,2);
+  assert.equal(state(env).operation.tabId===7||state(env).operation.tabId===8,true);
+}
+
+// Pause during response, preserve pending result, resume exactly once.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await env.store.control({action:'pause',url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'paused');
+  await answer(env);
+  assert.equal(env.messages.length,1);
+  assert.ok(state(env).pendingCompletion);
+  await env.store.control({action:'resume',url:URL_A,tabId:7});
+  assert.equal(env.messages.length,2);
+  assert.equal(state(env).phase,'preparing');
+  await assert.rejects(()=>env.store.control({action:'resume',url:URL_A,tabId:7}),/Нельзя/);
+}
+
+// Pause or stop after the send intent never clears the unknown-operation fence.
+{
+  const env=fixture();await begin(env);
+  const record=state(env),op=record.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:record.id,operationId:op.id,text:op.text,
+    baselineKey:'/c/goal-fixture-a|old-user'});
+  await env.store.control({action:'pause',url:URL_A,tabId:7});
+  assert.equal((await env.store.authorize({url:URL_A,tabId:7,id:record.id,operationId:op.id,text:op.text})).ok,false);
+  await env.store.report({url:URL_A,tabId:7,id:record.id,operationId:op.id,
+    status:'blocked',reason:'Lost click acknowledgement'});
+  assert.equal(state(env).phase,'blocked');
+  assert.equal(env.messages.length,1);
+  await assert.rejects(()=>env.store.control({action:'resume',url:URL_A,tabId:7}));
+}
+
+// Deadlines survive restart, never reset due to handoff.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  env.time+=3600001;
+  await answer(env);
+  assert.equal(state(env).phase,'stopped');
+  assert.match(state(env).reason,/Время/);
+  assert.equal(env.messages.length,1);
+}
+
+// Errors and native retry keep the expected prompt in sync; new chat handoff
+// transfers the goal identity and budget only after confirmed acceptance.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.planned'});
+  assert.equal(state(env).phase,'recovering');
+  await answer(env);
+  assert.equal(env.messages.length,1,'no sending while retry underway');
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.confirmed',promptKey:'/c/goal-fixture-a|retry-1'});
+  assert.equal(state(env).phase,'waiting');
+  assert.equal(state(env).expectedPromptKey,'/c/goal-fixture-a|retry-1');
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.blocked',goalHandoff:true});
+  assert.equal(state(env).phase,'waiting','chat-limit event is not terminal for Goal');
+  const id=state(env).id,deadline=state(env).deadlineAt;
+  await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'handoff-fixture',tabId:7});
+  assert.equal(state(env).phase,'handoff');
+  assert.match(await env.store.context(URL_A),/Активная цель/);
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7});
+  assert.equal(state(env).phase,'moved');
+  assert.equal(state(env,URL_B).id,id);
+  assert.equal(state(env,URL_B).deadlineAt,deadline);
+  assert.equal(state(env,URL_B).handoffPending,true);
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'handoff-fixture',tabId:7});
+  assert.equal(state(env,URL_B).phase,'waiting');
+  env.tabs[7]=URL_B;
+  await env.store.completion({url:URL_B,tabId:7,completionKey:'/c/goal-fixture-b|user-1|assistant-1',
+    promptKey:'/c/goal-fixture-b|user-1',response:'GOAL_COMPLETE',nativeVerified:true,rawExact:true});
+  assert.equal(state(env,URL_B).phase,'completed');
+  assert.equal(env.messages.length,1);
+}
+
+// Store errors are fail-closed and do not click.
+{
+  const env=fixture();
+  env.failWrite=true;
+  await assert.rejects(()=>begin(env),/Synthetic storage failure/);
+  assert.equal(env.messages.length,0);
+}
+
+console.log('Goal policy, durable lifecycle, dedupe, marker, recovery and handoff checks passed.');
