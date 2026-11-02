@@ -234,3 +234,34 @@ and the historical npm lock after the authoritative Bun lock is frozen.
 Do not merge until all checks, independent review and owner Chrome smoke
 approval are complete. The owner-only checklist is
 `docs/browser-smoke-checklist.md`.
+
+## Integration checkpoint: main v1.7.0, Goal mode
+
+PR #4 now integrates upstream main commit
+`fc9513c155bf75ec8706339a11282f03a706a5b6`.
+This adds a durable Goal coordinator, pure exact-marker policy, Goal popup
+controls, journal cross-feature conflict fences, and Goal/handoff E2E tests.
+The new baseline is **23 original Chrome runtime JS files**, not the former
+20/21-file snapshots above.
+
+- `goal-policy.ts`, `goal-store.ts`, and the full updated `popup.ts`
+  overlay the current v1.7.0 JavaScript with static typed contracts.
+- `journal-store.ts` preserves 1.7.0's source-specific Goal/retry/handoff
+  admission, restart-proof unknown-outcome locks, and worker-only release
+  authority.
+- All newly merged Goal tests are migrated from `.mts` to ordinary `.ts`
+  and remain in both the source and compiled-distribution test inventories.
+- `bun.lock` is frozen and the obsolete npm lock is removed. Node.js
+  engineering-toolchain engine range is `>=26.10.0 <27` to match published
+  Get Modular support.
+- **Unported critical files:** `content-script.js` and
+  `service-worker.js`, which implement the native DOM send and MV3 worker
+  dispatch. Never substitute a renamed-but-untyped file or fake runtime
+  wrapper to bypass the release gate.
+- Last CodeRabbit manual request was not completed because the Draft HEAD
+  changed. Request substantive independent review only on a stable candidate.
+
+The full green CI and Chrome tests are **not yet established**. Candidate
+TypeScript annotations are not a passing qualification. Every future main
+advance must be integrated before any final admission check to avoid
+reintroducing already-fixed concurrency or recovery defects.
