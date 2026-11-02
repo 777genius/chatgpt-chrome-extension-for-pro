@@ -11,6 +11,9 @@ importScripts('status-animation.js');
 importScripts('deferred-task-status.js');
 importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
+importScripts('goal-policy.js');
+importScripts('goal-store.js');
+const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});
 
 initializeJournal('worker-start').catch(console.error);
 
@@ -282,7 +285,12 @@ const handoffWrites = new Map();
 function handoffKey(tabId) { return `chatgpt-handoff:${tabId}`; }
 async function handleHandoffMessage(message, tabId) {
   const key = handoffKey(tabId);
-  if (message.type === 'CHATGPT_HANDOFF_GET') return { ok: true, record: (await chrome.storage.local.get(key))[key] || null };
+  if (message.type === 'CHATGPT_HANDOFF_GET') {
+    const saved=(await chrome.storage.local.get(key))[key]||null;
+    if(saved?.stage==='sent'&&saved.targetUrl)
+      await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId});
+    return {ok:true,record:saved};
+  }
   const previous = handoffWrites.get(tabId) || Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     const current = (await chrome.storage.local.get(key))[key];
@@ -296,6 +304,7 @@ async function handleHandoffMessage(message, tabId) {
       const lineage=(await chrome.storage.local.get(lineageKey))[lineageKey];
       const naming=ChatGPTHandoffTitle.planNext({sourceUrl:record.sourceUrl,sourceTitle:record.sourceTitle,lineage});
       record={...record,naming};
+      await goalController.handoffBegin({sourceUrl:record.sourceUrl,handoffId:record.id,tabId});
       await appendJournal({kind:'handoff.navigating', operationId:record.id, sourceUrl:record.sourceUrl,
         text:record.text, prompt:record.prompt, asFile:record.asFile, fileName:record.fileName,
         draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,naming}, {id:tabId});
@@ -320,7 +329,10 @@ async function handleHandoffMessage(message, tabId) {
     }
     let acceptance=null;
     if(message.type==='CHATGPT_HANDOFF_RECONCILE'||message.stage==='sent') {
-      if(current.stage==='sent')return {ok:true,record:current,confirmed:true};
+      if(current.stage==='sent'){
+        await goalController.handoffConfirm({sourceUrl:current.sourceUrl,targetUrl:current.targetUrl,handoffId:current.id,tabId});
+        return {ok:true,record:current,confirmed:true};
+      }
       if(!['sending','awaiting-confirmation'].includes(current.stage))return {ok:true,record:current,confirmed:false};
       const receipt=current.sendReceipt;
       if(receipt?.operationId===current.id&&typeof receipt.submittedText==='string'&&receipt.submittedText&&Number.isFinite(receipt.clickedAt)) {
@@ -352,6 +364,8 @@ async function handleHandoffMessage(message, tabId) {
     const lineageUrl=message.stage==='sent'&&record.naming?ChatGPTHandoffTitle.chatUrl(record.targetUrl):'';
     await chrome.storage.local.set({ [key]: record,
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
+    if(message.stage==='sent')
+      await goalController.handoffConfirm({sourceUrl:record.sourceUrl,targetUrl:record.targetUrl,handoffId:record.id,tabId});
     return { ok: true, record, notifyAwaiting:message.stage==='awaiting-confirmation'&&!current.awaitingNotifiedAt };
   });
   handoffWrites.set(tabId, write);
@@ -359,6 +373,44 @@ async function handleHandoffMessage(message, tabId) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if(message?.type==='CHATGPT_GOAL_CONTROL') {
+    if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('popup.html')) {
+      sendResponse?.({ok:false,error:'Goal управляется только из popup расширения'});
+      return false;
+    }
+    (async()=>{
+      const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+      const url=ChatGPTGoalPolicy.canonical(tab?.url);
+      if(typeof tab?.id!=='number'||!url)throw Error('Откройте сохранённый чат ChatGPT');
+      if(message.action==='get')return {ok:true,record:await goalController.get(url)};
+      if(message.action==='start')return goalController.start({url,tabId:tab.id,goal:message.goal,rules:message.rules,
+        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
+      return goalController.control({action:message.action,url,tabId:tab.id});
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    return true;
+  }
+  if(['CHATGPT_GOAL_CONTEXT','CHATGPT_GOAL_CHECK','CHATGPT_GOAL_INTENT',
+      'CHATGPT_GOAL_STATUS','CHATGPT_GOAL_MANUAL'].includes(message?.type)) {
+    const tabId=sender.tab?.id,url=ChatGPTGoalPolicy.canonical(sender.tab?.url);
+    if(sender.frameId>0||typeof tabId!=='number'||!url||
+        ChatGPTGoalPolicy.canonical(message.url)!==url) {
+      sendResponse?.({ok:false,error:'Goal chat binding mismatch'});
+      return false;
+    }
+    (async()=>{
+      if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+      if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:await goalController.context(url)};
+      if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
+        url,tabId,id:message.goalId,operationId:message.operationId});
+      if(message.type==='CHATGPT_GOAL_INTENT')return goalController.intent({
+        url,tabId,id:message.goalId,operationId:message.operationId,text:message.text,baselineKey:message.baselineKey});
+      if(message.type==='CHATGPT_GOAL_STATUS')return goalController.report({
+        url,tabId,id:message.goalId,operationId:message.operationId,status:message.status,
+        reason:message.reason,newPromptKey:message.newPromptKey});
+      return goalController.manual({url,tabId});
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    return true;
+  }
   if (['CHATGPT_HANDOFF_TITLE_INFO','CHATGPT_HANDOFF_RENAME_RECOVER'].includes(message?.type)) {
     if (sender.id!==chrome.runtime.id || sender.url!==chrome.runtime.getURL('popup.html')) {
       sendResponse({ok:false,reason:'Восстановление доступно только из меню расширения'});
