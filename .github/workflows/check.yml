@@ -38,3 +38,13 @@ jobs:
       - name: Reject incomplete migration before ready/main
         if: github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
         run: bun run check:complete
+      # Download the exact tested unpacked build for the owner's final Chrome
+      # smoke test. Never publish an unqualified Draft or failed build.
+      - name: Preserve qualified Chrome MV3 distribution
+        if: github.event_name == 'pull_request' && !github.event.pull_request.draft && success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chrome-mv3-${{ github.sha }}
+          path: dist/extension/
+          if-no-files-found: error
+          retention-days: 7
