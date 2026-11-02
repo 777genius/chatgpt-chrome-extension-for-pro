@@ -327,6 +327,24 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
     maxContinuations:2,maxMinutes:60}),/не подтверждена/);
 }
 
+// A failed dispatch of an unclaimed reservation never wrote a send intent.
+// Explicit Stop can release it; this is different from the unknown-click fence.
+{
+  const env=fixture();await begin(env);
+  const rec=state(env),op=rec.operation;
+  assert.equal(op.status,'reserved');
+  await env.store.report({url:URL_A,tabId:7,id:rec.id,operationId:op.id,
+    status:'blocked',reason:'Content script unavailable'});
+  assert.equal(state(env).phase,'blocked');
+  assert.equal(state(env).operation.status,'reserved');
+  await env.store.control({action:'stop',url:URL_A,tabId:7});
+  assert.equal(state(env).phase,'stopped');
+  assert.equal(state(env).operation,null,'unclaimed dispatch is safe to release after Stop');
+  const restarted=await env.store.start({url:URL_A,tabId:7,goal:'Explicitly restarted',
+    rules:'',maxContinuations:1,maxMinutes:20});
+  assert.equal(restarted.ok,true);
+}
+
 // On resume or viewing the popup after suspension, an unknown-click
 // operation fails closed; an unclaimed reserved operation has separate safe recovery. No background re-dispatch happens.
 {
@@ -435,6 +453,25 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
     handoffId:'multiple-destination',tabId:7,acceptedUserId:'accepted-user'});
   assert.equal(state(env,URL_B).phase,'completed');
   assert.equal(env.messages.length,1,'only matching handoff final result is accepted');
+}
+
+// A burst of unrelated destination answers cannot evict a saved accepted
+// handoff answer. Native user IDs are the durable selector; no first/last-N
+// truncation may silently change which answer completes Goal.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'burst-handoff',tabId:7});
+  const stage=async(userId:string,answer:string)=>env.store.stageHandoffCompletion({
+    sourceUrl:URL_A,targetUrl:URL_B,handoffId:'burst-handoff',tabId:7,
+    completionKey:'/c/goal-fixture-b|'+userId+'|assistant-1',
+    promptKey:'/c/goal-fixture-b|'+userId,response:answer,userId,nativeVerified:true,rawExact:answer==='GOAL_COMPLETE'});
+  assert.equal((await stage('accepted-first','GOAL_COMPLETE')).ok,true);
+  for(let n=0;n<9;n++)assert.equal((await stage('unrelated-'+n,'Not complete')).ok,true);
+  assert.equal(state(env).handoffEarlyCompletions.length,10);
+  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,
+    handoffId:'burst-handoff',tabId:7,acceptedUserId:'accepted-first'});
+  assert.equal(state(env,URL_B).phase,'completed');
+  assert.equal(env.messages.length,1);
 }
 
 // Store errors are fail-closed and do not click.
