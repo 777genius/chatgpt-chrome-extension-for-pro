@@ -403,7 +403,7 @@ declare const module:undefined|{exports:unknown};
         }
         if(['retry.failed','retry.blocked'].includes(kind)) {
           const owner=record.recovery;
-          const belongs=owner?.operationId===operationId&&owner.tabId===tabId&&
+          const belongs=!!owner&&owner.operationId===operationId&&owner.tabId===tabId&&
             owner.sourcePromptKey===record.expectedPromptKey;
           const terminalTurn=kind==='retry.blocked'&&!operationId&&
             sourcePromptKey===record.expectedPromptKey;
