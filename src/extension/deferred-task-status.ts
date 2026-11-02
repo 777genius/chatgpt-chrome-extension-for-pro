@@ -205,7 +205,7 @@ interface DeferredMeta {
         const retained=snapshot.cards.find(card=>card.cardKey===initial.cardKey);
         if(retained&&retained.enabled!==false&&retained.current){arm();}
         else {initial=null;cancel();}
-      } else if(state.phase!=='resumed'){const disabled=snapshot.cards.find(card=>card.current&&card.enabled===false),historical=snapshot.cards.filter(card=>!card.current).at(-1);emit('none',disabled?'task-disabled':historical?'historical-card':'no-current-task',disabled||historical);}
+      } else if(state.phase!=='resumed'){const disabled=snapshot.cards.find(card=>card.current&&card.enabled===false),historical=snapshot.cards.filter(card=>!card.current).at(-1);emit('none',disabled?'task-disabled':historical?'historical-card':'no-current-task',disabled||historical||null);}
       lastSnapshot={...snapshot,signature};
     }
     function refresh(){scan('refresh');}
