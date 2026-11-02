@@ -39,6 +39,7 @@ const js = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
 const legacy = join(root, "extension");
 const typed = join(root, "src", "extension");
 for (const name of js) {
+  if (name === "journal-modular.js") continue; // independently bundled IIFE
   if (!existsSync(join(typed, name.replace(/\.js$/, ".ts")))) {
     const original = readFileSync(join(legacy, name));
     const output = readFileSync(join(dir, name));
