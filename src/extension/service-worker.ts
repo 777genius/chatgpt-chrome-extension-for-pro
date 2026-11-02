@@ -819,7 +819,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     appendJournal(event,sender.tab).then(async result=>{
       if(['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
         await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
-          promptKey:event.newPromptKey,goalHandoff:event.goalHandoff===true});
+          promptKey:event.newPromptKey,sourcePromptKey:event.promptKey,operationId:event.operationId,
+          goalHandoff:event.goalHandoff===true});
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(workerErrorCode(error)==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:workerErrorMessage(error)}));
     return true;
