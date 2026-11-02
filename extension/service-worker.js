@@ -287,7 +287,15 @@ function handoffKey(tabId) { return `chatgpt-handoff:${tabId}`; }
 async function handleHandoffMessage(message, tabId) {
   const key = handoffKey(tabId);
   if (message.type === 'CHATGPT_HANDOFF_GET') {
+    // A persisted navigating/sending handoff may precede the Goal's phase
+    // write if MV3 suspended the worker between durable storage operations.
+    // Complete the exact same transition before allowing the content script
+    // to resume its native handoff. Never redeliver a send intent.
+    const pending=handoffWrites.get(tabId);
+    if(pending)await pending.catch(()=>{});
     const saved=(await chrome.storage.local.get(key))[key]||null;
+    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation','sent'].includes(saved.stage))
+      await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
     if(saved?.stage==='sent'&&saved.targetUrl)
       await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId,acceptedUserId:saved.acceptance?.messageId});
     return {ok:true,record:saved};
