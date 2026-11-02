@@ -1409,6 +1409,7 @@
     if (!isStopButton(event.target)) return;
     if (stoppingRecovery && !event.isTrusted) return;
     if(event.isTrusted){
+      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       const generation=statusIndicator?.loadingGeneration?.(),captured=globalThis.__chatgptNotifierRequestReceipt;
       const exact=!generation||generation.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&generation.startReceipt?.epoch===captured?.epoch&&generation.startReceipt?.order===captured?.order;
       void runtimeMessage({type:'CHATGPT_GENERATION_STOPPED',url:location.href,startedAt:generation?.startedAt||deferredObservedStart||Number(globalThis.__chatgptNotifierAttemptId),
