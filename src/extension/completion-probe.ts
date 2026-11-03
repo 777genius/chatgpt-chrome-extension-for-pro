@@ -1,12 +1,14 @@
+declare const module:undefined|{exports:unknown};
 "use strict";
 
-// Serialized into Chrome MAIN. Metadata only; never invokes React handlers,
-// reads drafts/answer text, or escapes the page's own document.
+// MAIN-world native completion proof; serializable and callback-free.
 interface NativeMessage {
   type?: string;
   phase?: string;
   messageId?: string;
   completed?: boolean;
+  message?: string; content?: string;
+  contentReferences?: readonly {source_message_id?:string;model_dil_v2?:{fallbackMarkdown?:string}}[];
 }
 interface NativeTurnEntry {
   id?: string;
@@ -21,7 +23,17 @@ interface NativeTurnEntry {
 }
 interface ReactTurnFiber {
   return?: ReactTurnFiber | null;
-  memoizedProps?: { entries?: readonly NativeTurnEntry[] };
+  memoizedProps?: {
+    entries?: readonly NativeTurnEntry[];
+    isLoading?:boolean;
+    isStartButtonAllowed?:boolean;
+    composerController?: {
+      view?:{dom?:Element};
+      getChatGptPrompt?:()=>unknown;
+      pendingSubmit?:unknown;pendingBrowserAutocompleteSubmission?:unknown;
+      submitReady?:boolean;
+    };
+  };
 }
 interface CompletedTurnProbe {
   ok: boolean;
@@ -40,59 +52,165 @@ interface CompletedTurnProbe {
   assistantCompleted?: boolean;
   generating?: boolean;
   hasError?: boolean;
+  userText?:string;userVisibleText?:string|null;userSentAtMs?:number|null;
+  goalResponse?:string;goalRawExact?:boolean;
+  composerIdle?:boolean;absentPromptKey?:string|null;
 }
-function inspectCompletedTurn(expectedUrl: string): CompletedTurnProbe {
-  const url = location.origin + location.pathname.replace(/\/$/, "");
-  if (url !== expectedUrl) return { ok: false, reason: "route-changed" };
-  const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
-  const turns = Array.from(root.querySelectorAll('[data-content-search-turn-key],[data-testid^="conversation-turn-"]'));
-  const element = turns.at(-1);
-  if (!element) return { ok: false, reason: "turn-missing" };
-  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
-  const initialFiber: unknown = fiberKey ? Reflect.get(element, fiberKey) : null;
-  let fiber: ReactTurnFiber | null = typeof initialFiber === "object" && initialFiber !== null
-    ? initialFiber as ReactTurnFiber : null;
-  let entry: NativeTurnEntry | null = null;
-  let entryCount = 0;
-  for (let i = 0; fiber && i < 20; i++, fiber = fiber.return ?? null) {
-    const entries = fiber.memoizedProps?.entries;
-    if (!Array.isArray(entries) || !entries.length) continue;
-    const latest = entries.at(-1);
-    const domKey = element.getAttribute("data-content-search-turn-key") || element.getAttribute("data-testid");
-    if (latest?.id === domKey && latest.isMostRecentTurn === true) { entry = latest; entryCount = entries.length; break; }
+function inspectCompletedTurn(expectedUrl:string,includeGoalText:boolean=false,failedPromptKey:string|null=null):CompletedTurnProbe {
+  function plainGoalMarkerDOM(rendered:Element|null|undefined,sourceMessageId:string=''):boolean {
+    if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
+    const plain=(node:Element|null|undefined):boolean=>node?.tagName==='P'&&!node.children.length&&node.childNodes.length===1&&
+      node.firstChild?.nodeType===3&&node.firstChild.textContent==='GOAL_COMPLETE';
+    let paragraph:Element=rendered;
+    while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&paragraph.children.length===1)paragraph=paragraph.firstElementChild!;
+    if(plain(paragraph))return true;
+    const sources=Array.from(rendered.querySelectorAll('[data-dil-source-message-id]'));
+    if(sources.length!==1||!sourceMessageId||sources[0].getAttribute('data-dil-source-message-id')!==sourceMessageId)return false;
+    const source=sources[0],roots=Array.from(source.querySelectorAll('[data-dil-message-id]'));
+    if(roots.length!==1||roots[0].getAttribute('data-dil-message-id')!==sourceMessageId)return false;
+    const dil=roots[0],p=dil.firstElementChild,run=p?.firstElementChild;
+    const neutral=(node:Element):boolean=>!Array.from(node.attributes).some(a=>/^(?:role|href|contenteditable|aria-hidden|hidden)$/i.test(a.name));
+    if(dil.tagName!=='DIV'||dil.children.length!==1||dil.childNodes.length!==1||p?.tagName!=='P'||
+        p.getAttribute('data-d-component')!=='text'||!p.hasAttribute('data-d-text-flow')||p.children.length!==1||p.childNodes.length!==1||
+        run?.tagName!=='SPAN'||!run.hasAttribute('data-d-stream-run')||run.getAttribute('data-d-text-flow')!=='run'||
+        run.children.length||run.childNodes.length!==1||run.firstChild?.nodeType!==3||run.firstChild.textContent!=='GOAL_COMPLETE'||!neutral(p)||!neutral(run)||
+        Array.from(run.attributes).some(a=>!['data-d-stream-run','data-d-text-flow'].includes(a.name)))return false;
+    // Only native DIV layout wrappers and truly empty hidden placeholders may
+    // surround the one DIL paragraph; no hidden/interactive meaning is ignored.
+    for(const node of rendered.querySelectorAll('*')) {
+      const style=node.ownerDocument?.defaultView?.getComputedStyle?.(node);
+      if(node.textContent&&((node as HTMLElement).style?.display==='none'||['hidden','collapse'].includes((node as HTMLElement).style?.visibility)||
+          style?.display==='none'||['hidden','collapse'].includes(style?.visibility??'')))return false;
+      if(node===p||node===run)continue;
+      if(node.tagName!=='DIV'||node.querySelector('button,a,input,textarea,pre,code,h1,h2,h3,h4,h5,h6,strong,em,del,s')||
+          node.hasAttribute('role')||node.hasAttribute('aria-hidden')||node.hasAttribute('contenteditable')||
+          node.hasAttribute('hidden')&&(node.childNodes.length||node===dil||node.contains(dil)))return false;
+      if(Array.from(node.childNodes).some(child=>child.nodeType!==1&&(child.nodeType!==3||child.textContent!=='')))return false;
+    }
+    return true;
   }
-  if (!entry) return { ok: false, reason: "native-turn-missing" };
-  const users = (entry.turn?.items || []).filter((item) => item.type === "user-message");
-  const assistants = (entry.turn?.items || []).filter((item) =>
-    item.type === "assistant-message" && item.phase === "final_answer");
-  const user = users.at(-1), assistant = assistants.at(-1);
-  const domUser = Array.from(element.querySelectorAll(
-    '[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]',
-  )).at(-1);
-  const domAssistant = Array.from(element.querySelectorAll(
-    '[data-chatgpt-search-unit-key$=":assistant"],[data-message-author-role="assistant"],[data-turn="assistant"]',
-  )).at(-1);
-  const userKey = domUser?.getAttribute("data-testid") || domUser?.getAttribute("data-chatgpt-search-unit-key");
-  const assistantKey = domAssistant?.getAttribute("data-testid") ||
-    domAssistant?.getAttribute("data-chatgpt-search-unit-key");
-  if (!user?.messageId || !userKey) return { ok: false, reason: "bound-messages-missing" };
-  const visible = (node: Element): boolean => !!node.getClientRects().length;
-  const generating = Array.from(root.querySelectorAll(
-    'button[data-testid="stop-button"],button[data-testid="fruitjuice-stop-button"],[data-composer-body] button:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])',
-  )).some(visible);
-  const hasError = Boolean(entry.errorMessage) || Array.from(root.querySelectorAll(
-    'aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)',
-  )).some(visible);
-  const userTimes = (entry.timestampTurns || []).filter(item => item.role === "user");
-  const firstUserSentAtMs = entryCount === 1 && users.length === 1 && userTimes.length === 1
-    ? userTimes[0]?.sentAtMs ?? null : null;
-  return {
-    ok: true, url, firstUserSentAtMs, firstTurn: entryCount === 1,
-    promptKey: location.pathname + "|" + userKey, assistantKey: assistantKey || "",
-    userId: user.messageId, assistantId: assistant?.messageId || "",
-    isLatest: entry.isMostRecentTurn === true, isReadOnly: entry.isReadOnly,
-    turnStatus: entry.turn?.status, assistantPhase: assistant?.phase,
-    assistantCompleted: assistant?.completed === true, generating, hasError,
-  };
+  const url=location.origin+location.pathname.replace(/\/$/,'');
+  if(url!==expectedUrl)return {ok:false,reason:'route-changed'};
+  const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
+  const turns=Array.from(root.querySelectorAll('[data-content-search-turn-key],[data-testid^="conversation-turn-"]'));
+  const element=turns.at(-1);
+  if(!element)return {ok:false,reason:'turn-missing'};
+  const fiberKey=Object.keys(element).find(key=>key.startsWith('__reactFiber$'));
+  const observed:unknown=fiberKey?Reflect.get(element,fiberKey):null;
+  let fiber:ReactTurnFiber|null=observed&&typeof observed==='object'?observed as ReactTurnFiber:null,entry:NativeTurnEntry|null=null,entryCount=0,nativeEntries:readonly NativeTurnEntry[]|null=null;
+  for(let i=0;fiber&&i<20;i++,fiber=fiber.return??null){
+    const entries=fiber.memoizedProps?.entries;
+    if(!Array.isArray(entries)||!entries.length)continue;
+    const latest=entries.at(-1);
+    const domKey=element.getAttribute('data-content-search-turn-key')||element.getAttribute('data-testid');
+    if(latest?.id===domKey&&latest.isMostRecentTurn===true){entry=latest;entryCount=entries.length;nativeEntries=entries;break;}
+  }
+  if(!entry)return {ok:false,reason:'native-turn-missing'};
+  const users=(entry.turn?.items||[]).filter(item=>item.type==='user-message');
+  const assistants=(entry.turn?.items||[]).filter(item=>item.type==='assistant-message'&&item.phase==='final_answer');
+  const user=users.at(-1),assistant=assistants.at(-1);
+  const domUser=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]')).at(-1);
+  const domAssistant=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":assistant"],[data-message-author-role="assistant"],[data-turn="assistant"]')).at(-1);
+  const userKey=domUser?.getAttribute('data-testid')||domUser?.getAttribute('data-chatgpt-search-unit-key');
+  const assistantKey=domAssistant?.getAttribute('data-testid')||domAssistant?.getAttribute('data-chatgpt-search-unit-key');
+  if(!user?.messageId||!userKey)return {ok:false,reason:'bound-messages-missing'};
+  const visible=(node:Element):boolean=>!!node.getClientRects().length;
+  const generating=Array.from(root.querySelectorAll('button[data-testid="stop-button"],button[data-testid="fruitjuice-stop-button"],[data-composer-body] button:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).some(visible);
+  const hasError=Boolean(entry.errorMessage)||Array.from(root.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(visible);
+  const userTimes=(entry.timestampTurns||[]).filter(item=>item.role==='user');
+  const firstUserSentAtMs=entryCount===1&&users.length===1&&userTimes.length===1?userTimes[0].sentAtMs:null;
+  let goalText:Partial<CompletedTurnProbe>={};
+  if(includeGoalText===true) {
+    let userVisibleText:string|null=null;
+    const unit=domUser?.closest('[data-chatgpt-search-unit-key$=":user"]');
+    const userIndex=(entry.turn?.items||[]).lastIndexOf(user);
+    const unitBound=unit?.getAttribute('data-chatgpt-search-unit-key')===`${entry.id}:${userIndex}:user`;
+    const messageIds=unit?.getAttribute('data-chatgpt-search-message-ids');
+    const ids=new Set<string>((messageIds||'').split(/\s+/).filter(Boolean));
+    const idsBound=ids.size===1&&ids.has(user.messageId);
+    if(domUser&&(unitBound||idsBound)&&(messageIds==null||idsBound)) {
+      // Read only a concrete sent-message body after binding its unit or native
+      // message ID. A whole turn also contains speaker, file and toolbar text.
+      const candidates=Array.from(domUser.querySelectorAll('[data-user-message-bubble="true"] [data-search-result-target] > div > div.whitespace-pre-wrap[dir="auto"]'))
+        .filter(node=>node.isConnected&&visible(node)&&!node.closest('[aria-hidden="true"],[hidden],[inert],[data-app-shell-active-page="false"]'));
+      const body=candidates.find(node=>!candidates.some(parent=>parent!==node&&parent.contains(node)));
+      if(body&&candidates.every(node=>body.contains(node))) {
+        const copy=body.cloneNode(true) as Element;
+        // Computed visibility belongs to mounted originals, not detached
+        // clones. Do not use child rects: display:contents wrappers have none.
+        const originals=Array.from(body.querySelectorAll('*')),clones=Array.from(copy.querySelectorAll('*'));
+        for(let index=0;index<originals.length;index++) {
+          const style=document.defaultView?.getComputedStyle?.(originals[index]);
+          if(style?.display==='none'||['hidden','collapse'].includes(style?.visibility??''))clones[index].remove();
+        }
+        copy.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],[hidden],.ProseMirror-widget,[data-composer-attachments],[data-testid*="attachment"],h4.sr-only[data-conversation-role="user"]').forEach(node=>node.remove());
+        function text(node:Node):string {
+          if(node.nodeType===3)return node.textContent||'';
+          if(node.nodeType!==1)return '';
+          const element=node as Element;
+          if(element.tagName==='BR')return element.classList.contains('ProseMirror-trailingBreak')?'':'\n';
+          return Array.from(element.childNodes).map(text).join(['UL','OL'].includes(element.tagName)?'\n':'');
+        }
+        userVisibleText=copy.querySelector('p, div, br, li')?Array.from(copy.childNodes).map(text).join('\n'):text(copy);
+      }
+    }
+    let goalResponse:string=typeof assistant?.content==='string'?assistant.content:'';
+    // Native DIL answers may store only a content reference. Resolve complete
+    // fallback Markdown only when that reference is the entire native body;
+    // surrounding prose/code and missing fallback parts must remain non-exact.
+    const references=assistant?.contentReferences;
+    if(/^::chatgpt-content-reference\{[^{}]+\}/.exec(goalResponse)?.[0]===goalResponse&&
+        Array.isArray(references)&&references.length&&
+        references.every(ref=>typeof ref?.model_dil_v2?.fallbackMarkdown==='string')) {
+      goalResponse=references.map(ref=>ref.model_dil_v2.fallbackMarkdown).join('\n\n');
+      // Native DIL serialization escapes this literal underscore. This single
+      // representation still needs the independent plain rendered check below.
+      if(goalResponse==='GOAL\\_COMPLETE')goalResponse='GOAL_COMPLETE';
+    }
+    const rendered=domAssistant?.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
+    let goalRawExact:boolean=false;
+    const assistantUnit=domAssistant?.closest('[data-chatgpt-search-unit-key$=":assistant"]');
+    const assistantIndex=(entry.turn?.items||[]).lastIndexOf(assistant as NativeMessage);
+    const assistantIds=new Set<string>((assistantUnit?.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
+    const unitMatches=assistantUnit?.getAttribute('data-chatgpt-search-unit-key')===`${entry.id}:${assistantIndex}:assistant`;
+    const boundDIL=assistant?.messageId&&(unitMatches||assistantIds.size===1&&assistantIds.has(assistant.messageId))&&
+      (!assistantIds.size||assistantIds.size===1&&assistantIds.has(assistant.messageId))&&
+      references?.some(ref=>ref.source_message_id===assistant.messageId)?assistant.messageId:'';
+    if(domAssistant&&goalResponse==='GOAL_COMPLETE'&&plainGoalMarkerDOM(rendered,boundDIL)) {
+      const semantic=domAssistant.cloneNode(true) as Element;
+      semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
+      goalRawExact=(semantic.textContent||'').trim()==='GOAL_COMPLETE';
+    }
+    const sentAtMs=userTimes.at(-1)?.sentAtMs;
+    goalText={userText:typeof user.message==='string'?user.message:'',userVisibleText,userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
+      goalResponse,goalRawExact};
+  }
+  // Failure rollback is separate from completion. Require the real idle
+  // voice control AND its native editor controller; absence of Stop is unsafe.
+  let composerIdle=false,absentPromptKey:string|null=null;
+  if(typeof failedPromptKey==='string'&&failedPromptKey.startsWith(location.pathname+'|')) {
+    const key=failedPromptKey.slice(location.pathname.length+1),match=/^(.*):(\d+):user$/.exec(key);
+    if(match&&nativeEntries&&!nativeEntries.some(item=>item.id===match[1]))absentPromptKey=failedPromptKey;
+    const visibleIdle=(node:Element|null|undefined):boolean=>Boolean(node?.isConnected&&visible(node)&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
+    const voice=Array.from(root.querySelectorAll<HTMLButtonElement>('[data-composer-body] button')).find(node=>visibleIdle(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true'&&node.querySelector('use[href$="#codex-icon-voice-regular-20"]'));
+    let nativeVoiceIdle=false;
+    const voiceKey=voice&&Object.keys(voice).find(key=>key.startsWith('__reactFiber$'));
+    for(let current:ReactTurnFiber|null=voiceKey&&voice?Reflect.get(voice,voiceKey) as ReactTurnFiber:null,i=0;current&&i<16;i++,current=current.return??null) {
+      if(current.memoizedProps?.isLoading===false&&current.memoizedProps.isStartButtonAllowed===true)nativeVoiceIdle=true;
+    }
+    const editor=Array.from(root.querySelectorAll<HTMLElement>('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,[data-composer-markdown][contenteditable="true"]')).find(visibleIdle);
+    for(let node:HTMLElement|null|undefined=editor;node&&!composerIdle;node=node.parentElement) {
+      const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
+      for(let current:ReactTurnFiber|null=key?Reflect.get(node,key) as ReactTurnFiber:null,i=0;current&&i<16;i++,current=current.return??null) {
+        const controller=current.memoizedProps?.composerController;
+        if(controller&&controller.view?.dom===editor&&typeof controller.getChatGptPrompt==='function'&&
+            controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')composerIdle=Boolean(voice&&nativeVoiceIdle);
+      }
+    }
+  }
+  return {ok:true,url,firstUserSentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
+    assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
+    turnStatus:entry.turn?.status,assistantPhase:assistant?.phase,assistantCompleted:assistant?.completed===true,
+    generating,hasError,...(failedPromptKey?{composerIdle,absentPromptKey}:{}),...goalText};
 }
-if (typeof module !== "undefined") module.exports = { inspectCompletedTurn };
+if(typeof module!=='undefined')module.exports={inspectCompletedTurn};
