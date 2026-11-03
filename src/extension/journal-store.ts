@@ -7,6 +7,7 @@ interface RetryDraft {
   operationId?: string;
   sourceUrl?: string;
   savedSequence?: number;
+  attemptId?:string;
   phase?: string;
   claimedAt?: number;
   claimSequence?: number;
@@ -15,8 +16,8 @@ interface RetryDraft {
 }
 interface RetryError { at: number; promptKey: string; attemptId: string }
 interface RetrySummary {
-  failures: number[];
-  recentErrors: RetryError[];
+  failures?: number[];
+  recentErrors?: RetryError[];
   blocked?: boolean;
   terminal?: boolean;
   reason?: string;
@@ -24,6 +25,10 @@ interface RetrySummary {
   lastAttemptId?: string;
   remainingRetries?: number;
   lastBudgetOperation?: string | null;
+  manualStartedAt?:number;
+  blockedAttemptId?:string;
+  terminalAttemptId?:string;
+  budgetGrantedAt?:number;
 }
 interface JournalTab {
   id?: number;
@@ -40,6 +45,7 @@ interface ActiveJournalOp {
   promptKey?: string;
   goalId?: string | null;
   chatUrl?: string | null;
+  attemptId?:string;
 }
 interface RetrySendClaim {
   operationId: string;
@@ -51,6 +57,7 @@ interface RetryPreparing {
   operationId: string;
   tabId: number | null;
   claimKey: string;
+  attemptId?:string;
 }
 interface HandoffSourceClaim { operationId: string; tabId: number | null; at: number }
 interface RetryIntent { sourceUrl: string; promptKey: string; tabId: number | null }
@@ -71,6 +78,7 @@ interface JournalMeta extends Record<string, unknown> {
   handoffSourceClaims?: Record<string, HandoffSourceClaim>;
   retrySendClaims?: Record<string, RetrySendClaim>;
   retryConsumedOperations?: Record<string, number>;
+  retryReleasedOperations?:Record<string,number>;
   retryPreparingByChat?: Record<string, RetryPreparing>;
   active?: Record<string, ActiveJournalOp>;
   requests?: Record<string, JournalRequestOp>;
@@ -96,6 +104,7 @@ interface JournalEvent extends Record<string, unknown> {
   recordedAt?: number;
   eventAt?: number;
   attemptId?: string;
+  startedAt?:number;
   promptKey?: string;
   confirmed?: boolean;
   goalId?: string;
@@ -164,22 +173,34 @@ function retryDraftUrl(value: string | undefined | null): string | null {
   try { const url=new URL(value); return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)?`${url.origin}${url.pathname.replace(/\/$/,'')}`:null; }
   catch { return null; }
 }
+function retryAttemptAtOrAfter(value:unknown,startedAt:number|undefined):boolean {
+  const attempt=Number(value);
+  return typeof startedAt==='number'&&Number.isFinite(startedAt)&&startedAt>0&&
+    Number.isFinite(attempt)&&attempt>=startedAt;
+}
+function retryAttemptBefore(value:unknown,startedAt:number|undefined):boolean {
+  const attempt=Number(value);
+  return typeof startedAt==='number'&&Number.isFinite(startedAt)&&startedAt>0&&
+    Number.isFinite(attempt)&&attempt>0&&attempt<startedAt;
+}
 function retryDraftMetadata(meta: JournalMeta): JournalMeta {
   // Historical backups remain in the immutable journal. They lack a durable
   // restoration claim, so importing them could insert an already-used draft.
   return meta.retryDraftSchema===1?meta:{...meta,retryDraftSchema:1,retryDraftByChat:{},retryDraftClaims:{}};
 }
-function reduceRetryDraft(drafts: Record<string,RetryDraft>,event: JournalEvent): Record<string,RetryDraft> {
+function reduceRetryDraft(drafts: Record<string,RetryDraft>,event: JournalEvent,manualStartedAt?:number): Record<string,RetryDraft> {
+  if(retryAttemptBefore(event.attemptId,manualStartedAt))return drafts;
   const url=retryDraftUrl(event.sourceUrl||event.observedTabUrl||event.url);
   if(!url)return drafts;
   const current=drafts[url],operationId=event.operationId;
   if(event.kind==='draft.saved'&&operationId&&typeof event.draft==='string'&&event.draft) {
-    if(current?.operationId===operationId&&current.claimedAt)return drafts;
+    if(current?.operationId===operationId&&(current.claimedAt||current.phase==='superseded'))return drafts;
     const previous=current?.operationId===operationId?current:{};
     return {...drafts,[url]:{...previous,operationId,sourceUrl:url,
-      savedSequence:event.sequence,phase:previous.phase||'saved'}};
+      savedSequence:event.sequence,attemptId:event.attemptId||previous.attemptId||'',phase:previous.phase||'saved'}};
   }
   if(!current||(operationId&&operationId!==current.operationId))return drafts;
+  if(current.phase==='superseded')return drafts;
   if(event.kind==='draft.replaced')return {...drafts,[url]:{...current,replacementProven:true}};
   if(event.kind==='recovery.stop_result'&&event.stopped===true)return {...drafts,[url]:{...current,stopProven:true}};
   let phase=current.phase;
@@ -188,6 +209,7 @@ function reduceRetryDraft(drafts: Record<string,RetryDraft>,event: JournalEvent)
   if(event.kind==='retry.confirmed')phase='confirmed';
   if(event.kind==='send.not_clicked'||event.kind==='retry.cancelled'||event.kind==='retry.failed'&&event.clicked===false)phase='not-clicked';
   if(event.kind==='retry.manual_reset')phase='superseded';
+  if(event.kind==='retry.preparation_superseded'&&!retryAttemptAtOrAfter(current.attemptId,event.startedAt))phase='superseded';
   if(event.kind==='draft.restored')phase='restored';
   if(event.kind==='draft.restore_intent')return {...drafts,[url]:{...current,phase:'claimed',claimedAt:event.recordedAt,claimSequence:event.sequence}};
   return phase===current.phase?drafts:{...drafts,[url]:{...current,phase}};
@@ -206,14 +228,36 @@ async function indexedRetryDraft(meta: JournalMeta | null,url: string): Promise<
 function reduceRetrySummary(retryByChat: Record<string, RetrySummary>, event: JournalEvent): Record<string, RetrySummary> {
   const chatId = journalChatId(event.sourceUrl || event.observedTabUrl || event.url);
   if (!chatId) return retryByChat;
+  if(event.kind==='retry.preparation_superseded') {
+    if(typeof event.startedAt!=='number'||!Number.isFinite(event.startedAt))return retryByChat;
+    const previous:RetrySummary=retryByChat[chatId]||{};
+    const manualStartedAt=Math.max(previous.manualStartedAt||0,event.startedAt);
+    const keepErrors=retryAttemptAtOrAfter(previous.lastAttemptId,manualStartedAt);
+    const keepBlock=Boolean(previous.blocked)&&retryAttemptAtOrAfter(previous.blockedAttemptId,manualStartedAt);
+    const keepTerminal=Boolean(previous.terminal)&&retryAttemptAtOrAfter(previous.terminalAttemptId,manualStartedAt);
+    const keepBudget=typeof previous.budgetGrantedAt==='number'&&Number.isFinite(previous.budgetGrantedAt)&&previous.budgetGrantedAt>=manualStartedAt;
+    if(!keepErrors&&!keepBlock&&!keepTerminal&&!keepBudget)
+      return {...retryByChat,[chatId]:{manualStartedAt}};
+    const state:RetrySummary={...previous,manualStartedAt,blocked:keepBlock,terminal:keepTerminal,
+      reason:keepBlock?previous.reason:'',lastPromptKey:keepErrors?previous.lastPromptKey:'',
+      lastAttemptId:keepErrors?previous.lastAttemptId:'',
+      failures:(previous.failures||[]).filter(at=>at>=manualStartedAt),
+      recentErrors:(previous.recentErrors||[]).filter(item=>item.at>=manualStartedAt)};
+    if(!keepBudget){delete state.remainingRetries;delete state.lastBudgetOperation;delete state.budgetGrantedAt;}
+    if(!keepBlock)delete state.blockedAttemptId;
+    if(!keepTerminal)delete state.terminalAttemptId;
+    return {...retryByChat,[chatId]:state};
+  }
   if (event.kind === 'retry.manual_reset') {
     const next = {...retryByChat};
     delete next[chatId];
     return next;
   }
+  if(retryAttemptBefore(event.attemptId,retryByChat[chatId]?.manualStartedAt))return retryByChat;
   if(event.kind==='retry.resume' && typeof event.remainingRetries==='number' && Number.isInteger(event.remainingRetries) && event.remainingRetries>=1 && event.remainingRetries<=3) {
     return {...retryByChat,[chatId]:{failures:[],recentErrors:[],blocked:false,terminal:false,reason:'',
-      lastPromptKey:'',lastAttemptId:'',remainingRetries:event.remainingRetries}};
+      lastPromptKey:'',lastAttemptId:'',remainingRetries:event.remainingRetries,budgetGrantedAt:event.recordedAt,
+      ...(retryByChat[chatId]?.manualStartedAt?{manualStartedAt:retryByChat[chatId]!.manualStartedAt}:{})}};
   }
   if(event.kind==='retry.planned' && retryByChat[chatId]?.remainingRetries!=null) {
     const state=retryByChat[chatId]!;
@@ -247,8 +291,10 @@ function reduceRetrySummary(retryByChat: Record<string, RetrySummary>, event: Jo
   }
   if (isBlocked) {
     state.blocked = true;
+    state.blockedAttemptId=String(event.attemptId||previous.lastAttemptId||'');
     state.reason = String(event.reason || event.error || previous.reason || 'Автопродолжение остановлено');
     state.terminal = Boolean(previous.terminal || event.terminal === true);
+    if(event.terminal===true)state.terminalAttemptId=state.blockedAttemptId;
   }
   return {...retryByChat, [chatId]: state};
 }
