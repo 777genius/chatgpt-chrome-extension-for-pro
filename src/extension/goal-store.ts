@@ -49,8 +49,11 @@ declare const module:undefined|{exports:unknown};
     return String(message||value);
   }
   function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID()}:GoalHost):GoalStore {
-    const policy=root.ChatGPTGoalPolicy;
-    if(!policy)throw Error('Goal policy is not loaded');
+    const policy:GoalPolicy=(()=>{
+      const selected=root.ChatGPTGoalPolicy;
+      if(!selected)throw Error('Goal policy is not loaded');
+      return selected;
+    })();
     let writes:Promise<unknown>=Promise.resolve();
     const serialize=<T>(fn:()=>Promise<T>):Promise<T>=>{
       const task=writes.catch(()=>{}).then(fn);
@@ -90,7 +93,7 @@ declare const module:undefined|{exports:unknown};
         tabId,createdAt:time,status:'reserved'};
     }
     function canSend(record:GoalRecord|null,tabId:number,id:string,operationId:string,phase:string):record is GoalRecord & {operation:GoalOperation} {
-      return !!record&&record.id===id&&record.url&&record.operation?.id===operationId&&
+      return !!record&&record.id===id&&Boolean(record.url)&&record.operation?.id===operationId&&
         record.operation.tabId===tabId&&record.phase===phase&&!record.pauseRequested&&!record.stopRequested;
     }
     async function deliver(record:GoalRecord):Promise<void> {
@@ -113,9 +116,10 @@ declare const module:undefined|{exports:unknown};
         if(!record)return null;
         if(record.operation&&['sending','clicked'].includes(record.phase)&&
             now()-record.operation.createdAt>120000) {
+          const blockedTabId=record.operation.tabId;
           record={...record,phase:'blocked',
             reason:'Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён'};
-          await event('blocked',record,record.operation.tabId);
+          await event('blocked',record,blockedTabId);
           await save(record);
         } else if(['preparing','waiting','paused','recovering'].includes(record.phase)&&now()>=record.deadlineAt) {
           record={...record,phase:'stopped',operation:null,pendingSendKind:null,reason:'Время Goal истекло'};
@@ -189,7 +193,7 @@ declare const module:undefined|{exports:unknown};
           const inFlight=['sending','clicked'].includes(old.phase);
           const ready=old.phase==='preparing'&&old.operation?.status==='reserved';
           const record={...old,phase:inFlight?old.phase:'paused',pauseRequested:inFlight,
-            ...(ready?{pendingSendKind:old.operation.kind,operation:null}:{}),
+            ...(ready?{pendingSendKind:old.operation?.kind,operation:null}:{}),
             reason:inFlight?'Пауза после подтверждения текущей отправки':'Приостановлено пользователем'};
           await event('paused',record,tabId);
           await save(record);
@@ -368,7 +372,7 @@ declare const module:undefined|{exports:unknown};
         const reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
         const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,
           manualOverride:!inFlight,
-          ...(reserved?{pendingSendKind:record.operation.kind,operation:null}:{}),
+          ...(reserved?{pendingSendKind:record.operation?.kind,operation:null}:{}),
           reason:inFlight?'Ожидается исход отправки; ручное действие имеет приоритет':'Пауза: ручная отправка пользователя'};
         await event('manual_pause',next,tabId);
         await save(next);
@@ -469,7 +473,7 @@ declare const module:undefined|{exports:unknown};
         const old=await read(source);
         const existing=await read(target);
         if(existing?.id===old?.id&&old?.phase==='moved')
-          return existing.earlyCompletion||null;
+          return existing?.earlyCompletion||null;
         if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)return null;
         if(typeof acceptedUserId!=='string'||!acceptedUserId)
           throw Error('Нативный ID перенесённого пользовательского сообщения не подтверждён');
