@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
+import {parseHTML} from 'linkedom';
 const require=createRequire(import.meta.url);
 const {completedAttemptEvidence}=require('../extension/completion-state.js') as {
  completedAttemptEvidence:(attempt:Record<string,unknown>,snapshot:Record<string,unknown>)=>null|Record<string,string>;
@@ -22,7 +23,7 @@ console.log('stuck-loader completion evidence: passed');
 
 // Native probe regression: the completed older turn must not conceal a latest
 // unfinished turn, even when there is no visible Stop button.
-const {inspectCompletedTurn}=require('../extension/completion-probe.js') as {inspectCompletedTurn:(url:string)=>Record<string,unknown>};
+const {inspectCompletedTurn}=require('../extension/completion-probe.js') as {inspectCompletedTurn:(url:string,includeGoalText?:boolean)=>Record<string,unknown>};
 const last={id:'fallback-turn-2',isMostRecentTurn:true,isReadOnly:false,errorMessage:null,
  turn:{status:'complete',items:[{type:'user-message',messageId:'user-id'},
  {type:'assistant-message',messageId:'assistant-id',phase:'final_answer',completed:true}]}};
@@ -52,6 +53,80 @@ try{
  assert.equal(inspectCompletedTurn('https://chatgpt.com/c/other').ok,false);
 }finally{globals.document=before.document;globals.location=before.location;}
 console.log('stuck-loader native latest-turn binding: passed');
+
+// Goal reads only the already-sent latest native message, with an explicit
+// opt-in. Composer drafts and interface speaker/feedback labels are unrelated.
+{
+ const {document}=parseHTML(`<html><body><section data-app-shell-active-page="true">
+  <article data-content-search-turn-key="latest-turn">
+   <div data-chatgpt-search-unit-key="latest-turn:0:user">Rendered sent request</div>
+   <article data-chatgpt-search-unit-key="latest-turn:2:assistant">
+    <h4 class="sr-only" data-conversation-role="assistant"><span>ChatGPT сказал:</span><span aria-hidden="true">ChatGPT</span></h4>
+    <div data-markdown-text-style="assistant-message"><div class="markdown"><p>GOAL_COMPLETE</p></div></div>
+    <button aria-label="Copy">Copy</button><button aria-label="Good response">Good response</button>
+   </article>
+  </article><form data-composer-body><textarea id="prompt-textarea">UNSENT PRIVATE DRAFT</textarea></form>
+ </section></body></html>`);
+ const nativeUser={type:'user-message',messageId:'latest-user-id',message:'  Sent goal instruction\nwith exact whitespace  '};
+ const nativeAssistant={type:'assistant-message',messageId:'latest-assistant-id',phase:'final_answer',completed:true,content:'GOAL_COMPLETE',
+  contentReferences:[] as {model_dil_v2?:{fallbackMarkdown?:string}}[]};
+ const latest={id:'latest-turn',isMostRecentTurn:true,isReadOnly:false,errorMessage:null,
+  timestampTurns:[{role:'user',sentAtMs:100000},{role:'assistant',sentAtMs:100001},{role:'user',sentAtMs:100002}],
+  turn:{status:'complete',items:[nativeUser,nativeAssistant]}};
+ const element=document.querySelector('[data-content-search-turn-key]')!;
+ (element as unknown as Record<string,unknown>).__reactFiber$fixture={memoizedProps:{entries:[{...latest,id:'older-turn'},latest]},return:null};
+ const saved={document:globals.document,location:globals.location};
+ globals.document=document;globals.location={origin:'https://chatgpt.com',pathname:'/c/exact'};
+ try {
+  const metadata=inspectCompletedTurn(attempt.url);
+  for(const key of ['userText','userSentAtMs','goalResponse','goalRawExact'])assert.equal(Object.hasOwn(metadata,key),false,'default snapshot remains metadata only');
+  assert.deepEqual(inspectCompletedTurn(attempt.url,false),metadata);
+  const goal=inspectCompletedTurn(attempt.url,true);
+  assert.equal(goal.userText,nativeUser.message,'native sent text preserves whitespace and excludes the composer draft');
+  assert.equal(goal.userSentAtMs,100002,'latest user timestamp is exposed even after the first turn');
+  assert.equal(goal.firstUserSentAtMs,null,'first-turn allocation evidence is unchanged');
+  assert.equal(goal.goalResponse,'GOAL_COMPLETE');assert.equal(goal.goalRawExact,true,'speaker heading and feedback are interface content');
+  const rendered=document.querySelector('[data-markdown-text-style]')!;
+  const reference='::chatgpt-content-reference{index="0" source_message_id="latest-assistant-id"}';
+  nativeAssistant.content=reference;
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'GOAL_COMPLETE'}}];
+  const referenced=inspectCompletedTurn(attempt.url,true);
+  assert.equal(referenced.goalResponse,'GOAL_COMPLETE','a whole native reference resolves to its complete fallback Markdown');
+  assert.equal(referenced.goalRawExact,true,'plain exact rendered marker agrees with complete native fallback');
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}];
+  const escaped=inspectCompletedTurn(attempt.url,true);
+  assert.equal(escaped.goalResponse,'GOAL_COMPLETE','native DIL Markdown may escape the one literal underscore');
+  assert.equal(escaped.goalRawExact,true,'escaped native serialization still requires the plain exact rendered marker');
+  nativeAssistant.content='GOAL\\_COMPLETE';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'normalization applies only to a whole native DIL reference');
+  nativeAssistant.content=reference;
+  for(const content of [reference+'\nStill working','Before '+reference,'`'+reference+'`',' '+reference]) {
+   nativeAssistant.content=content;
+   assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'text or Markdown outside a reference cannot be discarded');
+  }
+  nativeAssistant.content=reference;
+  for(const references of [[],[{}],[{model_dil_v2:{fallbackMarkdown:'GOAL_COMPLETE'}},{}],
+   [{model_dil_v2:{fallbackMarkdown:'`GOAL_COMPLETE`'}}],
+   [{model_dil_v2:{fallbackMarkdown:'`GOAL\\_COMPLETE`'}}],
+   [{model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE\nStill working'}}],
+   [{model_dil_v2:{fallbackMarkdown:'GOAL_COMPLETE\nStill working'}}],
+   [{model_dil_v2:{fallbackMarkdown:'GOAL_COMPLETE'}},{model_dil_v2:{fallbackMarkdown:'More native content'}}]]) {
+   nativeAssistant.contentReferences=references;
+   assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'missing references, Markdown and additional fallback content cannot complete a goal');
+  }
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}];
+  for(const content of ['<p><code>GOAL_COMPLETE</code></p>','<pre>GOAL_COMPLETE</pre>','<p><strong>GOAL_COMPLETE</strong></p>','<p>GOAL_COMPLETE</p><p>Still working</p>']) {
+   rendered.innerHTML=content;assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'non-plain or additional rendered answer text cannot complete a goal');
+  }
+  rendered.innerHTML='<p>GOAL_COMPLETE</p>';
+  nativeAssistant.content='GOAL_COMPLETE\nStill working';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'native whole answer must also be exactly the marker');
+  nativeAssistant.content='GOAL_COMPLETE';
+  const extra=document.createElement('p');extra.textContent='Additional assistant answer';rendered.after(extra);
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'assistant content outside the first markdown node still disqualifies completion');
+ } finally {globals.document=saved.document;globals.location=saved.location;}
+}
+console.log('Native Goal opt-in sent text, latest timestamp and exact plain marker: passed');
 
 const {bindAttemptPrompt}=require('../extension/completion-state.js') as {
  bindAttemptPrompt:(attempt:Record<string,unknown>,snapshot:Record<string,unknown>)=>null|Record<string,unknown>;

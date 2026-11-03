@@ -14,6 +14,8 @@
     };
     const key=url=>'chatgpt-goal:'+policy.canonical(url);
     const canonical=url=>policy.canonical(url);
+    const composerKey=tabId=>'chatgpt-goal-composer:'+tabId;
+    const composerBindingKey=id=>'chatgpt-goal-composer-binding:'+id;
     const buffered=(record,plural,singular)=>[
       ...(Array.isArray(record?.[plural])?record[plural]:[]),
       ...(record?.[singular]?[record[singular]]:[])
@@ -23,11 +25,136 @@
       if(!value)throw Error('Goal доступен только в сохранённом чате ChatGPT');
       return value;
     }
+    function requireTab(tabId) {
+      if(!Number.isInteger(tabId)||tabId<0)throw Error('Вкладка Goal не подтверждена');
+      return tabId;
+    }
+    function requirePage(url) {
+      const value=policy.pageUrl(url);
+      if(!value)throw Error('Goal доступен только на странице чата ChatGPT');
+      return value;
+    }
+    function requireAvailable(previous) {
+      if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат или вручную разберите журнал');
+      if(previous&&!['completed','stopped','moved'].includes(previous.phase))
+        throw Error('Для этого чата уже запущена цель. Сначала остановите её');
+    }
     async function read(url) {
       const path=requireUrl(url),name=key(path);
       return (await storage.get(name))[name]||null;
     }
     async function save(record) {await storage.set({[key(record.url)]:record});}
+    async function readComposer(tabId) {
+      const name=composerKey(requireTab(tabId));
+      return (await storage.get(name))[name]||null;
+    }
+    async function composerGet({tabId}) {return serialize(()=>readComposer(tabId));}
+    async function composerArm({tabId,url,rules,maxContinuations,maxMinutes}) {
+      requireTab(tabId);
+      const target=requirePage(url);
+      const config=policy.composerSettings({rules,
+        ...(maxContinuations===undefined?{}:{maxContinuations}),
+        ...(maxMinutes===undefined?{}:{maxMinutes})});
+      return serialize(async()=>{
+        const previous=await readComposer(tabId);
+        if(previous?.phase==='bound') {
+          const boundUrl=previous.binding?.url;
+          const bound=boundUrl?await read(boundUrl):null;
+          if(bound?.id!==previous.id||bound.operation||
+              !['completed','stopped','moved'].includes(bound.phase))
+            throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
+        } else if(previous?.phase==='intent')
+          throw Error('Ручная отправка Goal уже ожидает подтверждения; сначала явно выключите Goal');
+        if(previous?.phase==='armed'&&previous.url===target&&
+            JSON.stringify(previous.config)===JSON.stringify(config))return {ok:true,record:previous};
+        const record={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt:now()};
+        await storage.set({[composerKey(tabId)]:record});
+        return {ok:true,record};
+      });
+    }
+    async function composerDisarm({tabId,armId}) {
+      requireTab(tabId);
+      return serialize(async()=>{
+        const current=await readComposer(tabId);
+        if(armId!==undefined&&current?.id!==armId)throw Error('Разрешение Goal уже изменилось');
+        const changes={[composerKey(tabId)]:null};
+        let stopped=null;
+        if(current?.phase==='bound'&&current.binding?.url) {
+          const goal=await read(current.binding.url);
+          if(goal?.id===current.id&&!['completed','stopped','moved'].includes(goal.phase)) {
+            stopped=stopTransition(goal);
+            await event(stopped.stopRequested||goal.operation?'stop_requested':'stopped',stopped,tabId);
+            changes[key(goal.url)]=stopped;
+          }
+        }
+        await storage.set(changes);
+        return {ok:true,record:null,...(stopped?{goal:view(stopped)}:{})};
+      });
+    }
+    async function composerIntent({tabId,url,armId,eventAt,text,baselineKey}) {
+      requireTab(tabId);
+      const target=requirePage(url);
+      return serialize(async()=>{
+        const current=await readComposer(tabId);
+        if(!current||current.id!==armId||current.url!==target)
+          throw Error('Разрешение ручной отправки Goal изменилось');
+        if(['intent','bound'].includes(current.phase)) {
+          const prior=current.intent;
+          if(prior?.eventAt===eventAt&&prior.text===text&&prior.baselineKey===baselineKey)
+            return {ok:true,record:current};
+          throw Error('Другая ручная отправка Goal уже ожидает подтверждения');
+        }
+        if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<current.armedAt||
+            eventAt>now()||now()-eventAt>10000)
+          throw Error('Ручная отправка Goal не относится к свежему включению');
+        if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string')
+          throw Error('Ручная цель должна содержать точный текст до 10000 символов');
+        if(baselineKey&&(target==='https://chatgpt.com/'||!baselineKey.startsWith(new URL(target).pathname+'|')))
+          throw Error('Исходное сообщение Goal относится к другому чату');
+        const record={...current,phase:'intent',intent:{text,eventAt,baselineKey}};
+        await storage.set({[composerKey(tabId)]:record});
+        return {ok:true,record};
+      });
+    }
+    async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userSentAtMs,firstTurn,nativeVerified}) {
+      requireTab(tabId);
+      const target=requireUrl(url);
+      return serialize(async()=>{
+        const current=await readComposer(tabId),intent=current?.intent;
+        if(!current||current.id!==armId||!['intent','bound'].includes(current.phase)||!intent)
+          throw Error('Нет сохранённого намерения ручной отправки Goal');
+        if(nativeVerified!==true||typeof requestId!=='string'||!requestId||typeof userId!=='string'||!userId||
+            !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
+            !Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000||
+            userText!==intent.text||typeof promptKey!=='string'||promptKey===intent.baselineKey||
+            !promptKey.startsWith(new URL(target).pathname+'|'))
+          throw Error('Нативная ручная отправка Goal не подтверждена точным запросом и текстом');
+        if(current.url==='https://chatgpt.com/'?firstTurn!==true:current.url!==target)
+          throw Error('Ручная отправка Goal относится к другому чату или не является первым сообщением');
+        const binding={url:target,requestId,startedAt,promptKey,userId,userSentAtMs};
+        const sameBinding=value=>value&&Object.keys(binding).every(name=>value[name]===binding[name]);
+        const name=composerBindingKey(armId),prior=(await storage.get(name))[name];
+        const previous=await read(target);
+        if(current.phase==='bound') {
+          if(!sameBinding(current.binding)||!sameBinding(prior)||prior.tabId!==tabId||previous?.id!==armId)
+            throw Error('Разрешение Goal уже связано с другой отправкой или более новой целью');
+          return {ok:true,record:current,goal:view(previous)};
+        }
+        if(prior)throw Error('Разрешение Goal уже связано с другим чатом');
+        requireAvailable(previous);
+        const record={...current,phase:'bound',binding};
+        const next={schema:1,id:armId,url:target,originUrl:target,goal:intent.text,rules:current.config.rules,
+          maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
+          startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
+          expectedPromptKey:promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
+          handoffPending:false,handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
+        await event('manual_started',next,tabId,{text:intent.text,rules:next.rules,
+          maxContinuations:next.maxContinuations,maxMinutes:next.maxMinutes,deadlineAt:next.deadlineAt,
+          requestId,startedAt,promptKey,userId,userSentAtMs,composerSourceUrl:current.url});
+        await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId}});
+        return {ok:true,record,goal:view(next)};
+      });
+    }
     function view(record) {
       if(!record)return null;
       const {operation, ...safe}=record;
@@ -43,6 +170,13 @@
         throw Error('Лимит продолжений исчерпан');
       return {id:uuid(),kind,text:kind==='initial'?policy.initialText(record):policy.continuationText(record),
         tabId,createdAt:time,status:'reserved'};
+    }
+    function stopTransition(old) {
+      const inFlight=['sending','clicked'].includes(old.phase);
+      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
+        ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
+        reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
+          'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
     }
     function canSend(record,tabId,id,operationId,phase) {
       return !!record&&record.id===id&&record.url&&record.operation?.id===operationId&&
@@ -84,9 +218,7 @@
       const target=requireUrl(url),config=policy.settings({goal,rules,maxContinuations,maxMinutes});
       const result=await serialize(async()=>{
         const previous=await read(target);
-        if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат или вручную разберите журнал');
-        if(previous&&!['completed','stopped','moved'].includes(previous.phase))
-          throw Error('Для этого чата уже запущена цель. Сначала остановите её');
+        requireAvailable(previous);
         const time=now();
         const record={schema:1,id:uuid(),url:target,originUrl:target,goal:config.goal,rules:config.rules,
           maxContinuations:config.maxContinuations,maxMinutes:config.maxMinutes,deadlineAt:time+config.maxMinutes*60000,
@@ -155,10 +287,7 @@
         if(action==='stop') {
           if(old.phase==='moved')throw Error('Остановите цель в новом чате');
           const inFlight=['sending','clicked'].includes(old.phase);
-          const record={...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
-            ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
-            reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
-              'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
+          const record=stopTransition(old);
           await event(inFlight||old.operation?'stop_requested':'stopped',record,tabId);
           await save(record);
           return {record};
@@ -319,6 +448,7 @@
       return serialize(async()=>{
         const record=await read(target);
         if(record&&Number.isFinite(startedAt)&&record.startedAt>startedAt)return {ok:false};
+        if(record&&Number.isFinite(startedAt)&&record.manualStart?.startedAt===startedAt)return {ok:false};
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))
           return {ok:false};
         const inFlight=['sending','clicked'].includes(record.phase);
@@ -446,7 +576,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

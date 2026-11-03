@@ -416,20 +416,77 @@ async function handleHandoffMessage(message, tabId) {
   try { return await write; } finally { if (handoffWrites.get(tabId) === write) handoffWrites.delete(tabId); }
 }
 
+// Adopt only a user-submitted native message. This path never clicks or edits
+// the composer, and does not infer a new chat from its URL alone.
+async function bindNativeComposerGoal(tabId,currentUrl,armId) {
+  const pending=await goalController.composerGet({tabId});
+  const canonical=ChatGPTGoalPolicy.canonical(currentUrl);
+  if(!pending||pending.id!==armId||!['intent','bound'].includes(pending.phase))
+    return {ok:false,error:'Goal больше не ожидает эту отправку'};
+  if(pending.phase==='bound') {
+    if(pending.binding?.url!==canonical)return {ok:false,error:'Чат цели изменился'};
+    return {ok:true,url:canonical,record:await goalController.get(canonical),composer:pending};
+  }
+  const waiting=()=>({ok:true,pending:true,url:currentUrl,composer:pending});
+  if(!canonical)return waiting();
+  const request=await latestRequestReceipt(tabId);
+  if(!Number.isFinite(pending.intent?.eventAt)||!request||request.startedAt<pending.intent?.eventAt||request.startedAt-pending.intent?.eventAt>10000)return waiting();
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[canonical,true]});
+  const native=checked?.result;
+  if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.userId||
+      typeof native.userText!=='string'||!native.promptKey||!Number.isFinite(native.userSentAtMs))return waiting();
+  const live=ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url),fresh=await latestRequestReceipt(tabId);
+  if(live!==canonical||fresh?.requestId!==request.requestId||fresh?.startedAt!==request.startedAt)
+    return {ok:false,error:'Отправка или чат изменились до подтверждения Goal'};
+  if(request.url&&ChatGPTGoalPolicy.canonical(request.url)!==canonical)
+    return {ok:false,error:'Запрос отправлен в другой чат'};
+  const result=await goalController.composerBind({tabId,armId,url:canonical,requestId:request.requestId,
+    startedAt:request.startedAt,promptKey:native.promptKey,userId:native.userId,userText:native.userText,
+    userSentAtMs:native.userSentAtMs,firstTurn:native.firstTurn,nativeVerified:true});
+  // The first answer may have completed before the root chat received its
+  // permanent URL. Replay that exact native completion through the coordinator.
+  if(result.ok&&native.turnStatus==='complete'&&native.generating===false&&!native.hasError&&
+      native.assistantCompleted===true&&native.assistantPhase==='final_answer'&&native.assistantKey) {
+    await goalController.completion({url:canonical,tabId,
+      completionKey:native.promptKey+'|'+native.assistantKey,promptKey:native.promptKey,
+      userId:native.userId,response:native.goalResponse||'',rawExact:native.goalRawExact===true,nativeVerified:true});
+  }
+  return {ok:result.ok,url:canonical,tabId,composer:result.record,record:await goalController.get(canonical)};
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if(message?.type==='CHATGPT_GOAL_INLINE') {
-    const tabId=sender.tab?.id,url=ChatGPTGoalPolicy.canonical(sender.tab?.url);
-    if(sender.frameId>0||typeof tabId!=='number'||!url||ChatGPTGoalPolicy.canonical(message.url)!==url||
-        !['get','start','pause','resume','stop'].includes(message.action)) {
+    const tabId=sender.tab?.id,source=ChatGPTGoalPolicy.pageUrl(sender.tab?.url);
+    const requested=ChatGPTGoalPolicy.pageUrl(message.url);
+    const actions=['get','arm','disarm','intent','bind','start','pause','resume','stop'];
+    if(sender.frameId>0||typeof tabId!=='number'||!source||!requested||!actions.includes(message.action)) {
       sendResponse?.({ok:false,error:'Goal chat binding mismatch'});return false;
     }
     (async()=>{
-      if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)throw Error('Чат изменился');
-      if(message.action==='get')return {ok:true,record:await goalController.get(url),tabId,url};
-      const result=message.action==='start'?await goalController.start({url,tabId,goal:message.goal,rules:message.rules,
-        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes}):
-        await goalController.control({action:message.action,url,tabId});
-      return {...result,tabId,url};
+      const live=ChatGPTGoalPolicy.pageUrl((await chrome.tabs.get(tabId)).url);
+      const pending=await goalController.composerGet({tabId});
+      const allocatedIntent=['intent','bind'].includes(message.action)&&requested==='https://chatgpt.com/'&&
+        pending?.url===requested&&Boolean(ChatGPTGoalPolicy.canonical(live));
+      if((source!==requested||live!==requested)&&!allocatedIntent)throw Error('Чат изменился');
+      let result;
+      if(message.action==='bind')return bindNativeComposerGoal(tabId,live,message.armId);
+      if(message.action==='arm')result=await goalController.composerArm({tabId,url:live,rules:message.rules,
+        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
+      else if(message.action==='disarm')result=await goalController.composerDisarm({tabId,armId:message.armId});
+      else if(message.action==='intent')result=await goalController.composerIntent({tabId,url:requested,
+        armId:message.armId,eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey});
+      else if(message.action==='start') {
+        if(!ChatGPTGoalPolicy.canonical(live))throw Error('Используйте Goal рядом с полем нового сообщения');
+        return {...await goalController.start({url:live,tabId,goal:message.goal,rules:message.rules,
+          maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes}),tabId,url:live};
+      } else if(message.action!=='get') {
+        if(!ChatGPTGoalPolicy.canonical(live))throw Error('Goal ещё ожидает первое сообщение');
+        return {...await goalController.control({action:message.action,url:live,tabId}),tabId,url:live};
+      }
+      if(result?.ok===false)return result;
+      const url=ChatGPTGoalPolicy.canonical(live);
+      return {ok:true,tabId,url:live,record:url?await goalController.get(url):null,
+        composer:result?.record||await goalController.composerGet({tabId})};
     })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));return true;
   }
   if(message?.type==='CHATGPT_GOAL_CONTROL') {
@@ -773,6 +830,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         String(completionRequest.startedAt)!==message.attemptId||completionRequest.url&&completionRequest.url!==sourceUrl||
         completionRequest.requestId&&message.requestId!==completionRequest.requestId))return;
 
+    if(!isError&&!isWarning) {
+      const armed=await goalController.composerGet({tabId});
+      if(armed?.phase==='intent')await bindNativeComposerGoal(tabId,sourceUrl,armed.id);
+    }
+
     const fingerprint = String(message.fingerprint || '');
     const rawCompletionKey=String(message.completionKey||fingerprint);
     const completionKey = rawCompletionKey?`${sourceUrl}|${rawCompletionKey}`:'';
@@ -916,6 +978,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void goalController.composerDisarm({tabId}).catch(()=>{});
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
   legacyHandoffStatusFences.delete(tabId);

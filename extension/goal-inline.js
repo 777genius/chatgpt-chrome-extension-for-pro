@@ -8,10 +8,12 @@
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
     const prefix='chatgpt-goal-inline-'+(++instance);
-    let disposed=false,route=null,epoch=0,sequence=0,record=null,loaded=false;
+    let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false;
     let busy=false,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
     const cleanups=[];
-    let observer=null;
+    let observer=null,binding=null,bindTimer=null,bindGeneration=0;
+    const ROOT_URL='https://chatgpt.com/';
+    const BIND_WINDOW=30000;
     const node=(tag,attrs={},text='')=>{
       const el=document.createElement(tag);
       for(const [name,value] of Object.entries(attrs))el.setAttribute(name,value);
@@ -23,7 +25,8 @@
       cleanups.push(()=>target.removeEventListener(type,fn,options));
     };
     const valid=()=>!disposed&&alive();
-    const current=()=>policy.canonical(getUrl());
+    const current=()=>policy.pageUrl(getUrl());
+    const armed=()=>['armed','intent'].includes(composer?.phase);
     const active=()=>!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
     const controls=node('span',{'data-chatgpt-goal-inline':'controls',class:'cggi-controls'});
     const toggle=node('button',{type:'button',role:'switch','aria-label':'Goal','aria-checked':'false',class:'cggi-switch'},'Goal');
@@ -48,7 +51,8 @@
       fields[name]=input;
       return input;
     }
-    field('goal','Objective','textarea',{rows:'3',maxlength:'10000',placeholder:'What should be completed?'});
+    const objective=node('p',{'data-goal-objective':'',class:'cggi-status'});
+    objective.hidden=true;panel.append(objective);
     field('rules','Completion criteria (optional)','textarea',{rows:'2',maxlength:'5000'});
     const limits=node('div',{class:'cggi-limits'});
     for(const [name,title,max] of [['maxContinuations','Continuations',100],['maxMinutes','Minutes',1440]]) {
@@ -59,9 +63,9 @@
       group.append(label,input);limits.append(group);
     }
     panel.append(limits);
-    panel.append(node('p',{class:'cggi-note'},'Start authorizes the objective and automatic continuations within these limits. GOAL_COMPLETE is the model’s declaration of completion.'));
+    panel.append(node('p',{class:'cggi-note'},'Write the goal in the message box and send it yourself. Goal checks completion after the first answer. GOAL_COMPLETE is the model’s declaration of completion.'));
     const actions=node('div',{class:'cggi-actions'}),buttons={};
-    for(const [action,title] of [['start','Start Goal'],['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
+    for(const [action,title] of [['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
       const button=node('button',{type:'button','data-goal-action':action},title);
       buttons[action]=button;actions.append(button);
       listen(button,'click',()=>void act(action));
@@ -79,35 +83,35 @@
 .cggi-details{padding:4px!important;min-width:24px;min-height:30px;border-radius:12px;font-size:18px!important}
 .cggi-controls button:disabled{opacity:.5;cursor:default}.cggi-controls button:focus-visible,.cggi-panel button:focus-visible{outline:2px solid #358af0;outline-offset:2px}
 .cggi-panel{box-sizing:border-box;position:fixed;z-index:2147483646;width:360px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;overscroll-behavior:contain;padding:16px;border:1px solid #d3d3d3;border-radius:16px;background:#fff;color:#202123;box-shadow:0 8px 36px #0003;font:13px/1.45 system-ui,sans-serif;color-scheme:light}
-.cggi-panel[hidden]{display:none!important}.cggi-header{display:flex;justify-content:space-between;align-items:center;font-size:16px}.cggi-panel button{font:inherit;cursor:pointer;border:1px solid #ccc;border-radius:8px;padding:7px 10px;background:transparent;color:inherit}.cggi-close{border:0!important;font-size:22px!important;padding:0 5px!important}.cggi-panel label{display:block;font-weight:500;margin-top:10px}.cggi-panel textarea,.cggi-panel input{display:block;box-sizing:border-box;width:100%;margin-top:4px;border:1px solid #b6b6b6;border-radius:8px;padding:8px;background:transparent;color:inherit;font:inherit}.cggi-panel textarea{resize:vertical;min-height:50px;max-height:25vh}.cggi-panel :disabled{opacity:.55;cursor:default}.cggi-limits{display:flex;gap:12px}.cggi-limits>div{flex:1;min-width:0}.cggi-status{overflow-wrap:anywhere;margin:10px 0}.cggi-note{font-size:11px;opacity:.7}.cggi-actions{display:flex;flex-wrap:wrap;gap:8px}.cggi-actions button[data-goal-action=start]{background:#177a52;color:white;border-color:#177a52}
+.cggi-panel[hidden]{display:none!important}.cggi-header{display:flex;justify-content:space-between;align-items:center;font-size:16px}.cggi-panel button{font:inherit;cursor:pointer;border:1px solid #ccc;border-radius:8px;padding:7px 10px;background:transparent;color:inherit}.cggi-close{border:0!important;font-size:22px!important;padding:0 5px!important}.cggi-panel label{display:block;font-weight:500;margin-top:10px}.cggi-panel textarea,.cggi-panel input{display:block;box-sizing:border-box;width:100%;margin-top:4px;border:1px solid #b6b6b6;border-radius:8px;padding:8px;background:transparent;color:inherit;font:inherit}.cggi-panel textarea{resize:vertical;min-height:50px;max-height:25vh}.cggi-panel :disabled{opacity:.55;cursor:default}.cggi-limits{display:flex;gap:12px}.cggi-limits>div{flex:1;min-width:0}.cggi-status{overflow-wrap:anywhere;margin:10px 0}.cggi-note{font-size:11px;opacity:.7}.cggi-actions{display:flex;flex-wrap:wrap;gap:8px}
 html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ececec;border-color:#555;color-scheme:dark}
 @media(prefers-color-scheme:dark){html:not(.light):not([data-theme=light]) .cggi-panel{background:#242424;color:#ececec;border-color:#555;color-scheme:dark}}
 `;
     function resetFields() {
-      fields.goal.value='';fields.rules.value='';
-      fields.maxContinuations.value='5';fields.maxMinutes.value='30';
+      fields.rules.value='';
+      fields.maxContinuations.value=String(policy.DEFAULTS.maxContinuations);fields.maxMinutes.value=String(policy.DEFAULTS.maxMinutes);
       hydrated=null;
     }
     resetFields();
     const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Waiting for full answer',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked for safety',stopped:'Stopped',moved:'Moved to a new chat'};
     function render() {
       if(!valid())return;
-      const on=active()&&!record.stopRequested;
+      const on=(active()&&!record.stopRequested)||armed();
       toggle.setAttribute('aria-checked',String(on));
-      toggle.disabled=!route||!loaded||busy;
-      toggle.title=!route?'Send the first message to save this chat before starting Goal':on?'Stop Goal automatic continuations':'Set up Goal';
+      toggle.disabled=!route||!loaded||busy||(!on&&(!!record?.operation||record?.phase==='blocked'));
+      toggle.title=!route?'Goal is available on ChatGPT chat pages':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
-      const editable=!!route&&loaded&&!busy&&!active();
+      const editable=!!route&&loaded&&!busy&&!active()&&!armed();
       for(const input of Object.values(fields))input.disabled=!editable;
-      buttons.start.hidden=active();
       buttons.pause.hidden=!active()||record.phase==='paused';
       buttons.resume.hidden=record?.phase!=='paused';
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
-      buttons.start.disabled=!editable||!!record?.operation||record?.phase==='blocked';
       buttons.pause.disabled=busy||!loaded||record?.phase==='handoff'||!!record?.pauseRequested||!!record?.stopRequested;
       buttons.resume.disabled=busy||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||!loaded||!!record?.stopRequested;
-      let message=!route?'Send the first message to save this chat. Then you can start a Goal.':!loaded?'Loading Goal…':'Off. Set an objective and choose Start Goal.';
+      objective.hidden=!record?.goal;
+      objective.textContent=record?.goal?'Objective: '+record.goal:'';
+      let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
       if(record) {
         message=(phases[record.phase]||record.phase)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
         if(record.deadlineAt)message+=' · deadline '+new Date(record.deadlineAt).toLocaleTimeString();
@@ -117,14 +121,19 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
           :' · Previous send is unconfirmed. Review the activity log before a new Goal.';
         if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
       }
-      status.textContent=error|| (busy?'Saving Goal…':message);
+      if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
+      if(composer?.phase==='intent')message='Waiting to confirm the message you sent. Goal will follow this message after confirmation.';
+      status.textContent=error||(busy?'Saving Goal…':message);
+      toggle.setAttribute('aria-description',status.textContent);
       if(open)position();
     }
     function hydrate() {
-      if(record&&record.id!==hydrated) {
-        fields.goal.value=record.goal||'';fields.rules.value=record.rules||'';
-        fields.maxContinuations.value=String(record.maxContinuations);
-        fields.maxMinutes.value=String(record.maxMinutes);hydrated=record.id;
+      const source=active()?record:armed()?composer.config:record;
+      const key=active()?'goal:'+record.id:armed()?'composer:'+composer.id:record?'goal:'+record.id:null;
+      if(source&&key!==hydrated) {
+        fields.rules.value=source.rules||'';
+        fields.maxContinuations.value=String(source.maxContinuations);
+        fields.maxMinutes.value=String(source.maxMinutes);hydrated=key;
       }
     }
     function position() {
@@ -141,16 +150,29 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(open) {
         if(!panel.isConnected)document.body.append(panel);
         panel.hidden=false;render();
-        (active()?close:route&&loaded?fields.goal:close).focus();
+        (active()||armed()?close:route&&loaded?fields.rules:close).focus();
       } else {
         panel.hidden=true;render();
         if(details.isConnected)details.focus();
       }
     }
+    function stopBinding() {
+      bindGeneration++;
+      if(bindTimer!==null)win.clearTimeout(bindTimer);
+      bindTimer=null;binding=null;
+    }
     function syncRoute() {
       const next=current();
       if(next===route)return false;
-      route=next;epoch++;sequence++;record=null;loaded=false;busy=false;pendingRefresh=false;error='';
+      const allocation=binding&&binding.origin===ROOT_URL&&route===ROOT_URL&&!!policy.canonical(next)&&
+        (!binding.allocated||binding.allocated===next);
+      route=next;epoch++;sequence++;
+      if(allocation) {
+        binding.allocated=next;
+        if(record&&policy.canonical(record.url)!==next)record=null;
+        return true;
+      }
+      stopBinding();record=null;composer=null;loaded=false;busy=false;pendingRefresh=false;error='';
       open=false;panel.hidden=true;resetFields();render();
       return true;
     }
@@ -206,6 +228,87 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         attributeFilter:['hidden','inert','aria-hidden','data-app-shell-active-page','style','class']});
       return true;
     }
+    function contextMatches(token) {
+      if(!valid()||!binding||binding.token!==token)return false;
+      syncRoute();
+      return !!binding&&binding.token===token&&current()===route&&
+        (route===binding.origin||route===binding.allocated);
+    }
+    function validateResult(result,url) {
+      if(result?.url&&policy.pageUrl(result.url)!==url)throw Error('Goal response belongs to another chat');
+      if(result?.record&&policy.canonical(result.record.url)!==policy.canonical(url))throw Error('Goal response belongs to another chat');
+    }
+    function apply(result) {
+      record=result.record||null;
+      composer=result.composer||null;
+      if(composer) {
+        const source=policy.pageUrl(composer.url);
+        const bound=policy.canonical(composer.binding?.url);
+        const matches=composer.phase==='bound'?bound===policy.canonical(route):source===route||
+          (composer.phase==='intent'&&source===ROOT_URL&&!!policy.canonical(route));
+        if(!matches)composer=null;
+      }
+      loaded=true;hydrate();
+    }
+    function scheduleBind() {
+      if(!binding||binding.stopped||!binding.persisted||binding.inFlight||bindTimer!==null||!valid())return;
+      if(Date.now()>=binding.deadline) {
+        binding.stopped=true;
+        error='Message confirmation timed out. Goal has not adopted the message. Turn Goal off and check this chat.';
+        render();return;
+      }
+      const token=binding.token;
+      bindTimer=win.setTimeout(()=>{bindTimer=null;void pollBind(token);},Math.min(250,binding.deadline-Date.now()));
+    }
+    function resumeBinding() {
+      if(composer?.phase!=='intent') {if(binding?.persisted)stopBinding();return;}
+      if(!binding||binding.id!==composer.id) {
+        stopBinding();
+        const origin=policy.pageUrl(composer.url);
+        binding={id:composer.id,origin,allocated:origin===ROOT_URL&&policy.canonical(route)?route:'',
+          token:bindGeneration,persisted:true,inFlight:false,stopped:false,
+          deadline:Number(composer.intent?.eventAt??composer.eventAt)+BIND_WINDOW};
+      } else binding.persisted=true;
+      if(!Number.isFinite(binding.deadline)||binding.deadline<=BIND_WINDOW) {
+        binding.stopped=true;error='Goal intent has no valid confirmation time. Turn Goal off and check this chat.';render();return;
+      }
+      scheduleBind();
+    }
+    function deferAllocation(result) {
+      if(!binding||binding.origin!==ROOT_URL||route!==ROOT_URL||result?.composer?.id!==binding.id)return false;
+      const allocated=policy.canonical(result.url)||policy.canonical(result.composer.binding?.url);
+      if(!allocated||binding.allocated&&binding.allocated!==allocated)return false;
+      // The worker can confirm a new chat before this page observes its route.
+      // Keep polling within the original deadline; never paint that chat here.
+      binding.allocated=allocated;binding.inFlight=false;scheduleBind();return true;
+    }
+    async function pollBind(token) {
+      if(!contextMatches(token))return;
+      if(Date.now()>=binding.deadline){scheduleBind();return;}
+      binding.inFlight=true;
+      const url=route,id=binding.id;
+      try {
+        const result=await request({type:'CHATGPT_GOAL_INLINE',action:'bind',armId:id,url});
+        if(!contextMatches(token))return;
+        if(!result?.ok)throw Error(result?.error||result?.reason||'Goal message confirmation failed');
+        // Re-read the real page URL in contextMatches before accepting a result.
+        if(deferAllocation(result))return;
+        if(result?.url&&![url,route].includes(policy.pageUrl(result.url)))throw Error('Goal confirmation belongs to another chat');
+        if(result.pending===true) {
+          if(result.composer&&result.composer.id!==id)throw Error('Goal intent changed');
+          binding.inFlight=false;scheduleBind();return;
+        }
+        validateResult({...result,url:route},route);
+        if(!result.record||result.composer?.phase!=='bound'||result.composer.id!==id)throw Error('Goal message confirmation was not acknowledged');
+        apply(result);
+        if(!record||composer?.phase!=='bound')throw Error('Goal message confirmation belongs to another chat');
+        stopBinding();error='';render();
+      } catch(cause) {
+        if(!contextMatches(token))return;
+        binding.inFlight=false;binding.stopped=true;
+        error='Goal: '+String(cause?.message||cause);render();
+      }
+    }
     async function refresh() {
       if(!valid()||!mount())return;
       syncRoute();attach();
@@ -215,9 +318,11 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'get',url});
         if(!accepts(url,revision,serial))return;
-        if((result?.url&&policy.canonical(result.url)!==url)||(result?.record&&policy.canonical(result.record.url)!==url))throw Error('Goal response belongs to another chat');
         if(!result?.ok)throw Error(result?.error||result?.reason||'Could not load Goal');
-        record=result.record||null;loaded=true;error='';hydrate();render();
+        if(deferAllocation(result)){render();return;}
+        validateResult(result,url);
+        const keepError=!!binding?.stopped;
+        apply(result);if(!keepError)error='';resumeBinding();render();
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
         loaded=false;error='Goal: '+String(cause?.message||cause);render();
@@ -227,28 +332,64 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!valid())return;
       if(syncRoute()){void refresh();return;}
       if(!route||!loaded||busy)return;
-      // Disabled controls also fence programmatic and queued duplicate clicks.
       if(buttons[action]?.disabled)return;
       let input={};
-      if(action==='start') {
+      if(action==='arm') {
+        if(active()||armed()||record?.operation||record?.phase==='blocked')return;
         try {
-          input=policy.settings({goal:fields.goal.value,rules:fields.rules.value,
+          input=policy.composerSettings({rules:fields.rules.value,
             maxContinuations:Number(fields.maxContinuations.value),maxMinutes:Number(fields.maxMinutes.value)});
         } catch(cause){error=String(cause?.message||cause);render();return;}
+      }
+      if(action==='disarm') {
+        if(!composer?.id)return;
+        input={armId:composer.id};
+        stopBinding();
       }
       const url=route,revision=epoch,serial=++sequence;
       busy=true;error='';render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action,url,...input});
         if(!accepts(url,revision,serial))return;
-        if((result?.url&&policy.canonical(result.url)!==url)||(result?.record&&policy.canonical(result.record.url)!==url))throw Error('Goal response belongs to another chat');
+        validateResult(result,url);
         if(!result?.ok)throw Error(result?.error||result?.reason||'Goal action was not confirmed');
-        record=result.record||null;hydrate();
+        apply(result);resumeBinding();
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
         error='Goal: '+String(cause?.message||cause);
       } finally {
-        if(valid()&&current()===url&&epoch===revision&&sequence===serial) {
+        if(accepts(url,revision,serial)) {
+          busy=false;render();
+          if(pendingRefresh){pendingRefresh=false;void refresh();}
+        }
+      }
+    }
+    async function manualIntent({text,baselineKey,eventAt}) {
+      if(!valid())return {ok:false};
+      if(syncRoute()){void refresh();return {ok:false};}
+      if(!route||!loaded||busy||composer?.phase!=='armed'||typeof text!=='string'||!text.trim()||
+          typeof baselineKey!=='string'||!Number.isFinite(eventAt))return {ok:false};
+      const url=route,id=composer.id;
+      stopBinding();
+      binding={id,origin:url,allocated:'',token:bindGeneration,persisted:false,inFlight:false,stopped:false,deadline:eventAt+BIND_WINDOW};
+      const token=binding.token;
+      busy=true;error='';sequence++;render();
+      try {
+        const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt});
+        if(!contextMatches(token))return {ok:false};
+        if(result?.url&&![url,route].includes(policy.pageUrl(result.url)))throw Error('Goal intent belongs to another chat');
+        if(!result?.ok)throw Error(result?.error||result?.reason||'Goal intent was not saved');
+        if(result.composer?.id!==id||result.composer.phase!=='intent')throw Error('Goal intent was not acknowledged');
+        // A persisted intent may follow a new chat from / to its allocated URL.
+        composer=result.composer;record=null;loaded=true;hydrate();resumeBinding();
+        return {ok:true};
+      } catch(cause) {
+        if(contextMatches(token)) {
+          binding.stopped=true;error='Goal: '+String(cause?.message||cause);
+        }
+        return {ok:false};
+      } finally {
+        if(contextMatches(token)) {
           busy=false;render();
           if(pendingRefresh){pendingRefresh=false;void refresh();}
         }
@@ -257,7 +398,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     listen(toggle,'click',()=>{
       if(syncRoute()){void refresh();return;}
       if(toggle.disabled)return;
-      if(active()&&!record.stopRequested)void act('stop');else show(true);
+      void act(active()&&!record.stopRequested?'stop':armed()?'disarm':'arm');
     });
     listen(details,'click',()=>{if(syncRoute()||!loaded)void refresh();show(!open);});
     listen(close,'click',()=>show(false));
@@ -284,11 +425,12 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(disposed)return;
       disposed=true;epoch++;sequence++;
       observer?.disconnect();
+      stopBinding();
       if(typeof unsubscribe==='function')unsubscribe();
       for(const cleanup of cleanups)cleanup();
       controls.remove();panel.remove();style.remove();
     }
-    return Object.freeze({refresh,dispose});
+    return Object.freeze({refresh,dispose,manualIntent});
   }
   const api=Object.freeze({create});
   root.ChatGPTGoalInline=api;

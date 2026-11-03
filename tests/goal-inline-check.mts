@@ -4,9 +4,11 @@ import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
 type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown};
-type Request={type:string;action:string;url:string;goal?:string;rules?:string;maxContinuations?:number;maxMinutes?:number};
-type Result={ok:boolean;record?:GoalRecord|null;url?:string;error?:string};
-type Instance={refresh:()=>Promise<void>;dispose:()=>void};
+type Config={rules:string;maxContinuations:number;maxMinutes:number};
+type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
+type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
+type Result={ok:boolean;record?:GoalRecord|null;composer?:Composer|null;url?:string;error?:string;pending?:boolean};
+type Instance={refresh:()=>Promise<void>;dispose:()=>void;manualIntent:(value:{text:string;baselineKey:string;eventAt:number})=>Promise<{ok:boolean}>};
 const chat='https://chatgpt.com/c/synthetic-goal-a',other='https://chatgpt.com/c/synthetic-goal-b';
 const tick=()=>new Promise<void>(resolve=>setImmediate(resolve));
 const source=readFileSync('extension/goal-inline.js','utf8');
@@ -23,9 +25,14 @@ function deferred<T>() {
 function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReasoning=false) {
   const {window,document}=parseHTML('<html><head></head><body><main></main></body></html>');
   const calls:Request[]=[];
-  let url=initial,record:GoalRecord|null=null,live=true,subscription:(()=>void)|null=null,unsubscribed=0;
+  let url=initial,record:GoalRecord|null=null,composerState:Composer|null=null,bindable=false,armCounter=0,nativeText='',live=true,subscription:(()=>void)|null=null,unsubscribed=0;
   let responder:((value:Request)=>Result|Promise<Result>)|null=null;
   const state={nativeSends:0,draftReads:0};
+  let clock=1800000000000,timerId=0;
+  const timers=new Map<number,{at:number;run:()=>void}>();
+  Object.defineProperty(window,'setTimeout',{value:(run:()=>void,delay:number)=>{const id=++timerId;timers.set(id,{at:clock+delay,run});return id;},configurable:true});
+  Object.defineProperty(window,'clearTimeout',{value:(id:number)=>timers.delete(id),configurable:true});
+  class ClockDate extends Date {static override now(){return clock;}}
   let nativeDraft='  untouched draft\nwith spacing  ';
   let editor:HTMLElement;
   const proto=window.HTMLElement.prototype;
@@ -67,22 +74,34 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   }
   const html=document.documentElement;
   if(beforeRoot)html.remove();
-  const context=createContext({document,console,URL,Date});
+  const context=createContext({document,console,URL,Date:ClockDate});
   runInContext(policy,context);runInContext(source,context);
   const instance:Instance=runInContext('ChatGPTGoalInline',context).create({document,getUrl:()=>url,alive:()=>live,
     request:async(value:Request)=>{
       calls.push(value);
       if(responder)return responder(value);
-      if(value.action==='start')record={...goal(value.url),goal:value.goal!,rules:value.rules!,maxContinuations:value.maxContinuations!,maxMinutes:value.maxMinutes!};
+      if(value.action==='arm')composerState={id:'synthetic-arm-'+(++armCounter),phase:'armed',url:value.url,
+        config:{rules:value.rules!,maxContinuations:value.maxContinuations!,maxMinutes:value.maxMinutes!}};
+      if(value.action==='disarm'&&composerState)composerState={...composerState,phase:'disabled'};
+      if(value.action==='intent'&&composerState) {
+        nativeText=value.text!;composerState={...composerState,phase:'intent',intent:{text:value.text!,baselineKey:value.baselineKey!,eventAt:value.eventAt!}};
+      }
+      if(value.action==='bind'&&composerState) {
+        if(!bindable)return {ok:true,pending:true,url:value.url,composer:composerState,record};
+        record={...goal(value.url),goal:nativeText};
+        composerState={...composerState,phase:'bound',binding:{url:value.url}};
+      }
       if(value.action==='pause'&&record)record={...record,phase:'paused'};
       if(value.action==='resume'&&record)record={...record,phase:'waiting'};
       if(value.action==='stop'&&record)record={...record,phase:'stopped'};
-      return {ok:true,url:value.url,record};
+      return {ok:true,url:value.url,record,composer:composerState};
     },subscribe:(fn:()=>void)=>{subscription=fn;return ()=>{subscription=null;unsubscribed++;};}});
   function element<T=HTMLButtonElement>(selector:string):T {
     const result=document.querySelector(selector);assert.ok(result,selector);return result as unknown as T;
   }
   return {document,window,calls,state,instance,element,
+    now:()=>clock,timers:()=>timers.size,advance:async(ms:number)=>{clock+=ms;for(const [id,timer] of Array.from(timers))if(timer.at<=clock){timers.delete(id);timer.run();}await tick();},
+    composerState:()=>composerState,setComposer:(value:Composer|null)=>{composerState=value;},bindable:(value=true)=>{bindable=value;},
     toggle:()=>element('[role=switch]'),details:()=>element('[aria-label="Goal settings"]'),panel:()=>element<HTMLElement>('[data-chatgpt-goal-inline=panel]'),
     field:(name:string)=>element<HTMLInputElement|HTMLTextAreaElement>('[data-goal-field='+name+']'),
     action:(name:string)=>element('[data-goal-action='+name+']'),
@@ -93,110 +112,148 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
     hiddenForm:()=>hiddenForm,nativeForm:()=>form,draft:()=>nativeDraft,unsubscribed:()=>unsubscribed,setLive:(value:boolean)=>{live=value;}};
 }
 
-// This turns red if setup captures a native draft, a Goal click submits its
-// enclosing native form, or an explicit click can authorize more than one action.
+// Arming saves only criteria and finite limits. The native draft is neither
+// read nor sent, and a fresh root chat is supported before its first message.
+{
+  const f=fixture('https://chatgpt.com/');await tick();
+  assert.equal(f.toggle().disabled,false);assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  assert.deepEqual(f.calls.map(value=>value.action),['get']);
+  f.details().click();assert.equal(f.panel().parentElement,f.document.body);
+  assert.equal(f.document.querySelector('[data-goal-field=goal]'),null);
+  assert.equal(f.document.querySelector('[data-goal-action=start]'),null);
+  assert.equal(f.field('maxContinuations').value,'10');assert.equal(f.field('maxMinutes').value,'1440');
+  f.field('rules').value='Synthetic criteria';f.toggle().click();f.toggle().click();await tick();
+  assert.equal(f.calls.filter(value=>value.action==='arm').length,1);
+  const armed=f.calls.find(value=>value.action==='arm')!;
+  assert.equal(armed.rules,'Synthetic criteria');assert.equal(armed.maxContinuations,10);assert.equal(armed.maxMinutes,1440);
+  assert.equal('text' in armed,false);assert.equal('goal' in armed,false);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.field('rules').disabled,true);
+  assert.match(f.panel().textContent!,/Write the goal in the message box and send it yourself/);
+  assert.equal(f.timers(),0,'arming never starts polling or sending');
+  const armedId=f.composerState()!.id;f.toggle().click();await tick();assert.equal(f.calls.at(-1)!.action,'disarm');
+  assert.equal(f.calls.at(-1)!.armId,armedId,'Off is fenced to the exact acknowledged arming');
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false');assert.equal(f.field('rules').disabled,false);
+  assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);assert.equal(f.draft(),'  untouched draft\nwith spacing  ');
+  let nativeKeys=0;f.document.addEventListener('keydown',()=>nativeKeys++);
+  f.field('rules').dispatchEvent(new f.window.Event('keydown',{bubbles:true,cancelable:true}));assert.equal(nativeKeys,0);
+  const escape=new f.window.Event('keydown',{bubbles:true,cancelable:true});Object.defineProperty(escape,'key',{value:'Escape'});
+  f.field('rules').dispatchEvent(escape);assert.equal(f.panel().hidden,true);assert.equal(escape.defaultPrevented,true);
+  f.instance.dispose();assert.equal(f.nativeForm().isConnected,true);assert.equal(f.unsubscribed(),1);
+}
+
+// Only an explicit root adapter call captures the trusted native-send intent.
+// Pending confirmation is idempotent and follows / to a permanent route.
+{
+  const f=fixture('https://chatgpt.com/');await tick();f.toggle().click();await tick();
+  const eventAt=f.now();
+  const first=f.instance.manualIntent({text:'  User sent this exact goal  ',baselineKey:'',eventAt});
+  const duplicate=await f.instance.manualIntent({text:'Must not replace',baselineKey:'',eventAt});
+  assert.equal(duplicate.ok,false);assert.equal((await first).ok,true);
+  assert.equal(f.calls.filter(value=>value.action==='intent').length,1);
+  assert.equal(f.calls.at(-1)!.text,'  User sent this exact goal  ');assert.equal(f.timers(),1);
+  await f.advance(250);assert.equal(f.calls.at(-1)!.action,'bind');assert.equal(f.timers(),1);
+  f.setUrl(chat);await f.instance.refresh();
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+  f.bindable();await f.advance(250);
+  assert.equal(f.calls.at(-1)!.action,'bind');assert.equal(f.calls.at(-1)!.url,chat);assert.equal(f.timers(),0);
+  f.details().click();assert.match(f.panel().textContent!,/User sent this exact goal/);
+  assert.equal(f.document.querySelector('[data-goal-objective]')!.localName,'p','bound objective is read-only');
+  f.action('pause').click();await tick();assert.equal(f.action('resume').hidden,false);
+  f.action('resume').click();await tick();assert.equal(f.action('pause').hidden,false);
+  f.toggle().click();await tick();assert.equal(f.calls.at(-1)!.action,'stop');assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
+  assert.ok(f.calls.every(value=>value.action!=='start'),'inline never authorizes a separate initial send');f.instance.dispose();
+}
+
+// Allocation can occur while the intent acknowledgement is in flight. A real
+// cross-chat navigation invalidates callbacks and cancels pending confirmation.
+{
+  const f=fixture('https://chatgpt.com/');await tick();f.toggle().click();await tick();
+  const arm=f.composerState()!,pending=deferred<Result>();f.respond(()=>pending.promise);
+  const intent=f.instance.manualIntent({text:'Exact native goal',baselineKey:'',eventAt:f.now()});
+  f.setUrl(chat);await f.instance.refresh();
+  f.respond(null);const saved={...arm,phase:'intent' as const,eventAt:f.now()};f.setComposer(saved);
+  pending.resolve({ok:true,url:'https://chatgpt.com/',composer:saved});assert.equal((await intent).ok,true);await tick();
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.timers(),1);
+  f.setUrl(other);f.setComposer(null);await f.instance.refresh();
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false');assert.equal(f.timers(),0);f.details().click();assert.equal(f.field('rules').value,'');
+  const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);f.instance.dispose();
+}
+
+// The worker can confirm allocation before this page's route event arrives.
+// Keep the first-message intent pending and paint a Goal only on its real URL.
+{
+  const f=fixture('https://chatgpt.com/');await tick();f.toggle().click();await tick();
+  await f.instance.manualIntent({text:'Root native goal',baselineKey:'',eventAt:f.now()});
+  const bound={...f.composerState()!,phase:'bound' as const,binding:{url:chat}};
+  const record={...goal(chat),goal:'Root native goal'};
+  f.respond(()=>({ok:true,url:chat,record,composer:bound}));await f.advance(250);
+  assert.equal(f.timers(),1,'a worker-first allocation stays within the existing confirmation window');
+  f.details().click();assert.doesNotMatch(f.panel().textContent!,/another chat/);
+  assert.equal(f.document.querySelector('[data-goal-objective]')!.textContent,'','allocated record is not painted at root');
+  // A storage-triggered GET may also see bound state before location changes.
+  f.respond(()=>({ok:true,url:'https://chatgpt.com/',record:null,composer:bound}));await f.instance.refresh();
+  assert.equal(f.timers(),1);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+  f.setUrl(chat);f.setRecord(record);f.setComposer(bound);f.respond(null);await f.instance.refresh();
+  assert.equal(f.timers(),0);f.details().click();assert.match(f.panel().textContent!,/Root native goal/);f.instance.dispose();
+  const g=fixture('https://chatgpt.com/');await tick();g.toggle().click();await tick();
+  await g.instance.manualIntent({text:'Root native goal',baselineKey:'',eventAt:g.now()});
+  g.respond(()=>({ok:true,url:chat,record,composer:{...g.composerState()!,phase:'bound',binding:{url:chat}}}));
+  await g.advance(250);g.setUrl(other);g.respond(()=>({ok:true,url:other,record:null,composer:null}));await g.instance.refresh();
+  assert.equal(g.timers(),0);assert.equal(g.toggle().getAttribute('aria-checked'),'false','allocation evidence cannot follow a different chat');g.instance.dispose();
+}
+
+// Persistence failures never turn the switch on, failed disarm/Stop never
+// pretend it is off, and confirmation errors stop all polling in this instance.
+{
+  const f=fixture();await tick();f.details().click();
+  f.respond(()=>({ok:false,error:'Storage unavailable'}));f.toggle().click();await tick();
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false');assert.match(f.panel().textContent!,/Storage unavailable/);
+  f.respond(null);f.toggle().click();await tick();
+  f.respond(()=>({ok:false,error:'Disarm refused'}));f.toggle().click();await tick();
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.match(f.panel().textContent!,/Disarm refused/);
+  f.respond(null);await f.instance.manualIntent({text:'Native goal',baselineKey:'/c/synthetic-goal-a|before',eventAt:f.now()});
+  f.respond(()=>({ok:false,error:'Native outcome unknown'}));await f.advance(250);
+  assert.equal(f.timers(),0);assert.match(f.panel().textContent!,/Native outcome unknown/);
+  const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);
+  f.respond(null);f.notify();await tick();assert.match(f.panel().textContent!,/Native outcome unknown/);assert.equal(f.timers(),0);
+  f.toggle().click();await tick();assert.equal(f.calls.at(-1)!.action,'disarm');assert.equal(f.toggle().getAttribute('aria-checked'),'false');f.instance.dispose();
+}
+
+// Reload resumes a persisted intent only for its original 30-second window.
+// Disposal clears timers, subscriptions and listeners and rejects late results.
 {
   const f=fixture();await tick();
-  assert.equal(f.toggle().getAttribute('aria-checked'),'false');
-  assert.equal(f.toggle().parentElement?.previousElementSibling?.getAttribute('data-composer-navigation-target'),'reasoning');
-  assert.deepEqual(f.calls.map(call=>call.action),['get']);
-  f.toggle().click();
-  assert.equal(f.panel().parentElement,f.document.body,'setup is a portal outside native form');
-  assert.equal(f.panel().hidden,false);
-  assert.equal(f.field('goal').value,'','objective is never captured from draft');
-  assert.equal(f.field('maxContinuations').value,'5');assert.equal(f.field('maxMinutes').value,'30');
-  let nativeKeydowns=0;
-  f.document.addEventListener('keydown',()=>nativeKeydowns++);
-  f.field('goal').dispatchEvent(new f.window.Event('keydown',{bubbles:true,cancelable:true}));
-  assert.equal(nativeKeydowns,0,'typing is not delegated to native ChatGPT');
-  f.field('goal').value='  Explicit objective  ';
-  f.field('rules').value='Complete the checks';
-  f.action('start').click();f.action('start').click();
-  await tick();
-  assert.equal(f.calls.filter(call=>call.action==='start').length,1);
-  const start=f.calls.find(call=>call.action==='start')!;
-  assert.equal(start.goal,'Explicit objective');assert.equal(start.rules,'Complete the checks');
-  assert.equal(start.maxContinuations,5);assert.equal(start.maxMinutes,30);
-  assert.equal(f.toggle().getAttribute('aria-checked'),'true');
-  assert.equal(f.field('goal').disabled,true);
-  f.action('pause').click();await tick();
-  assert.equal(f.action('resume').hidden,false);
-  assert.equal(f.toggle().getAttribute('aria-checked'),'true','paused Goal remains armed');
-  f.action('resume').click();await tick();
-  assert.equal(f.action('pause').hidden,false);
-  f.toggle().click();await tick();
-  assert.equal(f.calls.at(-1)!.action,'stop','Off explicitly stops Goal via coordinator');
-  assert.equal(f.toggle().getAttribute('aria-checked'),'false');
-  assert.equal(f.state.draftReads,0);assert.equal(f.draft(),'  untouched draft\nwith spacing  ');assert.equal(f.state.nativeSends,0);
-  const escape=new f.window.Event('keydown',{bubbles:true,cancelable:true});
-  Object.defineProperty(escape,'key',{value:'Escape'});f.field('goal').dispatchEvent(escape);
-  assert.equal(f.panel().hidden,true);assert.equal(escape.defaultPrevented,true);
-  f.instance.dispose();assert.equal(f.unsubscribed(),1);
-  assert.equal(f.document.querySelector('[data-chatgpt-goal-inline]'),null);
-  assert.equal(f.nativeForm().isConnected,true,'dispose never removes native React-owned DOM');
+  f.setComposer({id:'saved-arm',phase:'intent',url:chat,intent:{text:'Saved native goal',baselineKey:'before',eventAt:f.now()-29500},
+    config:{rules:'Saved criteria',maxContinuations:10,maxMinutes:1440}});await f.instance.refresh();
+  assert.equal(f.timers(),1);await f.advance(250);assert.equal(f.timers(),1);await f.advance(250);
+  assert.equal(f.timers(),0);f.details().click();assert.match(f.panel().textContent!,/timed out/);
+  const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);f.instance.dispose();
+  const g=fixture();await tick();g.toggle().click();await tick();
+  await g.instance.manualIntent({text:'Native goal',baselineKey:'before',eventAt:g.now()});
+  const pending=deferred<Result>();g.respond(()=>pending.promise);await g.advance(250);g.instance.dispose();g.instance.dispose();
+  pending.resolve({ok:true,record:goal(),composer:{...g.composerState()!,phase:'bound',binding:{url:chat}}});await tick();
+  assert.equal(g.timers(),0);assert.equal(g.unsubscribed(),1);assert.equal(g.document.querySelector('[data-chatgpt-goal-inline]'),null);
+  g.remount();await tick();assert.equal(g.document.querySelector('[role=switch]'),null);assert.equal(g.nativeForm().isConnected,true);
 }
 
-// Failed starts/stops leave the durable state visible; pending requests disable
-// all actions, and a subscription notification cannot resurrect a stale result.
+// A stale arm/Get response cannot expose another chat's settings or state.
 {
-  const f=fixture();await tick();f.toggle().click();f.field('goal').value='Explicit';
-  const pending=deferred<Result>();f.respond(()=>pending.promise);
-  f.action('start').click();assert.equal(f.toggle().disabled,true);assert.equal(f.action('start').disabled,true);
-  f.notify();assert.equal(f.calls.length,2,'storage refresh waits for in-flight control');
-  f.respond(null);pending.resolve({ok:false,error:'Storage unavailable'});await tick();
-  assert.equal(f.toggle().getAttribute('aria-checked'),'false');
-  assert.equal(f.calls.filter(value=>value.action==='start').length,1,'failure is never automatically retried');
-  f.respond(()=>({ok:false,error:'Storage unavailable'}));f.action('start').click();await tick();
-  assert.match(f.panel().textContent!,/Storage unavailable/);
-  assert.equal(f.field('goal').value,'Explicit','error preserves setup for this chat');
-  f.respond(null);f.setRecord(goal());await f.instance.refresh();
-  f.respond(()=>{throw Error('Control disconnected');});f.toggle().click();await tick();
-  assert.equal(f.toggle().getAttribute('aria-checked'),'true','failed stop never pretends Goal is off');
-  assert.match(f.panel().textContent!,/Control disconnected/);f.instance.dispose();
-}
-
-// Route fences reject a late Start/Get and do not leak objectives or state into
-// a different conversation. New chats remain off and require a first message.
-{
-  const f=fixture();await tick();f.toggle().click();f.field('goal').value='Chat A only';
-  const pending=deferred<Result>();f.respond(()=>pending.promise);f.action('start').click();
-  f.setUrl(other);f.respond(()=>({ok:true,url:other,record:null}));await f.instance.refresh();
-  assert.equal(f.field('goal').value,'');assert.equal(f.panel().hidden,true);
-  pending.resolve({ok:true,url:chat,record:goal()});await tick();
-  assert.equal(f.toggle().getAttribute('aria-checked'),'false');assert.equal(f.field('goal').value,'');
+  const f=fixture();await tick();f.details().click();f.field('rules').value='Only for chat A';
+  const pending=deferred<Result>();f.respond(()=>pending.promise);f.toggle().click();
+  f.setUrl(other);f.respond(()=>({ok:true,url:other,record:null,composer:null}));await f.instance.refresh();
+  pending.resolve({ok:true,url:chat,composer:{id:'stale-arm',phase:'armed',url:chat,
+    config:{rules:'Only for chat A',maxContinuations:10,maxMinutes:1440}}});await tick();
+  f.details().click();assert.equal(f.field('rules').value,'');assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   f.respond(()=>({ok:true,url:chat,record:goal()}));await f.instance.refresh();
-  f.details().click();assert.match(f.panel().textContent!,/another chat/);
-  assert.equal(f.toggle().disabled,true,'wrong-chat response cannot authorize actions');
-  f.setUrl('https://chatgpt.com/');await f.instance.refresh();
-  assert.equal(f.toggle().disabled,true);assert.equal(f.toggle().getAttribute('aria-checked'),'false');
-  f.details().click();assert.match(f.panel().textContent!,/first message/);assert.equal(f.action('start').disabled,true);
-  f.respond(null);f.setUrl(other);await f.instance.refresh();assert.equal(f.toggle().disabled,false);f.instance.dispose();
-}
-
-// Remount and disposal exercise the production MutationObserver, including
-// pending responses arriving after disposal. No timers/browser are required.
-{
-  const f=fixture();await tick();f.setRecord(goal());f.notify();await tick();
-  const oldToggle=f.toggle();f.remount();await tick();
-  assert.equal(f.document.querySelectorAll('[role=switch]').length,1);
-  assert.equal(f.toggle(),oldToggle,'only extension-owned controls move');
-  assert.equal(f.toggle().parentElement?.previousElementSibling?.getAttribute('data-composer-navigation-target'),'reasoning');
-  const count=f.calls.length;
-  for(let i=0;i<8;i++)f.document.querySelector('main')!.append(f.document.createElement('p'));
-  await tick();assert.equal(f.calls.length,count,'streaming does not refetch or schedule requests');
-  f.details().click();const pending=deferred<Result>();f.respond(()=>pending.promise);
-  f.action('pause').click();f.instance.dispose();f.instance.dispose();
-  pending.resolve({ok:true,url:chat,record:goal(chat,'paused')});await tick();
-  f.remount();await tick();assert.equal(f.document.querySelector('[data-chatgpt-goal-inline]'),null);
-  assert.equal(f.unsubscribed(),1);assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
+  assert.equal(f.toggle().disabled,true);assert.match(f.panel().textContent!,/another chat/);f.instance.dispose();
 }
 
 // A reserved operation is a known pre-click refusal, not an unknown send.
 {
-  const f=fixture();await tick();
-  f.setRecord({...goal(chat,'blocked'),operation:{status:'reserved'}});await f.instance.refresh();f.details().click();
-  assert.match(f.panel().textContent!,/Message was not sent/);assert.doesNotMatch(f.panel().textContent!,/Previous send is unconfirmed/);
-  assert.equal(f.action('start').disabled,true);
+  const f=fixture();await tick();f.setRecord({...goal(chat,'blocked'),operation:{status:'reserved'}});
+  await f.instance.refresh();f.details().click();assert.match(f.panel().textContent!,/Message was not sent/);
+  assert.doesNotMatch(f.panel().textContent!,/Previous send is unconfirmed/);
   f.setRecord({...goal(chat,'blocked'),operation:{status:'intent'}});await f.instance.refresh();
   assert.match(f.panel().textContent!,/Previous send is unconfirmed/);f.instance.dispose();
 }
@@ -283,4 +340,4 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(disposed.unsubscribed(),1);
 }
 
-console.log('Inline Goal explicit authorization, state controls, draft isolation, route fences, remount and disposal passed.');
+console.log('Inline Goal native arming, explicit intent, bounded confirmation, draft isolation, route fences, layout and disposal passed.');

@@ -15,13 +15,18 @@ const source='https://chatgpt.com/c/inline-worker-source';
 const other='https://chatgpt.com/c/inline-worker-other';
 const calls:{kind:string,value:any}[]=[];
 const tabReads:number[]=[];
-let currentUrl=source,activeQueries=0,controllerFailure=false;
+let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='';
 const context=createContext({URL,
   chrome:{runtime:{onMessage:{addListener:(value:Listener)=>{listener=value;}}},tabs:{
     get:async(id:number)=>{tabReads.push(id);return {id,url:currentUrl};},
     query:async()=>{activeQueries++;return [{id:99,url:other}];}
   }},
+  bindNativeComposerGoal:async(tabId:number,url:string,armId:string)=>{calls.push({kind:'bind',value:{tabId,url,armId}});return {ok:true};},
   goalController:{
+    composerGet:async(value:any)=>{calls.push({kind:'composerGet',value});return {id:'armed',phase:'armed',url:composerUrlOverride||currentUrl};},
+    composerArm:async(value:any)=>{calls.push({kind:'arm',value});return {ok:true,record:{id:'armed'}};},
+    composerDisarm:async(value:any)=>{calls.push({kind:'disarm',value});return {ok:true,record:null};},
+    composerIntent:async(value:any)=>{calls.push({kind:'intent',value});return {ok:true,record:{id:'armed',phase:'intent'}};},
     get:async(url:string)=>{calls.push({kind:'get',value:url});return {id:'saved-goal'};},
     start:async(value:any)=>{calls.push({kind:'start',value});return {ok:true,record:{id:'new-goal'}};},
     control:async(value:any)=>{calls.push({kind:'control',value});if(controllerFailure)throw Error('Synthetic Goal refusal');return {ok:true};}
@@ -43,7 +48,8 @@ assert.equal(read.ok,true);
 assert.equal(read.tabId,7);
 assert.equal(read.url,source);
 assert.equal(read.record.id,'saved-goal');
-assert.deepEqual(calls,[{kind:'get',value:source}]);
+assert.equal(read.composer.id,'armed');
+assert.deepEqual(calls.filter(value=>value.kind==='get'),[{kind:'get',value:source}]);
 
 const config={goal:'  Preserve the explicit goal text  ',rules:'Synthetic stop rules',maxContinuations:3,maxMinutes:20};
 const started=await call(request('start',{...config,tabId:99,url:source+'/'}));
@@ -56,9 +62,27 @@ for(const action of ['pause','resume','stop']) {
   assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action,url:source,tabId:7}});
 }
 assert.equal(activeQueries,0,'inline actions use the sending tab even when a different tab is active');
-assert.deepEqual(tabReads,[7,7,7,7,7]);
+assert.ok(tabReads.every(id=>id===7));
+for(const action of ['arm','disarm','intent','bind']) {
+ const result=await call(request(action,{armId:'armed',eventAt:100000,text:'Sent objective',baselineKey:'',tabId:99}));
+ assert.equal(result.ok,true);
+ const mutation=calls.findLast(value=>value.kind===action)!;
+ assert.equal(mutation.value.tabId,7);
+}
+currentUrl='https://chatgpt.com/';
+const root=await call(request('arm',{url:currentUrl}),{tab:{id:7,url:currentUrl},frameId:0});
+assert.equal(root.ok,true,'new chat root can arm before native send');
+assert.equal(root.record,null);assert.equal(root.composer.id,'armed');
+assert.equal(calls.findLast(value=>value.kind==='arm')!.value.url,currentUrl);
+currentUrl=source;
+composerUrlOverride='https://chatgpt.com/';
+assert.equal((await call(request('intent',{url:composerUrlOverride,armId:'armed',eventAt:100000,text:'Sent root goal',baselineKey:''}))).ok,true,
+ 'a root intent may arrive after the native page receives its canonical destination');
+assert.equal(calls.findLast(value=>value.kind==='intent')!.value.url,composerUrlOverride);
+composerUrlOverride='';
 
-const accepted=calls.length;
+const mutations=()=>calls.filter(value=>!['get','composerGet'].includes(value.kind));
+const accepted=mutations().length;
 const reads=tabReads.length;
 for(const [message,from] of [
   [request('start',{url:other}),sender()],
@@ -70,18 +94,18 @@ for(const [message,from] of [
 ] as [any,any][]) {
   assert.equal((await call(message,from)).ok,false);
 }
-assert.equal(calls.length,accepted,'invalid sender, frame, URL or action cannot reach the controller');
-assert.equal(tabReads.length,reads,'invalid message binding is rejected before querying a tab');
+assert.equal(mutations().length,accepted,'invalid sender, frame, URL or action cannot mutate Goal');
+assert.ok(tabReads.slice(reads).every(id=>id===7),'only the sender tab may be queried for valid page URLs');
 
 // The tab can navigate after the message captures its sender URL. Re-read its
 // real route before either a write or a read, rather than trusting the payload.
 currentUrl=other;
-for(const action of ['get','start','pause','resume','stop']) {
+for(const action of ['get','arm','disarm','intent','bind','start','pause','resume','stop']) {
   const result=await call(request(action,config));
   assert.equal(result.ok,false);
   assert.match(result.error,/Чат изменился/);
 }
-assert.equal(calls.length,accepted,'a route change cannot affect either chat Goal');
+assert.equal(mutations().length,accepted,'a route change cannot affect either chat Goal');
 currentUrl=source;
 controllerFailure=true;
 const refused=await call(request('resume'));

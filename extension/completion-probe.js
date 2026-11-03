@@ -1,8 +1,9 @@
 'use strict';
 
-// Serialized into MAIN. Metadata only; never invokes React handlers or reads
-// draft/answer text. The expected attempt is bound by the extension caller.
-function inspectCompletedTurn(expectedUrl) {
+// Serialized into MAIN. Metadata by default; an armed Goal may explicitly
+// request already-sent message text. Never reads drafts or invokes handlers.
+// The expected attempt is bound by the extension caller.
+function inspectCompletedTurn(expectedUrl, includeGoalText = false) {
   const url=location.origin+location.pathname.replace(/\/$/,'');
   if(url!==expectedUrl)return {ok:false,reason:'route-changed'};
   const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
@@ -32,9 +33,36 @@ function inspectCompletedTurn(expectedUrl) {
   const hasError=Boolean(entry.errorMessage)||Array.from(root.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(visible);
   const userTimes=(entry.timestampTurns||[]).filter(item=>item.role==='user');
   const firstUserSentAtMs=entryCount===1&&users.length===1&&userTimes.length===1?userTimes[0].sentAtMs:null;
+  let goalText={};
+  if(includeGoalText===true) {
+    let goalResponse=typeof assistant?.content==='string'?assistant.content:'';
+    // Native DIL answers may store only a content reference. Resolve complete
+    // fallback Markdown only when that reference is the entire native body;
+    // surrounding prose/code and missing fallback parts must remain non-exact.
+    const references=assistant?.contentReferences;
+    if(/^::chatgpt-content-reference\{[^{}]+\}/.exec(goalResponse)?.[0]===goalResponse&&
+        Array.isArray(references)&&references.length&&
+        references.every(ref=>typeof ref?.model_dil_v2?.fallbackMarkdown==='string')) {
+      goalResponse=references.map(ref=>ref.model_dil_v2.fallbackMarkdown).join('\n\n');
+      // Native DIL serialization escapes this literal underscore. This single
+      // representation still needs the independent plain rendered check below.
+      if(goalResponse==='GOAL\\_COMPLETE')goalResponse='GOAL_COMPLETE';
+    }
+    const rendered=domAssistant?.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
+    let goalRawExact=false;
+    if(goalResponse==='GOAL_COMPLETE'&&rendered?.textContent==='GOAL_COMPLETE'&&
+        !rendered.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img')) {
+      const semantic=domAssistant.cloneNode(true);
+      semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
+      goalRawExact=semantic.textContent.trim()==='GOAL_COMPLETE';
+    }
+    const sentAtMs=userTimes.at(-1)?.sentAtMs;
+    goalText={userText:typeof user.message==='string'?user.message:'',userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
+      goalResponse,goalRawExact};
+  }
   return {ok:true,url,firstUserSentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
     assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
     turnStatus:entry.turn.status,assistantPhase:assistant?.phase,assistantCompleted:assistant?.completed===true,
-    generating,hasError};
+    generating,hasError,...goalText};
 }
 if(typeof module!=='undefined')module.exports={inspectCompletedTurn};

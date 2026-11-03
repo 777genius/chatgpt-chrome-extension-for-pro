@@ -37,3 +37,11 @@ Verified on real ChatGPT in a dedicated test conversation, using native mouse/ke
 - Replacing the content listener and a full extension reload preserve the same paused Goal ID, objective and budget without sending. Native hidden composers and screen reader speaker headings are covered by regressions.
 
 The native conversation-length limit was not forced in the short live test. Handoff enrollment, failure recovery, chronology, destination binding and budgets are covered by synthetic integration tests. A real native limit/handoff remains a separate pre-merge validation gap.
+
+## Native message mode
+
+The inline switch arms Goal for the next message the user sends from the normal ChatGPT composer. It does not send, replace or append anything to that draft. Advanced criteria and finite limits are in the three-dot menu; defaults are 10 continuations and 1440 minutes. Existing active Goal budgets are not changed by this default update.
+
+A trusted enabled send action captures an intent, but is insufficient to start Goal. The worker requires a fresh observed request, the exact native submitted user text, a new native prompt/user ID and matching native user timestamp. New chats additionally require first-turn evidence before binding the permanent URL. The adopted Goal starts in waiting state with zero automatic sends. Its next continuation includes the original objective and completion protocol.
+
+The per-tab arm, intent and final binding are durable. Initial binding and Goal state are committed together; a missing acknowledgement never causes the user's message to be resent. Disarming during confirmation cancels adoption or stops that exact adopted Goal, without stopping the user's native request. Later manual sends retain priority. Existing popup-started Goals remain supported.

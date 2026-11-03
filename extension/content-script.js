@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.1';
+  const SCRIPT_VERSION = '1.7.2';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -104,7 +104,7 @@
     subscribe:changed=>{
       const listener=(changes,area)=>{
         const url=globalThis.ChatGPTGoalPolicy?.canonical(location.href);
-        if(area==='local'&&url&&Object.hasOwn(changes,'chatgpt-goal:'+url))changed();
+        if(area==='local'&&(url&&Object.hasOwn(changes,'chatgpt-goal:'+url)||Object.keys(changes).some(key=>key.startsWith('chatgpt-goal-composer:'))))changed();
       };
       try{chrome.storage.onChanged?.addListener(listener);}catch{}
       return ()=>{try{chrome.storage.onChanged?.removeListener(listener);}catch{}};
@@ -745,6 +745,9 @@
   function rememberManualStatusIntent() {
     const button=sendButton();
     if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return;
+    const editor=composer();
+    if(editor)void inlineGoal?.manualIntent({text:rawEditorText(editor),
+      baselineKey:latestPromptSnapshot()?.promptKey||'',eventAt:Date.now()});
     rememberCompletionSendIntent();
     manualSendIntent={url:ChatGPTHandoffTitle.chatUrl(location.href),at:Date.now(),attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
   }
