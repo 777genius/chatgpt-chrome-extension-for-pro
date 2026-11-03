@@ -82,7 +82,7 @@ let recoveryInfo:PopupResponse|null=null;
 chrome.runtime.sendMessage({type:'CHATGPT_HANDOFF_TITLE_INFO'}).then(info=>{
   if(!info?.ok||!info.available)return;
   recoveryInfo=info;
-  popupElement('desired-title').textContent=info.desiredTitle;
+  popupElement('desired-title').textContent=info.desiredTitle??null;
   titleRecovery.hidden=false;
 }).catch(()=>{});
 recoverTitle.addEventListener('click',async()=>{
@@ -148,7 +148,7 @@ function showGoal(record:GoalPopupRecord|null):void {
 async function goalAction(action:'start'|'pause'|'resume'|'stop'):Promise<void> {
   if(goalBusy)return;
   goalBusy=true;
-  for(const key of ['start','pause','resume','stop'])goalUi[key].disabled=true;
+  for(const key of ['start','pause','resume','stop'] as const)goalUi[key].disabled=true;
   goalUi.status.textContent='Сохранение Goal…';
   try {
     if(!goalBinding)throw Error('Сначала откройте меню расширения в нужном чате');
