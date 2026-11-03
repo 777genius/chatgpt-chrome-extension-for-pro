@@ -10,6 +10,9 @@ interface GoalPolicyRecord extends GoalSettings { deadlineAt: number; continuati
 type GoalDecision = "unverified" | "complete" | "deadline" | "budget" | "continue";
 interface GoalPolicyAPI {
   MARKER: string; CONTINUATION: string;
+  DEFAULTS:{maxContinuations:number;maxMinutes:number};
+  pageUrl(value:string|null|undefined):string;
+  composerSettings(input?:GoalSettingsInput):Pick<GoalSettings,"rules"|"maxContinuations"|"maxMinutes">;
   canonical(value: string): string;
   settings(input: GoalSettingsInput | null | undefined): GoalSettings;
   initialText(record: GoalSettings): string;
@@ -30,6 +33,15 @@ declare const module: undefined | { exports: unknown };
       return url.origin==='https://chatgpt.com'&&/^\/c\/[a-z0-9-]+\/?$/.test(url.pathname)
         ?url.origin+url.pathname.replace(/\/$/,''):'';
     } catch {return '';}
+  }
+  const DEFAULTS=Object.freeze({maxContinuations:10,maxMinutes:1440});
+  function pageUrl(value:string|null|undefined):string {
+    if(typeof value!=='string')return '';
+    try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&url.pathname==='/'?url.origin+'/':canonical(value);}catch{return '';}
+  }
+  function composerSettings(input:GoalSettingsInput={}):Pick<GoalSettings,"rules"|"maxContinuations"|"maxMinutes"> {
+    const {rules,maxContinuations,maxMinutes}=settings({...DEFAULTS,...Object.fromEntries(Object.entries(input).filter(([,value])=>value!==undefined)),goal:'Native message'});
+    return {rules,maxContinuations,maxMinutes};
   }
   function settings(input: GoalSettingsInput | null | undefined): GoalSettings {
     const goal=typeof input?.goal==='string'?input.goal.trim():'';
@@ -68,7 +80,7 @@ declare const module: undefined | { exports: unknown };
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api: GoalPolicyAPI=Object.freeze({MARKER,CONTINUATION,canonical,settings,initialText,continuationText,handoffText,exactMarker,decision});
+  const api: GoalPolicyAPI=Object.freeze({MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,exactMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);
