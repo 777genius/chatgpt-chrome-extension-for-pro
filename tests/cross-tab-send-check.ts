@@ -131,6 +131,7 @@ const refused=await send(12,'retry-no-click');
 assert.equal(refused.ok,false);assert.equal(Boolean(refused.unknown),false);
 pages.get(12)!.editor.textContent='доделай е2е';
 assert.equal((await send(12,'retry-no-click')).ok,false,'positive no-click proof does not rearm the consumed operation');
+await append(12,'retry.failed','retry-no-click',{clicked:false,confirmed:false});
 await append(12,'retry.finished','retry-no-click',{clicked:false,confirmed:false});
 await assert.rejects(intent(12,'retry-no-click'),/уже запускался/,'duplicate delivery of a consumed intent cannot rearm its old operation');
 boot();await intent(12,'retry-after-no-click');
