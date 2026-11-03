@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.5';
+  const SCRIPT_VERSION = '1.7.7';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -818,7 +818,7 @@
     const history = messages.map((item, index) =>
       `--- Сообщение ${index + 1}. ${item.role === 'user' ? 'Пользователь' : 'ChatGPT'} ---\n${item.text}`
     ).join('\n\n');
-    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние два сообщения пользователя и два ответа ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
+    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние доступные сообщения: не более двух сообщений пользователя и двух ответов ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
   }
 
   async function updateHandoff(stage, extra = {}) {
@@ -1009,6 +1009,26 @@
   async function beginHandoff(error, info, alert) {
     if (handoffBusy) return;
     const sourceUrl = location.href;
+    const sourcePromptKey = latestPromptSnapshot()?.promptKey || location.pathname;
+    const sourceAttempt = globalThis.__chatgptNotifierAttemptId || '';
+    const sourceRequest = globalThis.__chatgptNotifierRequestId || null;
+    const sameSource = () => location.href === sourceUrl && alert.isConnected &&
+      (latestPromptSnapshot()?.promptKey || location.pathname) === sourcePromptKey &&
+      (globalThis.__chatgptNotifierAttemptId || '') === sourceAttempt &&
+      (globalThis.__chatgptNotifierRequestId || null) === sourceRequest;
+    // A terminal banner can render before the native history finishes loading.
+    // Wait only in this unchanged source; never retry a click or invent answers.
+    for (let checks = 0; info?.incomplete && checks < 80; checks += 1) {
+      await sleepUntilNextCheck();
+      if (!sameSource()) {
+        throw new Error('Исходный чат или запрос изменился во время загрузки истории');
+      }
+      const fresh = await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
+        alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
+      if (!sameSource()) throw new Error('Исходный запрос изменился во время проверки истории');
+      if (fresh?.action !== 'new-chat') throw new Error('Действие нового чата больше не подтверждено');
+      info = fresh;
+    }
     if (!/\/c\/[^/]+/.test(location.pathname) || info.incomplete || !info.messages?.length) {
       throw new Error('Не удалось получить полные последние сообщения; исходный чат сохранён');
     }

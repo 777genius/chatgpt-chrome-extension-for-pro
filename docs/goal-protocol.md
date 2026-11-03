@@ -37,7 +37,7 @@ Verified on real ChatGPT in a dedicated test conversation, using native mouse/ke
 - Turning the inline switch off stops Goal while the current native response can finish.
 - Replacing the content listener and a full extension reload preserve the same paused Goal ID, objective and budget without sending. Native hidden composers and screen reader speaker headings are covered by regressions.
 
-The native conversation-length limit was not forced in the short live test. Handoff enrollment, failure recovery, chronology, destination binding and budgets are covered by synthetic integration tests. A real native limit/handoff remains a separate pre-merge validation gap.
+The conversation-length limit was not forced by exhausting a real conversation. The live handoff canary described below exercises the native terminal-error UI and real destination send using a scoped injected error response.
 
 ## Native message mode
 
@@ -61,3 +61,17 @@ Inline loading failures now permit an explicit trusted retry and expose errors v
 New handoffs persist the source composer's native reasoning token before navigation and recheck it before leaving the source. The destination restores that exact token through the native slider, without localized labels or fixed level positions. The worker authorizes only the saved token; the native sender verifies the current token again immediately before its one click.
 
 Unavailable modes, concurrent source-mode changes and legacy pending records without a saved mode stop before sending rather than choosing Extra High or downgrading Pro. Already-clicked historical transfers remain fenced and can still reconcile their existing native receipt.
+
+Terminal recovery waits briefly for the source history to finish loading. A native, fully loaded short chat transfers its available messages (up to two per role), even if no final assistant answer exists yet. Missing text, pending history, or a changed source still stops transfer.
+
+Newly created chats may retain a local header identity after receiving their server ID. When that header omits Rename, title recovery uses only the native sidebar row whose URL exactly matches the confirmed destination. It restores any sidebar it opened, and retains the existing persisted one-save intent and exact-request server acknowledgement checks.
+
+## Live handoff validation (1.7.7)
+
+On the real ChatGPT website in Chrome, an isolated test tab received one substituted `conversation_too_large` error response. This is controlled fault injection, not actual server-side history exhaustion. ChatGPT rendered its native Unknown error / Start new chat action. No working chat was used for test sends.
+
+- Automatic handoff preserved chronological history, including a fully loaded short chat with only one assistant answer.
+- The native destination composer sent exactly once and received the expected control answer from ChatGPT. The durable journal records one authorization, dispatch, click and confirmed handoff.
+- The source Medium effort was retained. Pro availability remains covered by contract tests; no live Pro claim is made.
+- The native saved-chat menu restored the original title with `(1)`. One native rename request received HTTP 200 and the durable title status became `confirmed`.
+- Full local checks passed all 48 programs; subsequent menu-isolation hardening passed typecheck and rename regressions. The final PR head must also pass CI before merge.

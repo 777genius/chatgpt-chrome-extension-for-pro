@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; streaming?:boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu';
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,7 +28,7 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0;
   let clickAt = 0;
-  let menuReady=mode!=='late-menu';
+  let menuReady=!['late-menu','sidebar-menu','sidebar-hidden','sidebar-wrong-chat'].includes(mode);
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
   const failure: ((value: unknown)=>void)[] = [];
@@ -41,13 +41,13 @@ function harness(mode: Mode = 'success') {
     memoizedProps:{queryClient:{getQueryCache:()=>({getAll:()=>mode==='missing-cache'?[]:[cachedQuery]})}},return:null
   };
   const actions = Array.from(document.querySelectorAll('header button[aria-haspopup="menu"]')).find(n=>n.querySelector('use[href*="ellipsis-horizontal"]'))!;
-  actions.addEventListener('click',()=>{
+  function openMenu(trigger=actions,withRename=menuReady){
     opened++;
-    actions.setAttribute('data-state','open');
+    trigger.setAttribute('data-state','open');
     if (mode==='navigate') location.href='https://chatgpt.com/c/other';
-    const menu=document.createElement('div');menu.setAttribute('role','menu');menu.setAttribute('aria-labelledby',actions.id);
-    menu.innerHTML=menuReady?menuEvidence[0].html:'<div role="menuitem">Unrelated action</div>';
-    menu.addEventListener('keydown',event=>{if((event as KeyboardEvent).key==='Escape'){menu.remove();actions.setAttribute('data-state','closed');}});
+    const menu=document.createElement('div');menu.setAttribute('role','menu');menu.setAttribute('aria-labelledby',trigger.id);
+    menu.innerHTML=withRename?menuEvidence[0].html:'<div role="menuitem">Unrelated action</div>';
+    menu.addEventListener('keydown',event=>{if((event as KeyboardEvent).key==='Escape'){menu.remove();trigger.setAttribute('data-state','closed');}});
     // Linkedom splits semicolons inside a quoted SVG data URL; browsers expose
     // the complete maskImage string from this captured style attribute.
     for(const icon of menu.querySelectorAll('[style]')) {
@@ -82,7 +82,20 @@ function harness(mode: Mode = 'success') {
       });
     });
     document.body.append(menu);
-  });
+  }
+  actions.addEventListener('click',()=>openMenu());
+  if(mode.startsWith('sidebar-')) {
+    const row=document.createElement('div');row.setAttribute('data-sidebar-cycle-item','');
+    row.innerHTML=`<a aria-current="page" href="${mode==='sidebar-wrong-chat'?'https://chatgpt.com/c/other':targetUrl}">Native saved chat</a><button id="saved-chat-menu" aria-haspopup="menu"><svg><use href="#ellipsis-horizontal" /></svg></button>`;
+    const link=row.querySelector('a')!,trigger=row.querySelector('button')!;
+    trigger.addEventListener('click',()=>openMenu(trigger,true));document.body.append(row);
+    if(mode==='sidebar-hidden') {
+      link.hidden=true;trigger.hidden=true;
+      const toggle=document.createElement('button');toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<svg><use href="#codex-icon-sidebar-hidden-light-16" /></svg>';
+      toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
+      document.querySelector('header')!.append(toggle);
+    }
+  }
   document.querySelector('main button')!.addEventListener('click',()=>sent++);
   const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,KeyboardEvent:class extends window.Event{constructor(type:string,options:{key:string}){super(type);Object.defineProperty(this,'key',{value:options.key});}},HTMLInputElement:window.HTMLInputElement,
     Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
@@ -339,5 +352,25 @@ for(const mode of ['streaming','late-menu'] as const) {
   h.probe({...options,action:'cancel'});
   assert.equal(input.value,'Owner edited title','cleanup must preserve owner changes');
   assert.equal(input.isConnected,true,'cleanup must keep an owner-edited dialog open');
+}
+for(const mode of ['sidebar-menu','sidebar-hidden'] as const) {
+  const h=harness(mode);assert.equal((await h.rename()).ok,true);assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1,'native saved-row fallback saves the target title once');assert.equal(h.sent,0);
+  if(mode==='sidebar-hidden')assert.equal(h.document.querySelector('header button[aria-expanded]')?.getAttribute('aria-expanded'),'false','restore the sidebar opened by automation');
+}
+{
+  const h=harness('sidebar-wrong-chat');await h.rename();assert.equal(h.saved,0,'never use a different sidebar chat');assert.equal(h.sent,0);
+}
+{
+  const h=harness('sidebar-menu');const options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+  assert.equal(h.probe({...options,action:'open'}).ok,true);
+  assert.equal(h.probe({...options,action:'select'}).ok,false,'switch to exact sidebar trigger first');
+  h.document.querySelectorAll('[role="menu"]').forEach(n=>n.remove());
+  const foreign=h.document.createElement('div');foreign.setAttribute('role','menu');foreign.innerHTML=menuEvidence[0].html;
+  let foreignClicks=0,foreignEscapes=0;
+  foreign.addEventListener('click',()=>foreignClicks++);foreign.addEventListener('keydown',()=>foreignEscapes++);h.document.body.append(foreign);
+  assert.equal(h.probe({...options,action:'select'}).ok,false);
+  h.probe({...options,action:'cancel'});
+  assert.equal(foreignClicks,0,'an unlabelled foreign menu cannot be the sidebar rename menu');assert.equal(foreignEscapes,0,'cleanup must not close a foreign menu');
 }
 console.log('PASS: observed native rename DOM, local/canonical chat binding, inert modal, split UTF8/exact endpoint ack, no draft send, one save, bounded timeout');

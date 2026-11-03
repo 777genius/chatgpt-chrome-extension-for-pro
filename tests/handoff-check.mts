@@ -75,6 +75,26 @@ function probeCheck(){
  unknown.textContent='Maximum conversation length reached';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'new-chat','a real length-limit CTA still uses handoff');unknown.remove();
 
+ const historyProps=fiber.return.memoizedProps as any;
+ Object.assign(ctx,{location:{pathname:'/c/source'}});
+ const fullEntries=historyProps.entries;
+ historyProps.entries=[{id:'t0',turn:{items:[{type:'user-message',messageId:'u-short',message:'first failed request'}]}}];
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'short history without native loaded proof must wait');
+ Object.assign(historyProps,{isChatConversation:true,conversationId:'source',isConversationFetching:false,isConversationLoading:false,hasLoadError:false});
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),false,'a fully loaded chat may genuinely have no assistant answers yet');
+ historyProps.conversationId='local-chatgpt:source-alias';historyProps.composerConversationId=historyProps.conversationId;historyProps.scrollStateConversationId='source';
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),false,'a new source may retain a local identity with an exact canonical scroll binding');
+ historyProps.scrollStateConversationId='other';
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'local identity alone cannot authorize a different source');
+ historyProps.conversationId='source';
+ historyProps.isConversationFetching=true;
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'loading history must not transfer early');
+ historyProps.entries=fullEntries;
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'even two pairs do not bypass native history loading');
+ historyProps.isConversationFetching=false;
+ historyProps.entries=[{id:'empty',turn:{items:[]}}];
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'an empty loaded history must not transfer');
+ historyProps.entries=fullEntries;
  fiber.memoizedProps.children.props.id='chatgptConversations.responseError.retry';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry');
  document.querySelector('aside')!.prepend(unknown);unknown.textContent='Unknown error';
@@ -105,7 +125,7 @@ function probeCheck(){
  assert.equal(runInContext('inspectChatError(1,true).action',ctx),'unknown','unrelated status must not authorize a retry');
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
-type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort';
+type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading';
 async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{source?:string;destination?:string;available?:string[]}={}){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
@@ -132,6 +152,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    document.querySelector('[data-app-shell-active-page="true"] form')!.append(root);
  };
  if(interference==='source-attachment')addOwnerAttachment();
+ let historyInspections=0;
  const messages=history.map(m=>({...m}));if(rich)messages[2]!.text=richOriginal;if(long)messages[3].text='Large context\n'.repeat(1500);
  Object.assign(document,{createRange:()=>({selectNodeContents(){}}),execCommand:(_:any,__:any,text:string)=>{document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent=text;return true;}});
  Object.assign(window,{getSelection:()=>({removeAllRanges(){},addRange(){}})});
@@ -163,7 +184,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?'ready':'missing'};
    if(m.type==='CHATGPT_INSPECT_ERROR'){
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
-    return {ok:true,action:'new-chat',messages,incomplete:false};
+    return {ok:true,action:'new-chat',messages,incomplete:interference==='history-loading'&&++historyInspections<3};
    }
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
     if(m.type==='CHATGPT_HANDOFF_BEGIN'){begins++;assert.equal(loc.href,originalURL,'backup must precede navigation');}
@@ -227,7 +248,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    menu.addEventListener('keydown',(event:any)=>{if(event.key==='Escape')menu.remove();});
  });
  document.querySelector('main')!.append(alert);
- if(interference&&interference!=='rich-seed'){
+ if(interference&&interference!=='rich-seed'&&interference!=='history-loading'){
    const sourceBlocked=interference==='source-attachment'||interference==='source-edit'||interference==='source-mode-change';
    await clock.until(()=>sourceBlocked?notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'):stored?.stage==='failed',`handoff preserves ${interference}`);
    assert.equal(sends.length,0,'manual interaction must cancel automatic history sending');
@@ -318,4 +339,5 @@ await transferCheck(false,false,false,false,false,false,'source-mode-change');
 await transferCheck(false,false,false,false,false,false,'unavailable-effort',{source:'pro',destination:'medium',available:['medium','max']});
 await transferCheck(false,false,false,false,false,false,'legacy-effort');
 
+await transferCheck(false,false,false,false,false,false,'history-loading');
 await transferCheck(false,false,false,false,false,false,'',{source:'pro-tier-2',destination:'medium',available:['medium','max','pro-tier-2']});

@@ -20,9 +20,12 @@ function controlChatTitle(options) {
       const input=state.input||(state.selected&&candidates.length===1?candidates[0]:null);
       if(chatUrl(location.href)===state.url && input && [state.title,state.previousTitle].includes(input.value)) input.closest('form')?.querySelector('button[type="button"]')?.click();
       if(chatUrl(location.href)===state.url && !state.selected) {
-        const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
+        const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
       }
+      if(chatUrl(location.href)===state.url && state.sidebarToggle && visible(state.sidebarToggle) &&
+          state.sidebarToggle.getAttribute('aria-expanded')==='true' &&
+          !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) state.sidebarToggle.click();
       delete globalThis.__chatgptNotifierTitleOperation;
     }
     return {ok:true};
@@ -90,10 +93,36 @@ function controlChatTitle(options) {
   }
   if (!state || state.id!==options.operationId || state.url!==options.url || state.title!==options.title || Date.now()-state.createdAt>60000) return {ok:false,reason:'title-operation-changed'};
   if (options.action==='select') {
-    const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
+    let menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
     const rename=Array.from(menu?.querySelectorAll('[role="menuitem"]')||[]).find(n=>Array.from(n.querySelectorAll('[style]')).some(icon=>{
       try {return decodeURIComponent(icon.style.maskImage||'').includes('M11.7313 4.20472');} catch {return false;}
     }));
+    if (!rename && !state.selected) {
+      // A newly saved chat can retain its local header identity. Its native
+      // sidebar menu already exposes Rename for the confirmed server URL.
+      // Never navigate, touch another row, or substitute a translated label.
+      if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible))return {ok:false,reason:'title-or-form-changed'};
+      const link=Array.from(document.querySelectorAll('a[aria-current="page"][href]')).find(n=>visible(n)&&chatUrl(n.href)===state.url);
+      const row=link?.closest('[data-sidebar-cycle-item]');
+      const toggle=Array.from(document.querySelectorAll('header button')).find(n=>visible(n)&&!n.disabled&&n.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
+      if(!state.sidebarFallback && (row||toggle)) {
+        menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
+        state.sidebarFallback=true;
+        state.triggerId=null;
+        menu=null;
+      }
+      if(state.sidebarFallback && !state.triggerId) {
+        if(Array.from(document.querySelectorAll('[role="menu"]')).some(visible))return {ok:false,retryable:true,reason:'another-menu-open'};
+        if(!row && toggle && !state.sidebarToggle) {state.sidebarToggle=toggle;toggle.click();return {ok:false,retryable:true,reason:'sidebar-opening'};}
+        const trigger=Array.from(row?.querySelectorAll('button[aria-haspopup="menu"]')||[]).find(n=>visible(n)&&!n.disabled&&n.id&&n.querySelector('use[href*="ellipsis-horizontal"]'));
+        if(trigger) {
+          state.triggerId=trigger.id;
+          trigger.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}));
+          trigger.click();
+        }
+      }
+      return {ok:false,retryable:true,reason:'rename-menu-not-ready'};
+    }
     if (!rename || rename.getAttribute('aria-disabled')==='true') return {ok:false,retryable:true,reason:'rename-menu-not-ready'};
     rename.click();
     state.selected=true;
@@ -121,7 +150,8 @@ function controlChatTitle(options) {
     state.saved=true;
     save.click();
     state.input=null;
-    delete globalThis.__chatgptNotifierTitleOperation;
+    // Keep only sidebar cleanup state until the worker observes the server ACK.
+    if(!state.sidebarToggle)delete globalThis.__chatgptNotifierTitleOperation;
     return {ok:true,clicked:true};
   }
   return {ok:false,reason:'unknown-title-action'};
