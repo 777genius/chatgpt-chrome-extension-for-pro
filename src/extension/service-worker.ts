@@ -20,7 +20,7 @@ interface SWMessage {
   expectedUrl?:string;targetUrl?:string;desiredTitle?:string;
   baselineKey?:string;nativeVerified?:boolean;rawExact?:boolean;completionKey?:string;
   response?:string;userId?:string;kind?:string;fileName?:string;requireMax?:boolean;
-  generating?:boolean;asFile?:boolean;manual?:boolean;phase?:string;receipt?:SWReceipt;
+  generating?:boolean;asFile?:boolean;manual?:boolean;phase?:string;receipt?:SWHandoffRecord["sendReceipt"];
   clicked?:boolean;confirmed?:boolean;unknown?:boolean;messageId?:string;
   record?:SWHandoffRecord;event?:SWJournalEvent;options?:SWComposerOptions;
 }
@@ -51,7 +51,7 @@ interface SWHandoffRecord extends Record<string,unknown> {
   id:string;stage:string;sourceUrl:string;sourceTitle?:string;targetUrl?:string;
   text?:string;prompt?:string;fileName?:string;asFile?:boolean;
   draft?:string;naming?:SWHandoffNaming;title?:string;
-  sendReceipt?:{operationId?:string;submittedText?:string;clickedAt?:number;conversationAlias?:string};
+  sendReceipt?:{operationId?:string;submittedText?:string;clickedAt?:number;conversationAlias?:string;sendUrl?:string};
   acceptance?:{messageId:string;entryId?:string|null;targetUrl?:string;confirmedAt?:number};
   draftRestoreClaimedAt?:number;awaitingNotifiedAt?:number;
   titleStatus?:string;titleReason?:string;titleSaveStartedAt?:number;previousTitle?:string;
@@ -69,6 +69,7 @@ interface SWStorageDocument extends Record<string,unknown> {
   awaitingNotifiedAt?:number;active?:SWJournalMeta["active"];
   retrySchema?:number;goalId?:string;kind?:string;at?:number;consumed?:boolean;
   receipt?:SWReceipt;startedAt?:number;requestId?:string|null;notifications?:{id:string}[];
+  schema?:number;attemptId?:string;baselineKey?:string|null;promptKey?:string;httpCompleted?:boolean;
 }
 interface SWStorage {
   get(keys:string|readonly string[]|null):Promise<Record<string,SWStorageDocument|undefined>>;
@@ -176,7 +177,7 @@ declare function readChatStatus(url:string):Promise<SWStatusView>;
 declare function markChatLoading(url:string,at:number,receipt:SWReceipt):Promise<SWStatusView>;
 declare function markChatViewed(url:string,receipt:SWReceipt):Promise<SWStatusView>;
 declare function visitChatNotifications(url:string,receipt:SWReceipt,options?:Record<string,unknown>):Promise<SWStatusView>;
-declare function reserveChatNotification(url:string,tabId:number,kind:string,at:number,receipt:SWReceipt):Promise<SWProof>;
+declare function reserveChatNotification(url:string,tabId:number,kind:string,at:number,receipt:SWReceipt):Promise<{view:SWStatusView;ticket:SWProof}|null>;
 declare function completeChatNotification(ticket:SWProof,created:boolean):Promise<void>;
 declare function closeChatNotification(url:string,id:string):Promise<void>;
 declare function readRequestReceipt(tabId:number,options?:Record<string,unknown>):Promise<SWReceiptRecord|null>;
@@ -188,6 +189,16 @@ declare function completionCheckpointUpdate(tabId:number,request:Record<string,u
 declare function completionCheckpointIntent(tabId:number,request:Record<string,unknown>):Promise<boolean>;
 declare function completionCheckpointFinish(tabId:number,startedAt:number,state:string,requestId?:string|null):Promise<boolean>;
 declare function updateDeferredChat(url:string,event:Record<string,unknown>,receipt:SWReceipt):Promise<SWStatusView>;
+declare function observeChatLoading(url:string,at:number,receipt:SWReceipt):Promise<SWStatusView>;
+declare function stopChatLoading(url:string,startedAt:number,receipt:SWReceipt,startReceipt:SWReceipt|null):Promise<SWStatusView>;
+declare function cancelLegacyHandoffStatus(tabId:number):void;
+declare function reconcileLegacyHandoffStatus(tabId:number,url:string):Promise<SWStatusView|null>;
+declare const legacyHandoffStatusFences:Map<number,number>;
+declare function migrateChatStatuses():Promise<void>;
+declare function statusKey(url:string):string;
+declare function completionCheckpointUrl(url:string|undefined):string;
+declare function completionAllocationEvidence(record:SWStorageDocument|null,url:string,proof:SWProof|undefined):{url:string;promptKey:string}|null;
+declare function completionCheckpointChange<T>(tabId:number,change:(record:SWStorageDocument|null)=>{record?:SWStorageDocument;value:T}):Promise<T>;
 declare function renameSavedHandoff(tabId:number,id:string,options?:Record<string,unknown>):Promise<SWProof>;
 declare function inspectChatError(...args:unknown[]):SWProof;
 declare function inspectChatAttachment(fileName:string):SWProof;
@@ -484,7 +495,7 @@ chrome.webRequest.onCompleted.addListener((details) => {
   void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(async known=>{
     if(!known)return;
     const checkpoint=await completionCheckpointRead(details.tabId);
-    if(checkpoint?.requestId===known.requestId)await completionCheckpointUpdate(details.tabId,{startedAt:known.startedAt,requestId:known.requestId,url:checkpoint.url,httpCompleted:true});
+    if(checkpoint&&checkpoint.requestId===known.requestId)await completionCheckpointUpdate(details.tabId,{startedAt:known.startedAt,requestId:known.requestId,url:checkpoint.url,httpCompleted:true});
     await signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED',startedAt:known.startedAt,requestId:known.requestId});
   }).catch(()=>{});
 }, CHATGPT_REQUEST_FILTER);
@@ -509,7 +520,7 @@ async function handleHandoffMessage(message:SWMessage,tabId:number):Promise<SWPr
     const pending=handoffWrites.get(tabId);
     if(pending)await pending.catch(()=>{});
     const saved=(await chrome.storage.local.get(key))[key]||null;
-    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation','sent'].includes(saved.stage))
+    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation','sent'].includes(saved.stage ?? ''))
       await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
     if(saved?.stage==='sent'&&saved.targetUrl)
       await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId,acceptedUserId:saved.acceptance?.messageId});
@@ -585,7 +596,7 @@ async function handleHandoffMessage(message:SWMessage,tabId:number):Promise<SWPr
       }
       if(!['sending','awaiting-confirmation'].includes(current.stage ?? ''))return {ok:true,record:current,confirmed:false};
       const receipt=current.sendReceipt;
-      if(receipt?.operationId===current.id&&typeof receipt.submittedText==='string'&&receipt.submittedText&&Number.isFinite(receipt.clickedAt)) {
+      if(receipt&&receipt.operationId===current.id&&typeof receipt.submittedText==='string'&&receipt.submittedText&&Number.isFinite(receipt.clickedAt)) {
         const results=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectHandoffAcceptance,args:[{
           sourceUrl:current.sourceUrl,targetUrl:current.targetUrl,submittedText:receipt.submittedText,conversationAlias:receipt.conversationAlias||''}]});
         const proof=results[0]?.result;
@@ -602,7 +613,7 @@ async function handleHandoffMessage(message:SWMessage,tabId:number):Promise<SWPr
       navigating: ['preparing', 'failed'], preparing: ['preparing', 'sending', 'failed'],
       sending: ['sent', 'awaiting-confirmation', 'failed'], 'awaiting-confirmation':['sent','awaiting-confirmation'], sent: [], failed: []
     };
-    if (!allowed[current.stage]?.includes(message.stage ?? '')) throw new Error('Handoff transition refused');
+    if (!allowed[current.stage as keyof typeof allowed]?.includes(message.stage ?? '')) throw new Error('Handoff transition refused');
     if(message.stage==='sent'&&(!ChatGPTHandoffTitle.chatUrl(message.targetUrl)||
         ChatGPTHandoffTitle.chatUrl(message.targetUrl)===ChatGPTHandoffTitle.chatUrl(current.sourceUrl)))throw new Error('Handoff destination is not a new permanent chat');
     const record = { ...current, stage: message.stage, targetUrl: message.targetUrl || current.targetUrl, reason: message.reason || '',
@@ -679,13 +690,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const record=(await chrome.storage.local.get(handoffKey(tab.id)))[handoffKey(tab.id)];
       let alias='';
       try {
-        const oldTarget=new URL(record?.targetUrl);
+        if(typeof record?.targetUrl!=='string')return unavailable();
+        const oldTarget=new URL(record.targetUrl);
         const match=oldTarget.pathname.match(/^\/c\/([^/]+)\/?$/);
         const value=match&&decodeURIComponent(match[1]);
-        if(oldTarget.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(value||''))alias=value;
+        if(oldTarget.origin==='https://chatgpt.com'&&typeof value==='string'&&/^local-chatgpt:[a-z0-9-]+$/.test(value))alias=value;
       } catch {}
       if(typeof record?.id!=='string'||!record.id||record.stage!=='sent'||record.titleStatus!=='failed'||!alias||
-          record.titleReason!=='Открыт другой чат; переименование отменено'||
+          record.titleReason!=='Открыт другой чат; переименование отменено'||!record.naming||
           Object.hasOwn(record,'previousTitle')||Object.hasOwn(record,'titleSaveStartedAt'))return unavailable();
       try {ChatGPTHandoffTitle.confirm(record.naming,targetUrl);} catch {return unavailable();}
       const info={ok:true,available:true,operationId:record.id,tabId:tab.id,targetUrl,desiredTitle:record.naming.title};
@@ -710,18 +722,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async()=>{
       if(retryDraftUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
       if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await readRetryDraft(url)};
-      return claimRetryDraft(url,message.operationId,message.savedSequence,sender.tab);
+      if(typeof message.operationId!=='string'||!Number.isSafeInteger(message.savedSequence))return {ok:false};
+      return claimRetryDraft(url,message.operationId,message.savedSequence!,sender.tab!);
     })().then(sendResponse).catch(()=>sendResponse?.({ok:false,claimed:false}));
     return true;
   }
   if (message?.type==='CHATGPT_HANDOFF_RENAME') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || (sender.frameId??0)>0) return;
+    if(typeof message.id!=='string')return false;
     renameSavedHandoff(sender.tab!.id,message.id).then(sendResponse).catch(error=>sendResponse({ok:false,reason:workerErrorMessage(error)}));
     return true;
   }
   if (message?.type === 'CHATGPT_WAIT') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || (sender.frameId??0)>0) return;
-    const delay = Number.isFinite(message.delayMs) ? Math.max(20,Math.min(3000,message.delayMs)) : 250;
+    const delay = typeof message.delayMs==='number'&&Number.isFinite(message.delayMs) ? Math.max(20,Math.min(3000,message.delayMs)) : 250;
     setTimeout(()=>sendResponse({ok:true}),delay);
     return true;
   }
@@ -749,12 +763,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'CHATGPT_COMPOSER_CONTROL') {
+    if (!message.options) {sendResponse?.({ok:false,reason:'Missing composer options'});return false;}
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || (sender.frameId??0)>0) return;
     let pageDispatchStarted=false;
-    let retryBinding=null;
+    let retryBinding:{sourceUrl:string;promptKey:string}|null=null;
     (async () => {
       const options = message.options;
-      if (!['inspect','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
+      if (!options||!['inspect','send'].includes(options.action)) throw new Error('Неизвестное действие редактора');
       if (options.action === 'send') {
         const meta = (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
         const active = meta?.active?.[sender.tab!.id];
@@ -787,20 +802,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(async results=>{
         const result=results[0]?.result || {ok:false,unknown:pageDispatchStarted,reason:'Редактор недоступен'};
         if(pageDispatchStarted&&retryBinding&&result.ok===false&&!result.clicked&&!result.unknown) {
-          await appendJournal({kind:'send.not_clicked',operationId:message.options.operationId,...retryBinding},sender.tab);
+          await appendJournal({kind:'send.not_clicked',operationId:message.options!.operationId,...retryBinding},sender.tab);
         }
         if(result.clicked) {
           // Preserve the actual native serialization, independently of the
           // content-script lifetime. A missing reply never authorizes a resend.
           try {
             const stored=(await chrome.storage.local.get(handoffKey(sender.tab!.id)))[handoffKey(sender.tab!.id)];
-            if(stored?.id===message.options.operationId&&['sending','awaiting-confirmation'].includes(stored.stage)) {
+            if(stored?.id===message.options!.operationId&&['sending','awaiting-confirmation'].includes(stored.stage ?? '')) {
               await handleHandoffMessage({type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,
-                submittedText:result.submittedText,clickedAt:result.clickedAt,sendUrl:message.options.url,conversationAlias:result.conversationAlias||''}},sender.tab!.id);
+                submittedText:result.submittedText,clickedAt:result.clickedAt,sendUrl:message.options!.url,conversationAlias:result.conversationAlias||''}},sender.tab!.id);
             }
           } catch {result.receiptError=true;}
-          try {await appendJournal({kind:'send.dispatched',operationId:message.options.operationId,sourceUrl:message.options.url,
-            text:result.submittedText,requestedText:message.options.text,promptChars:result.promptChars},sender.tab);}
+          try {await appendJournal({kind:'send.dispatched',operationId:message.options!.operationId,sourceUrl:message.options!.url,
+            text:result.submittedText,requestedText:message.options!.text,promptChars:result.promptChars},sender.tab);}
           catch {result.auditError=true;}
         }
         sendResponse(result);
