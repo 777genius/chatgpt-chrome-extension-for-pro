@@ -314,9 +314,7 @@ declare const module:undefined|{exports:unknown};
       const target=requireUrl(url),config=policy.settings({goal,rules,maxContinuations,maxMinutes});
       const result=await serialize(async()=>{
         const previous=await read(target);
-        if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат или вручную разберите журнал');
-        if(previous&&!['completed','stopped','moved'].includes(previous.phase))
-          throw Error('Для этого чата уже запущена цель. Сначала остановите её');
+        requireAvailable(previous);
         const time=now();
         const record:GoalRecord={schema:1,id:uuid(),url:target,originUrl:target,goal:config.goal,rules:config.rules,
           maxContinuations:config.maxContinuations,maxMinutes:config.maxMinutes,deadlineAt:time+config.maxMinutes*60000,
@@ -373,7 +371,9 @@ declare const module:undefined|{exports:unknown};
           if(['completed','stopped','blocked','moved'].includes(old.phase))throw Error('Goal уже завершён');
           const inFlight=['sending','clicked'].includes(old.phase);
           const ready=old.phase==='preparing'&&old.operation?.status==='reserved';
-          const record={...old,phase:inFlight?old.phase:'paused',pauseRequested:inFlight,
+          const handoff=old.phase==='handoff';
+          const record:GoalRecord={...old,phase:inFlight||handoff?old.phase:'paused',pauseRequested:inFlight,
+            ...(handoff?{preHandoffPhase:'paused'}:{}),
             ...(ready?{pendingSendKind:old.operation?.kind,operation:null}:{}),
             reason:inFlight?'Пауза после подтверждения текущей отправки':'Приостановлено пользователем'};
           await event('paused',record,tabId);
@@ -383,37 +383,36 @@ declare const module:undefined|{exports:unknown};
         if(action==='stop') {
           if(old.phase==='moved')throw Error('Остановите цель в новом чате');
           const inFlight=['sending','clicked'].includes(old.phase);
-          const record={...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
-            ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
-            reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
-              'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
+          const record=stopTransition(old);
           await event(inFlight||old.operation?'stop_requested':'stopped',record,tabId);
           await save(record);
           return {record};
         }
         if(action==='resume') {
+          if(old.phase==='handoff'&&old.preHandoffPhase==='paused') {
+            if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
+            const record={...old,preHandoffPhase:'waiting',pauseRequested:false,reason:''};
+            await event('resumed',record,tabId);
+            await save(record);
+            return {record};
+          }
           if(old.phase!=='paused'||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
           if(old.manualOverride) {
-            // An explicit Resume after a real manual intervention is a fresh
-            // user authorization, but the current chat must be idle first.
+            // A real manual send requires an idle composer before Resume.
             const ready=await tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url:target});
-            if(!ready?.ok||ready.idle!==true)throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
+            if(!ready?.ok||ready.idle!==true)
+              throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
           }
-          let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
-          if(old.pendingSendKind) {
-            record={...record,phase:'preparing',pendingSendKind:null,
-              operation:operation(record,old.pendingSendKind,tabId,now())};
-          } else if(old.pendingCompletion) {
-            record={...record,pendingCompletion:null};
-            if(record.continuations>=record.maxContinuations) {
-              record={...record,phase:'stopped',reason:'Лимит продолжений исчерпан'};
-            } else {
-              record={...record,phase:'preparing',operation:operation(record,'continuation',tabId,now())};
-            }
-          } else if(old.manualOverride) {
-            record={...record,phase:'preparing',operation:operation(record,'continuation',tabId,now())};
+          let record:GoalRecord={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
+          const pendingKind:GoalOperation['kind']|null=old.pendingSendKind||
+            (old.pendingCompletion||old.manualOverride?'continuation':null);
+          if(pendingKind) {
+            record={...record,pendingSendKind:null,pendingCompletion:null};
+            record=pendingKind==='continuation'&&record.continuations>=record.maxContinuations
+              ?{...record,phase:'stopped',reason:'Лимит продолжений исчерпан'}
+              :{...record,phase:'preparing',operation:operation(record,pendingKind,tabId,now())};
           }
           await event('resumed',record,tabId);
           await save(record);
