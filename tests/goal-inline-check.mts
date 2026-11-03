@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown};
+type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string};
 type Request={type:string;action:string;url:string;goal?:string;rules?:string;maxContinuations?:number;maxMinutes?:number};
 type Result={ok:boolean;record?:GoalRecord|null;url?:string;error?:string};
 type Instance={refresh:()=>Promise<void>;dispose:()=>void};
@@ -74,15 +74,21 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
       calls.push(value);
       if(responder)return responder(value);
       if(value.action==='start')record={...goal(value.url),goal:value.goal!,rules:value.rules!,maxContinuations:value.maxContinuations!,maxMinutes:value.maxMinutes!};
-      if(value.action==='pause'&&record)record={...record,phase:'paused'};
-      if(value.action==='resume'&&record)record={...record,phase:'waiting'};
+      if(value.action==='pause'&&record)record=record.phase==='handoff'?{...record,preHandoffPhase:'paused'}:{...record,phase:'paused'};
+      if(value.action==='resume'&&record)record=record.phase==='handoff'?{...record,preHandoffPhase:'waiting'}:{...record,phase:'waiting'};
       if(value.action==='stop'&&record)record={...record,phase:'stopped'};
       return {ok:true,url:value.url,record};
     },subscribe:(fn:()=>void)=>{subscription=fn;return ()=>{subscription=null;unsubscribed++;};}});
   function element<T=HTMLButtonElement>(selector:string):T {
     const result=document.querySelector(selector);assert.ok(result,selector);return result as unknown as T;
   }
-  return {document,window,calls,state,instance,element,
+  // LinkeDOM has no browser user-input channel. Only this explicit fixture
+  // helper stands in for trusted input; HTMLElement.click() remains untrusted.
+  function click(target:HTMLElement) {
+    const event=new window.Event('click',{bubbles:true,cancelable:true});
+    Object.defineProperty(event,'isTrusted',{value:true});target.dispatchEvent(event);
+  }
+  return {document,window,calls,state,instance,element,click,
     toggle:()=>element('[role=switch]'),details:()=>element('[aria-label="Goal settings"]'),panel:()=>element<HTMLElement>('[data-chatgpt-goal-inline=panel]'),
     field:(name:string)=>element<HTMLInputElement|HTMLTextAreaElement>('[data-goal-field='+name+']'),
     action:(name:string)=>element('[data-goal-action='+name+']'),
@@ -100,7 +106,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   assert.equal(f.toggle().parentElement?.previousElementSibling?.getAttribute('data-composer-navigation-target'),'reasoning');
   assert.deepEqual(f.calls.map(call=>call.action),['get']);
-  f.toggle().click();
+  f.click(f.toggle());
   assert.equal(f.panel().parentElement,f.document.body,'setup is a portal outside native form');
   assert.equal(f.panel().hidden,false);
   assert.equal(f.field('goal').value,'','objective is never captured from draft');
@@ -111,7 +117,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(nativeKeydowns,0,'typing is not delegated to native ChatGPT');
   f.field('goal').value='  Explicit objective  ';
   f.field('rules').value='Complete the checks';
-  f.action('start').click();f.action('start').click();
+  f.click(f.action('start'));f.click(f.action('start'));
   await tick();
   assert.equal(f.calls.filter(call=>call.action==='start').length,1);
   const start=f.calls.find(call=>call.action==='start')!;
@@ -119,12 +125,12 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(start.maxContinuations,5);assert.equal(start.maxMinutes,30);
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');
   assert.equal(f.field('goal').disabled,true);
-  f.action('pause').click();await tick();
+  f.click(f.action('pause'));await tick();
   assert.equal(f.action('resume').hidden,false);
   assert.equal(f.toggle().getAttribute('aria-checked'),'true','paused Goal remains armed');
-  f.action('resume').click();await tick();
+  f.click(f.action('resume'));await tick();
   assert.equal(f.action('pause').hidden,false);
-  f.toggle().click();await tick();
+  f.click(f.toggle());await tick();
   assert.equal(f.calls.at(-1)!.action,'stop','Off explicitly stops Goal via coordinator');
   assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   assert.equal(f.state.draftReads,0);assert.equal(f.draft(),'  untouched draft\nwith spacing  ');assert.equal(f.state.nativeSends,0);
@@ -136,21 +142,64 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.nativeForm().isConnected,true,'dispose never removes native React-owned DOM');
 }
 
+// MAIN-world page scripts share our DOM but must not authorize any Goal
+// mutation with HTMLElement.click(), including the switch's Stop shortcut.
+{
+  const f=fixture();await tick();f.details().click();
+  f.field('goal').value='Page scripts cannot authorize this objective';
+  const before=f.calls.length;
+  f.action('start').click();await tick();
+  assert.equal(f.calls.length,before,'untrusted Start cannot reach the worker');
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  f.click(f.action('start'));await tick();
+  const running=f.calls.length;
+  f.action('pause').click();f.action('stop').click();f.toggle().click();await tick();
+  assert.equal(f.calls.length,running,'untrusted Pause/Stop/switch cannot change an active Goal');
+  f.click(f.action('start'));f.click(f.action('resume'));await tick();
+  assert.equal(f.calls.length,running,'hidden actions cannot dispatch even with a trusted fixture event');
+  f.click(f.action('pause'));await tick();
+  const paused=f.calls.length;
+  f.action('resume').click();f.click(f.action('pause'));await tick();
+  assert.equal(f.calls.length,paused,'untrusted Resume and hidden Pause cannot dispatch');
+  assert.equal(f.action('resume').hidden,false);
+  f.instance.dispose();
+}
+
+// Handoff retains its phase while Pause/Resume changes the policy that will
+// apply after transfer. The inline controls must expose that persisted state.
+{
+  const f=fixture();await tick();
+  f.setRecord({...goal(chat,'handoff'),preHandoffPhase:'waiting'});await f.instance.refresh();f.details().click();
+  assert.equal(f.action('pause').hidden,false);assert.equal(f.action('pause').disabled,false);
+  assert.equal(f.action('resume').hidden,true);
+  f.click(f.action('pause'));await tick();
+  assert.equal(f.calls.at(-1)!.action,'pause');
+  assert.equal(f.action('pause').hidden,true);assert.equal(f.action('resume').hidden,false);
+  assert.equal(f.action('resume').disabled,false);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true','a paused transfer remains armed');
+  f.click(f.action('resume'));await tick();
+  assert.equal(f.calls.at(-1)!.action,'resume');
+  assert.equal(f.action('pause').hidden,false);assert.equal(f.action('resume').hidden,true);
+  f.setRecord({...goal(chat,'handoff'),preHandoffPhase:'paused'});f.notify();await tick();
+  assert.equal(f.action('resume').hidden,false,'a paused handoff loaded from storage can resume');
+  f.instance.dispose();
+}
+
 // Failed starts/stops leave the durable state visible; pending requests disable
 // all actions, and a subscription notification cannot resurrect a stale result.
 {
-  const f=fixture();await tick();f.toggle().click();f.field('goal').value='Explicit';
+  const f=fixture();await tick();f.click(f.toggle());f.field('goal').value='Explicit';
   const pending=deferred<Result>();f.respond(()=>pending.promise);
-  f.action('start').click();assert.equal(f.toggle().disabled,true);assert.equal(f.action('start').disabled,true);
+  f.click(f.action('start'));assert.equal(f.toggle().disabled,true);assert.equal(f.action('start').disabled,true);
   f.notify();assert.equal(f.calls.length,2,'storage refresh waits for in-flight control');
   f.respond(null);pending.resolve({ok:false,error:'Storage unavailable'});await tick();
   assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   assert.equal(f.calls.filter(value=>value.action==='start').length,1,'failure is never automatically retried');
-  f.respond(()=>({ok:false,error:'Storage unavailable'}));f.action('start').click();await tick();
+  f.respond(()=>({ok:false,error:'Storage unavailable'}));f.click(f.action('start'));await tick();
   assert.match(f.panel().textContent!,/Storage unavailable/);
   assert.equal(f.field('goal').value,'Explicit','error preserves setup for this chat');
   f.respond(null);f.setRecord(goal());await f.instance.refresh();
-  f.respond(()=>{throw Error('Control disconnected');});f.toggle().click();await tick();
+  f.respond(()=>{throw Error('Control disconnected');});f.click(f.toggle());await tick();
   assert.equal(f.toggle().getAttribute('aria-checked'),'true','failed stop never pretends Goal is off');
   assert.match(f.panel().textContent!,/Control disconnected/);f.instance.dispose();
 }
@@ -158,8 +207,8 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 // Route fences reject a late Start/Get and do not leak objectives or state into
 // a different conversation. New chats remain off and require a first message.
 {
-  const f=fixture();await tick();f.toggle().click();f.field('goal').value='Chat A only';
-  const pending=deferred<Result>();f.respond(()=>pending.promise);f.action('start').click();
+  const f=fixture();await tick();f.click(f.toggle());f.field('goal').value='Chat A only';
+  const pending=deferred<Result>();f.respond(()=>pending.promise);f.click(f.action('start'));
   f.setUrl(other);f.respond(()=>({ok:true,url:other,record:null}));await f.instance.refresh();
   assert.equal(f.field('goal').value,'');assert.equal(f.panel().hidden,true);
   pending.resolve({ok:true,url:chat,record:goal()});await tick();
@@ -185,7 +234,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   for(let i=0;i<8;i++)f.document.querySelector('main')!.append(f.document.createElement('p'));
   await tick();assert.equal(f.calls.length,count,'streaming does not refetch or schedule requests');
   f.details().click();const pending=deferred<Result>();f.respond(()=>pending.promise);
-  f.action('pause').click();f.instance.dispose();f.instance.dispose();
+  f.click(f.action('pause'));f.instance.dispose();f.instance.dispose();
   pending.resolve({ok:true,url:chat,record:goal(chat,'paused')});await tick();
   f.remount();await tick();assert.equal(f.document.querySelector('[data-chatgpt-goal-inline]'),null);
   assert.equal(f.unsubscribed(),1);assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);

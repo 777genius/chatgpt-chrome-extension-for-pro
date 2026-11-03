@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 const {document,window}=parseHTML('<html><body><div data-app-shell-active-page="true"><div data-composer-body><div id="editor-wrap"><div data-composer-markdown contenteditable="true">доделай е2е</div></div><button type="submit">Send</button><button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium">Medium</button></div></div></body></html>');
-Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return [{}];}});
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return [{width:240,height:32}];}});
 const editor=document.querySelector('[contenteditable]')!,button=document.querySelector('[type=submit]')!;
 let prompt='USER DRAFT',pending:any=null,ready=true,clicks=0,systemHints:any=undefined;
 button.addEventListener('click',()=>clicks++);

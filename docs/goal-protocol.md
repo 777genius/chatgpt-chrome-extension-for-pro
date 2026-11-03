@@ -3,12 +3,13 @@
 ## Scope
 Implement **Goal** only. Message queue / Steer is out of scope and remains unimplemented. No new API calls, external services, feature flags, or extra permissions.
 
-- User explicitly starts an objective and optional stop conditions from the inline Goal control beside reasoning effort or the popup in the selected ChatGPT conversation. Persistent controls: pause, resume, stop; finite continuation budget and deadline.
+- User explicitly starts an objective and optional stop conditions from the inline Goal control beside reasoning effort or the popup in the selected ChatGPT conversation. Inline state changes require a trusted user click, including native keyboard activation; page-script clicks cannot authorize them. Persistent controls: pause, resume, stop; finite continuation budget and deadline.
 - The initial instruction and all later continuation messages are **explicitly authorized by this goal**. They use the existing native composer inspection and guarded one-click sender, *never* a second click implementation or automatic capture of the user's draft.
-- Completion requires a **new, request-bound, fully completed assistant answer** whose **entire text is exactly `GOAL_COMPLETE`**. No substring / Markdown / partial or streaming match. The marker is a model assertion, **not verification** of a GitHub merge or CI result.
+- Completion requires a **new, request-bound, fully completed assistant answer** whose **entire text is exactly `GOAL_COMPLETE`**, rendered as a single plain paragraph. Headings, strikethrough and other rich markup do not qualify. No substring / partial or streaming match. The marker is a model assertion, **not verification** of a GitHub merge or CI result.
 - A non-marker answer schedules one continuation with a stable operation ID. Claim and intent are persisted before dispatch. Any lost click acknowledgement or uncertain outcome blocks further sends until explicit user intervention.
 - Goal state and stop rules are stored in local Chrome storage, bound to the original chat and transferred to a confirmed handoff destination without resetting budgets. New-chat handoff payload retains the goal instructions; retry and handoff must not run competing send coordinators.
 - User drafts / attachments have priority; automatic goal sends fail closed rather than overwrite. Duplicate tabs, duplicate completion notifications, worker suspension, and race with manual actions are tested.
+- Sender checks reject retained inactive/hidden composers and use the send button, reasoning control and attachments belonging to the inspected editor. A confirmed newer manual request supersedes only provably older retry grants; consumed operation/turn claims and uncertain Goal/handoff sends remain fenced. Late retry callbacks cannot alter the manually paused or newly started Goal.
 - No real ChatGPT browser testing until immediately before merge, on a designated test conversation. No testing in the owner's working chats.
 
 ## State machine
@@ -37,3 +38,5 @@ Verified on real ChatGPT in a dedicated test conversation, using native mouse/ke
 - Replacing the content listener and a full extension reload preserve the same paused Goal ID, objective and budget without sending. Native hidden composers and screen reader speaker headings are covered by regressions.
 
 The native conversation-length limit was not forced in the short live test. Handoff enrollment, failure recovery, chronology, destination binding and budgets are covered by synthetic integration tests. A real native limit/handoff remains a separate pre-merge validation gap.
+
+The follow-up critical review adds synthetic regressions for untrusted inline actions, handoff Pause/Resume controls, retained composers, strict marker markup, and manual-request/retry races across worker restarts. These regressions do not replace a fresh live ChatGPT canary after the sender and marker changes.

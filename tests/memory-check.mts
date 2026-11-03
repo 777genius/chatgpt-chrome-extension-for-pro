@@ -70,7 +70,7 @@ interface LifecycleContext {
 }
 function lifecycleSetup(runtimeId: string | null = 'test-extension') {
   const {document, window} = parseHTML('<html><body><main></main><form><div id="prompt-textarea" contenteditable="true">Private draft</div><button data-testid="send-button">Send</button></form></body></html>');
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   let turnIndex=0;
   const activeObservers = new Set<OwnedObserver>();
   class OwnedObserver {

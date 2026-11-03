@@ -12,7 +12,7 @@ const source=readFileSync('extension/deferred-task-status.js','utf8');
 const html=(id='card-a',date='Different localized date')=>`<span data-automation-card="true"><button aria-label="Synthetic task" aria-describedby="${id}"><svg><use href="/cdn/assets/new-hash.svg#codex-icon-clock-light-24"></use></svg><span>${date}</span><span>Localized action</span></button></span>`;
 function setup(generating=false,body=`<main><div data-turn-key="turn-a"><div data-content-search-turn-key="fallback-turn-0">${html()}</div></div></main>`,readMetadata?: (request:{url:string})=>Promise<Snapshot|null>) {
   const {document,window}=parseHTML(`<html><head></head><body>${body}</body></html>`);
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   let url='https://chatgpt.com/c/fixture-a',clock=1000,alive=true,next=0,generation=generating,generationReads=0;
   const timers=new Map<number,{callback:()=>void;delay:number}>(),changes:Change[]=[];
   const world=createContext({URL});runInContext(source,world);const factory=world.ChatGPTDeferredTaskStatus as Factory;

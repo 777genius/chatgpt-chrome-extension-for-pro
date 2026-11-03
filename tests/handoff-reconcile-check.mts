@@ -15,8 +15,8 @@ const payload='Exact handoff payload\nKeep whitespace  unchanged';
 type RecordValue=Record<string,any>;
 
 function harness(dropReply=false) {
-  const {document,window}=parseHTML('<html><body><section data-app-shell-active-page="true"><header><button>Share</button></header><main></main><form data-composer-body><div id="prompt-textarea" contenteditable="true"></div><button type="submit">Send</button></form><button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></button></section></body></html>');
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  const {document,window}=parseHTML('<html><body><section data-app-shell-active-page="true"><header><button>Share</button></header><main></main><form data-composer-body><div id="prompt-textarea" contenteditable="true"></div><button type="submit">Send</button><button type="button" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></button></form></section></body></html>');
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   const editor=document.querySelector('[contenteditable]')!;editor.textContent=payload;
   const nativeHeader={conversationId:alias,isReady:true};
   (document.querySelector('header button') as unknown as RecordValue).__reactFiber$test={memoizedProps:nativeHeader,return:null};
@@ -57,11 +57,25 @@ function harness(dropReply=false) {
   function message(value:RecordValue) {
     return new Promise<RecordValue>(resolve=>listener(value,{tab:{id:7,url:location.href},frameId:0},resolve));
   }
-  return {storage,location,entries,nativeHeader,editor,journal,restart,message,
+  return {document,storage,location,entries,nativeHeader,editor,journal,restart,message,
     navigateAfterProof:(url:string)=>{routeAfterProof=url;},
     send:()=>message({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:location.href,text:payload,requireMax:true,operationId:'handoff'}}),
     reconcile:()=>message({type:'CHATGPT_HANDOFF_RECONCILE',id:'handoff'}),
     get clicks(){return clicks;},get record(){return storage['chatgpt-handoff:7'];}};
+}
+
+for(const ownEffort of ['medium',null]) {
+  const h=harness();
+  const own=h.document.querySelector('form [data-selected-reasoning-effort]')!;
+  if(ownEffort)own.setAttribute('data-selected-reasoning-effort',ownEffort);else own.remove();
+  const unrelated=h.document.createElement('form');
+  unrelated.innerHTML='<button type="button" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max">Other composer Max</button>';
+  h.document.querySelector('form')!.before(unrelated);
+  const result=await h.send();
+  assert.equal(result.ok,false,'another composer Max cannot authorize an editor with '+(ownEffort||'missing')+' effort');
+  assert.equal(h.clicks,0,'wrong-form effort must not reach the native send click');
+  assert.equal(h.editor.textContent,payload,'refusing wrong-form effort preserves the exact prepared payload');
+  assert.equal(h.record.sendReceipt,undefined,'no native send receipt exists for a refused effort check');
 }
 
 {
@@ -101,4 +115,4 @@ function harness(dropReply=false) {
   assert.equal((await h.reconcile()).record.stage,'sending','native text alone cannot invent a missing guarded click receipt');
   assert.equal((await h.send()).ok,false);assert.equal(h.clicks,1);
 }
-console.log('PASS: durable exact native click receipt, late permanent-route reconciliation, wrong payload/alias refusal, worker restart, no resend, one draft claim, unknown reply preservation');
+console.log('PASS: own-composer Max enforcement, durable exact native click receipt, late permanent-route reconciliation, wrong payload/alias refusal, worker restart, no resend, one draft claim, unknown reply preservation');

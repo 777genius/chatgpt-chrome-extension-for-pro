@@ -18,7 +18,7 @@ async function domCheck() {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
     Object.defineProperty(window.Node, 'DOCUMENT_POSITION_FOLLOWING', { value: 4, configurable: true });
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
-      return this.hidden || this.style.display === 'none' ? [] : [{}];
+      return this.hidden || this.style.display === 'none' ? [] : [{width:240,height:32}];
     }});
     const messages: any[] = [], sends: string[] = [], logs: any[] = [];
     const draftStorage:Record<string,any>={};

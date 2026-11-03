@@ -5,7 +5,7 @@ import {parseHTML} from 'linkedom';
 function setup(){
  const {document}=parseHTML('<html><body><main data-content-search-turn-key="fallback-turn-0"><div data-chatgpt-search-unit-key="fallback-turn-0:1:assistant">Partial</div><div role="status"><span class="text-chatgpt-recovery">接続が中断されました</span></div></main><form data-composer-body><div data-composer-markdown contenteditable="true"></div><button type="button"><svg><use href="/icons.svg#codex-icon-voice-regular-20"></use></svg></button></form></body></html>');
  const status=document.querySelector('[role=status]')! as any,voice=document.querySelector('button')! as any,editor=document.querySelector('[contenteditable]')! as any;
- for(const node of [status,voice,editor])node.getClientRects=()=>[{}];
+ for(const node of [status,voice,editor])node.getClientRects=()=>[{width:240,height:32}];
  const entry={id:'fallback-turn-0',isMostRecentTurn:true,isReadOnly:false,turn:{status:'in_progress',items:[{type:'assistant-message',messageId:'assistant-uuid',completed:false}]}};
  status.__reactFiber$fixture={memoizedProps:{entry,children:{props:{id:'errors.network.reconnecting_fallback'}}},return:null};
  const voiceProps={isLoading:false,isStartButtonAllowed:true};voice.__reactFiber$fixture={memoizedProps:voiceProps,return:null};
@@ -35,7 +35,7 @@ for(const mutate of [
  (f:ReturnType<typeof setup>)=>{f.voiceProps.isStartButtonAllowed=false;},
  (f:ReturnType<typeof setup>)=>{f.entry.isReadOnly=true;}
 ]){const f=setup();mutate(f);assert.equal(f.inspect().ok,false);}
-const active=setup();const stop=active.document.createElement('button') as any;stop.setAttribute('data-testid','stop-button');stop.getClientRects=()=>[{}];active.document.querySelector('form')!.append(stop);let clicks=0;stop.addEventListener('click',()=>clicks++);
+const active=setup();const stop=active.document.createElement('button') as any;stop.setAttribute('data-testid','stop-button');stop.getClientRects=()=>[{width:240,height:32}];active.document.querySelector('form')!.append(stop);let clicks=0;stop.addEventListener('click',()=>clicks++);
 assert.equal(active.inspect().idle,false);assert.equal(clicks,0,'read-only inspection never clicks an active Stop');
 assert.equal(active.inspect('stop-recovery').stopped,true);assert.equal(clicks,1,'active native generation still requires its actual Stop');
 console.log('Assistant-only recovery: exact native identity, idle voice/controller proof, changed assistant/user and active/pending generation fences passed.');

@@ -64,7 +64,8 @@
     for(const [action,title] of [['start','Start Goal'],['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
       const button=node('button',{type:'button','data-goal-action':action},title);
       buttons[action]=button;actions.append(button);
-      listen(button,'click',()=>void act(action));
+      // Page scripts can reach our DOM, but cannot manufacture user consent.
+      listen(button,'click',event=>{if(event.isTrusted===true)void act(action);});
     }
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
@@ -98,13 +99,14 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       toggle.title=!route?'Send the first message to save this chat before starting Goal':on?'Stop Goal automatic continuations':'Set up Goal';
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!busy&&!active();
+      const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused';
       for(const input of Object.values(fields))input.disabled=!editable;
       buttons.start.hidden=active();
-      buttons.pause.hidden=!active()||record.phase==='paused';
-      buttons.resume.hidden=record?.phase!=='paused';
+      buttons.pause.hidden=!active()||paused;
+      buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
       buttons.start.disabled=!editable||!!record?.operation||record?.phase==='blocked';
-      buttons.pause.disabled=busy||!loaded||record?.phase==='handoff'||!!record?.pauseRequested||!!record?.stopRequested;
+      buttons.pause.disabled=busy||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
       buttons.resume.disabled=busy||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||!loaded||!!record?.stopRequested;
       let message=!route?'Send the first message to save this chat. Then you can start a Goal.':!loaded?'Loading Goal…':'Off. Set an objective and choose Start Goal.';
@@ -227,8 +229,8 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!valid())return;
       if(syncRoute()){void refresh();return;}
       if(!route||!loaded||busy)return;
-      // Disabled controls also fence programmatic and queued duplicate clicks.
-      if(buttons[action]?.disabled)return;
+      // Hidden/disabled controls also fence stale and queued duplicate clicks.
+      if(!buttons[action]||buttons[action].disabled||buttons[action].hidden)return;
       let input={};
       if(action==='start') {
         try {
@@ -254,10 +256,12 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         }
       }
     }
-    listen(toggle,'click',()=>{
+    listen(toggle,'click',event=>{
       if(syncRoute()){void refresh();return;}
       if(toggle.disabled)return;
-      if(active()&&!record.stopRequested)void act('stop');else show(true);
+      if(active()&&!record.stopRequested) {
+        if(event.isTrusted===true)void act('stop');
+      } else show(true);
     });
     listen(details,'click',()=>{if(syncRoute()||!loaded)void refresh();show(!open);});
     listen(close,'click',()=>show(false));

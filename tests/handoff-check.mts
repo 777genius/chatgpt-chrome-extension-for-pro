@@ -95,7 +95,7 @@ function probeCheck(){
  assert.equal(runInContext('inspectChatError(1,true).action',ctx),'retry','recovery localization ID must classify without translated text or button');
  const stop=document.createElement('button') as any;stop.setAttribute('type','button');stop.innerHTML='<svg class="icon-primary-action"><path d="M4.5 5.75C4.5 stop"></path></svg>';
  const composer=document.createElement('form');composer.setAttribute('data-composer-body','');composer.append(stop);document.append(composer);
- stop.getClientRects=()=>[{}];status.getClientRects=()=>[{}];let stops=0;stop.addEventListener('click',()=>stops++);
+ stop.getClientRects=()=>[{width:240,height:32}];status.getClientRects=()=>[{width:240,height:32}];let stops=0;stop.addEventListener('click',()=>stops++);
  Object.assign(ctx,{location:{href:'https://chatgpt.com/c/test'}});
  assert.equal(runInContext("inspectChatError(1,false,'stop-recovery','https://chatgpt.com/c/other').ok",ctx),false);assert.equal(stops,0);
  assert.equal(runInContext("inspectChatError(1,false,'stop-recovery','https://chatgpt.com/c/test').stopped",ctx),true);assert.equal(stops,1);
@@ -108,7 +108,7 @@ type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route
 async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference=''){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
- Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+ Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
  const loc={href:originalURL,pathname:'/c/source'};
  const notices:any[]=[],sends:string[]=[],updates:string[]=[];
  const logs:any[]=[];
@@ -189,7 +189,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';
    document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent=interference==='whitespace'?'  \n  ':'Last request';
  });
- const effort=document.createElement('button');effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort','max');document.querySelector('[data-app-shell-active-page="true"]')!.append(effort);
+ const effort=document.createElement('button');effort.type='button';effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort','max');document.querySelector('[data-app-shell-active-page="true"] form')!.append(effort);
  document.querySelector('main')!.append(alert);
  if(interference){
    const sourceBlocked=interference==='source-attachment'||interference==='source-edit';
