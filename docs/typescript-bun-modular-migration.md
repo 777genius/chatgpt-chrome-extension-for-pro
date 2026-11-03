@@ -278,3 +278,29 @@ checkpoints identifying these files as missing are historical. No `skipped`
 Draft check is evidence of a passing gate. Use the exact latest candidate SHA
 for every qualification run; do not merge before the designated browser smoke
 has a recorded PASS.
+
+
+## Main v1.7.9 reconciliation checkpoint — 2026-11-03
+
+The v1.7.0-era Draft was superseded by `main` v1.7.9, which adds a
+native/manual Goal controller, inline Goal UI, improved handoff/rename
+recovery, native reply/visibility guards, and additional E2E tests.
+This integration branch has a real two-parent merge from main
+`8423c8751595b2a81a21b29e60aac36b59fe8dd3`; all original main
+runtime files remain present for characterization. The historical 1.7.0
+checkpoints above are not current qualification evidence.
+
+- `src/extension/goal-inline.ts` is a strict source port for the newly added
+  inline UI; `extension/goal-inline.js` remains the current main oracle.
+- The latest upstream behavioral tests are present as regular `.ts` files,
+  alongside migration-specific regressions. The standalone test gate must
+  replay original main runtime, and the distribution gate must replay emitted
+  classic scripts. Tests must not silently conflate these two variants.
+- All changes in main's existing Chrome runtime scripts still require
+  parity review in each typed source port. **The main merge alone does not
+  qualify the emitted distribution:** where typed sources have not yet
+  adopted upstream changes, the build will overwrite the main JS copy with
+  stale behavior.
+- `bun run check`, `bun run check:complete`, independent review, and actual
+  isolated Chrome test-chat evidence are still required on the same final
+  candidate HEAD. No merge while this qualification remains incomplete.
