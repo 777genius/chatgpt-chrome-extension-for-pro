@@ -687,9 +687,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
     appendJournal(event,sender.tab).then(async result=>{
-      if(['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
+      if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
         await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
-          promptKey:event.newPromptKey,goalHandoff:event.goalHandoff===true});
+          promptKey:event.newPromptKey,attemptId:event.attemptId,goalHandoff:event.goalHandoff===true});
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
     return true;

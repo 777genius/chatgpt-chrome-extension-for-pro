@@ -236,7 +236,7 @@ try {
   }
   {
     const {document,window}=parseHTML('<html><head><title>Fixture</title></head><body></body></html>');
-    Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+    Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
     Object.assign(document,{hasFocus:()=>false,readyState:'complete',visibilityState:'hidden'});
     const location=new URL('https://chatgpt.com/c/synthetic-fixture');
     assert.equal(runInNewContext(PAGE_GUARD,{document,location}).activityKnown,false,'a ChatGPT snapshot without a composer is unknown');

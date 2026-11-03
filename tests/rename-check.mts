@@ -20,7 +20,7 @@ const scripts = ['handoff-title.js','chat-title-probe.js','handoff-renamer.js'].
 
 function harness(mode: Mode = 'success') {
   const {document,window} = parseHTML(`<html><head><title>${evidence.title}</title></head><body>${evidence.header}<main><form data-composer-body><div contenteditable="true">Owner draft\nKeep this exact</div><button type="submit">Send</button></form></main></body></html>`);
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return this.hidden ? [] : [{}];},configurable:true});
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return this.hidden ? [] : [{width:240,height:32}];},configurable:true});
   let time = 100;
   const location = {href:mode==='temporary-to-server'?temporaryUrl:mode==='query-normalization'?`${targetUrl}/?model=pro#latest`:targetUrl};
   const events: Record<string,unknown>[] = [];

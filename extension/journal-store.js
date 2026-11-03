@@ -212,7 +212,8 @@ function appendJournal(event, tab = {}) {
     let operationId = event.operationId || null;
     const savedDraft=meta.retryDraftByChat[retryDraftUrl(sourceUrl)];
     const retrySource=retryDraftUrl(sourceUrl);
-    const staleDraftSave=event.kind==='draft.saved'&&retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt);
+    const superseded=retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt);
+    const staleDraftSave=event.kind==='draft.saved'&&superseded;
     const owns=claim=>claim?.operationId===operationId&&claim.tabId===tabId;
     const duplicate=()=>Object.assign(new Error('Автоповтор этого запроса уже запускался в другой вкладке или ранее'),{journalPolicy:true,code:'RETRY_DUPLICATE'});
     function reserveRetry() {
@@ -272,7 +273,7 @@ function appendJournal(event, tab = {}) {
           (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl))
         throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
-        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey}:{})};
+        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,attemptId:event.attemptId||''}:{})};
     }
     if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
       const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
@@ -323,6 +324,18 @@ function appendJournal(event, tab = {}) {
       if(retrySendClaims[preparation.claimKey]?.phase==='reserved')delete retrySendClaims[preparation.claimKey];
       delete retryPreparingByChat[retrySource];
     }
+    if(event.kind==='retry.preparation_superseded') {
+      // A confirmed newer manual request retires the old retry's chat slot,
+      // while its consumed operation and failed-turn claim remain immutable.
+      // Legacy entries without a provable request timestamp stay fenced.
+      for(const [owner,entry] of Object.entries(active)) {
+        const attempt=entry?.attemptId||
+          (preparation?.operationId===entry?.operationId?preparation.attemptId:'');
+        if(entry?.kind==='retry.send_intent'&&
+            (entry.chatUrl||entry.sourceUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===retrySource&&
+            retryAttemptBefore(attempt,event.startedAt))delete active[owner];
+      }
+    }
     const currentSend=active[tabId];
     const exactGrant=Boolean(currentSend&&operationId&&currentSend.operationId===operationId);
     const resetRetry=event.kind==='retry.manual_reset'&&currentSend?.kind==='retry.send_intent';
@@ -353,7 +366,7 @@ function appendJournal(event, tab = {}) {
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims } });
     journalFailure = '';
-    return { ok: !staleDraftSave, ...(staleDraftSave?{duplicate:true}:{}), sequence, sourceUrl:entry.sourceUrl,
+    return { ok: !staleDraftSave, ...(staleDraftSave?{duplicate:true}:{}), ...(superseded?{superseded:true}:{}), sequence, sourceUrl:entry.sourceUrl,
       ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)],draft:claimedDraft.draft}}:{}) };
   });
   journalQueue = write;

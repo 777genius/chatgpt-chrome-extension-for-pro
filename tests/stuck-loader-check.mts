@@ -115,6 +115,20 @@ console.log('stuck-loader native latest-turn binding: passed');
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'missing references, Markdown and additional fallback content cannot complete a goal');
   }
   nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}];
+  rendered.innerHTML='<div class="markdown"><p>GOAL_COMPLETE</p></div>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'plain fallback marker accepts known native Markdown DIV wrappers');
+  for(const tag of ['h1','h2','h3','h4','h5','h6','div','span']) {
+   rendered.innerHTML=`<${tag}>GOAL_COMPLETE</${tag}>`;
+   assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,`${tag} is not a plain paragraph in native catch-up`);
+  }
+  for(const tag of ['del','s','b','i','u','mark','small','sup','sub','span','unknown-rich-node']) {
+   rendered.innerHTML=`<p><${tag}>GOAL_COMPLETE</${tag}></p>`;
+   assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,`${tag} markup cannot complete native catch-up`);
+  }
+  for(const content of ['<p>GOAL_COMPLETE<br></p>','<p>GOAL_COMPLETE</p><p></p>','<p>GOAL_COMPLETE<!--extra node--></p>']) {
+   rendered.innerHTML=content;
+   assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'only one text-only paragraph can complete native catch-up');
+  }
   for(const content of ['<p><code>GOAL_COMPLETE</code></p>','<pre>GOAL_COMPLETE</pre>','<p><strong>GOAL_COMPLETE</strong></p>','<p>GOAL_COMPLETE</p><p>Still working</p>']) {
    rendered.innerHTML=content;assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'non-plain or additional rendered answer text cannot complete a goal');
   }

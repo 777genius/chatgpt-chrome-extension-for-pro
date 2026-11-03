@@ -95,6 +95,16 @@ function fixture() {
   assert.equal((await env.store.manual({url:saved,tabId:7,startedAt:proof.startedAt})).ok,false,
     'the delayed seed manual ACK must not pause its own Goal');
   assert.equal(env.data[goalKey(saved)].phase,'waiting');
+  const seeded=structuredClone(env.data[goalKey(saved)]);
+  for(const kind of ['retry.failed','retry.blocked','retry.confirmed']) {
+    await env.fresh().retry({url:saved,tabId:7,kind,promptKey:'/c/manual-goal-source|stale-user'});
+    assert.deepEqual(env.data[goalKey(saved)],seeded,'an unbound old retry cannot alter the verified native seed Goal');
+  }
+  assert.equal(seeded.manualStartedAt,proof.startedAt,'native adoption installs its verified manual-request fence');
+  await env.store.retry({url:saved,tabId:7,kind:'retry.planned',attemptId:String(proof.startedAt)});
+  assert.equal(env.data[goalKey(saved)].phase,'recovering','the current bound native request can still recover');
+  await env.store.retry({url:saved,tabId:7,kind:'retry.confirmed',attemptId:String(proof.startedAt),promptKey:proof.promptKey});
+  assert.equal(env.data[goalKey(saved)].phase,'waiting');
   await env.store.completion({url:saved,tabId:7,promptKey:proof.promptKey,
     completionKey:proof.promptKey+'|assistant',response:'Still working',nativeVerified:true,rawExact:false});
   assert.equal(env.messages.length,1);

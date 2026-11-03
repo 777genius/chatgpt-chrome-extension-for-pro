@@ -18,7 +18,7 @@ let failWrite=false;
 
 function addPage(tabId:number,url=sourceUrl) {
   const {document,window}=parseHTML('<html><body><form data-composer-body><div id="prompt-textarea" contenteditable="true">доделай е2е</div><button type="submit">Send</button></form></body></html>');
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   const editor=document.querySelector<HTMLElement>('#prompt-textarea')!;
   const controller={view:{dom:editor},getPlainText:()=>editor.textContent,getChatGptPrompt:()=>({prompt:editor.textContent}),submitReady:true,pendingSubmit:null};
   (document.querySelector('form') as unknown as Value).__reactFiber$test={memoizedProps:{composerController:controller}};

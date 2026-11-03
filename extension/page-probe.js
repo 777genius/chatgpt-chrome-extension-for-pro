@@ -200,9 +200,17 @@ function inspectHandoffAcceptance(options) {
 // ahead of React/ProseMirror and must never authorize sending a user's draft.
 function controlChatComposer(options) {
   const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
-  const visible = (node) => Boolean(node?.isConnected && node.getClientRects().length);
+  const visible = (node) => {
+    if(!node?.isConnected||node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'))return false;
+    const computed=document.defaultView?.getComputedStyle?.(node);
+    if(computed?.display==='none'||['hidden','collapse'].includes(computed?.visibility))return false;
+    const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
+    return rects.some(rect=>rect.width>0&&rect.height>0);
+  };
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
+  const composer=editor.closest('form')||editor.closest('[data-composer-body]');
+  if(!composer)return {ok:false,reason:'Не удалось связать редактор с его формой отправки'};
   let controller = null;
   for (let node = editor; node && !controller; node = node.parentElement) {
     const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
@@ -261,13 +269,13 @@ function controlChatComposer(options) {
   const promptMatches = noSystemHints && typeof prompt === 'string' && (prompt === options.text || (plainMatches && literalSerializationMatches()));
   const matches = plainMatches && promptMatches;
   const ready = controller.submitReady === true && controller.pendingSubmit == null;
-  const effort = Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
+  const effort = Array.from(composer.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
   if (options.action === 'inspect' && !options.fileName) return inspection;
   if (options.action !== 'inspect' && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max'))) {
     return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort};
   }
-  const attachments = root.querySelector('[data-composer-attachments]');
+  const attachments = composer.querySelector('[data-composer-attachments]');
   if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};
   if (options.fileName) {
     const found = new Set();
@@ -281,7 +289,7 @@ function controlChatComposer(options) {
     if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
   if (options.action === 'inspect') return inspection;
-  const button = Array.from(root.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
+  const button = Array.from(composer.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.
   const clickedAt=Date.now();

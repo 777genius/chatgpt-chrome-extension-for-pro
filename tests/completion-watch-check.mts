@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 const {document,window}=parseHTML('<html><head></head><body><main><article data-testid="conversation-turn-0" data-turn="user">old</article><article data-testid="conversation-turn-1" data-turn="assistant">old answer</article></main><form><div id="prompt-textarea" contenteditable="true">draft</div><button data-testid="send-button">send</button></form></body></html>');
-Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return [{}];}});
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return [{width:240,height:32}];}});
 let now=1000000,listener:Function=()=>{},nativeComplete=false;
 const messages:any[]=[];
 const context=createContext({document,window,Node:window.Node,Element:window.Element,HTMLTextAreaElement:window.HTMLTextAreaElement,

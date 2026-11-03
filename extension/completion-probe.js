@@ -50,11 +50,18 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false) {
     }
     const rendered=domAssistant?.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
     let goalRawExact=false;
-    if(goalResponse==='GOAL_COMPLETE'&&rendered?.textContent==='GOAL_COMPLETE'&&
-        !rendered.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img')) {
-      const semantic=domAssistant.cloneNode(true);
-      semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
-      goalRawExact=semantic.textContent.trim()==='GOAL_COMPLETE';
+    if(goalResponse==='GOAL_COMPLETE'&&rendered?.textContent==='GOAL_COMPLETE') {
+      // Match the content reader's positive plain-answer structure: one
+      // text-only paragraph, reached only through known native Markdown DIVs.
+      let paragraph=rendered;
+      while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&
+          paragraph.children.length===1)paragraph=paragraph.firstElementChild;
+      if(paragraph.tagName==='P'&&!paragraph.children.length&&paragraph.childNodes.length===1&&
+          paragraph.firstChild.nodeType===3&&paragraph.firstChild.textContent==='GOAL_COMPLETE') {
+        const semantic=domAssistant.cloneNode(true);
+        semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
+        goalRawExact=semantic.textContent.trim()==='GOAL_COMPLETE';
+      }
     }
     const sentAtMs=userTimes.at(-1)?.sentAtMs;
     goalText={userText:typeof user.message==='string'?user.message:'',userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,

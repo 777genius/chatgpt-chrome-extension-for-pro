@@ -6,7 +6,7 @@ import {parseHTML} from 'linkedom';
 interface Message {type:string;[key:string]:unknown}
 interface IntentEvent {isTrusted:boolean;target:Element;key?:string;shiftKey?:boolean;isComposing?:boolean}
 const {document,window}=parseHTML('<html><head></head><body><main></main><form><div id="prompt-textarea" contenteditable="true">Private draft</div><button data-testid="send-button">Send</button></form></body></html>');
-Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
 const callbacks=new Map<string,Array<(event:IntentEvent)=>void>>();
 const original=document.addEventListener.bind(document);
 document.addEventListener=((type:string,fn:(event:IntentEvent)=>void,...options:unknown[])=>{

@@ -40,6 +40,13 @@ assert.equal(match('<p>GOAL_COMPLETE</p>','<div class="markdown">another output<
 assert.equal(match('<p><code>GOAL_COMPLETE</code></p>'),false,'code is not the marker');
 assert.equal(match('<p><strong>GOAL_COMPLETE</strong></p>'),false,'strong markup is not the marker');
 assert.equal(match('<p><a href="#">GOAL_COMPLETE</a></p>'),false,'link is not the marker');
+for(const tag of ['h1','h2','h3','h4','h5','h6','pre','blockquote','div','span'])
+  assert.equal(match(`<${tag}>GOAL_COMPLETE</${tag}>`),false,`${tag} is not a plain paragraph`);
+for(const tag of ['del','s','b','i','u','mark','small','sup','sub','span','unknown-rich-node'])
+  assert.equal(match(`<p><${tag}>GOAL_COMPLETE</${tag}></p>`),false,`${tag} markup is not the marker`);
+assert.equal(match('<p>GOAL_COMPLETE<br></p>'),false,'a line break is additional answer content');
+assert.equal(match('<p>GOAL_COMPLETE</p><p></p>'),false,'a second empty paragraph is not the exact marker');
+assert.equal(match('<p>GOAL_COMPLETE<!--extra node--></p>'),false,'unknown paragraph nodes fail closed');
 assert.equal(match('<p>Done: GOAL_COMPLETE</p>'),false,'substring is not the marker');
 assert.equal(match('<p>goal_complete</p>'),false,'marker is case-sensitive');
 assert.equal(match('<p>GOAL_COMPLETE</p><button>Click me</button>'),false,
@@ -59,6 +66,8 @@ assert.equal(fallback('<p>GOAL_COMPLETE</p>','<p>Still working</p>'),false,
   'real assistant text outside fallback markdown still disqualifies the marker');
 assert.equal(fallback('<p><code>GOAL_COMPLETE</code></p>'),false,'fallback code is not a plain marker');
 assert.equal(fallback('<p><strong>GOAL_COMPLETE</strong></p>'),false,'fallback styled marker is not plain');
+assert.equal(fallback('<h1>GOAL_COMPLETE</h1>'),false,'fallback Markdown heading is not plain');
+assert.equal(fallback('<p><del>GOAL_COMPLETE</del></p>'),false,'fallback strikethrough is not plain');
 assert.equal(fallback('<p>GOAL_COMPLETE</p>','',''),false,'visible assistant headings are still content');
 
 console.log('Exact Goal marker DOM, visible extra content and Copy/Share toolbar passed.');

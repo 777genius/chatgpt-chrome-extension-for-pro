@@ -145,7 +145,7 @@
         const record={...current,phase:'bound',binding};
         const next={schema:1,id:armId,url:target,originUrl:target,goal:intent.text,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
-          startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
+          startedAt,manualStartedAt:startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
           expectedPromptKey:promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
           handoffPending:false,handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
         await event('manual_started',next,tabId,{text:intent.text,rules:next.rules,
@@ -455,6 +455,8 @@
         const reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
         const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,
           manualOverride:!inFlight,
+          ...(Number.isFinite(startedAt)&&startedAt>0?
+            {manualStartedAt:Math.max(record.manualStartedAt||0,startedAt)}:{}),
           ...(reserved?{pendingSendKind:record.operation.kind,operation:null}:{}),
           reason:inFlight?'Ожидается исход отправки; ручное действие имеет приоритет':'Пауза: ручная отправка пользователя'};
         await event('manual_pause',next,tabId);
@@ -462,12 +464,18 @@
         return {ok:true};
       });
     }
-    async function retry({url,tabId,kind,promptKey,goalHandoff=false}) {
+    async function retry({url,tabId,kind,promptKey,attemptId,goalHandoff=false}) {
       const target=canonical(url);
       if(!target)return;
       await serialize(async()=>{
         const record=await read(target);
         if(!record||!['waiting','recovering','paused'].includes(record.phase))return;
+        // Journal delivery and Goal writes use different queues. Recheck the
+        // request fence here, after serialization: an accepted old callback
+        // may arrive after a manual send or a newly started Goal.
+        const attempt=Number(attemptId),knownAttempt=Number.isFinite(attempt)&&attempt>0;
+        if(knownAttempt&&attempt<Math.max(record.startedAt||0,record.manualStartedAt||0)||
+            !knownAttempt&&record.manualStartedAt>0)return;
         if(kind==='retry.blocked'&&goalHandoff)return; // new-chat recovery is not a failed Goal
         let next=record;
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};

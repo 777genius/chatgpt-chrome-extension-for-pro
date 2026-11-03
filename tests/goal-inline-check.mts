@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown};
+type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string};
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
 type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
@@ -91,15 +91,21 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
         record={...goal(value.url),goal:nativeText};
         composerState={...composerState,phase:'bound',binding:{url:value.url}};
       }
-      if(value.action==='pause'&&record)record={...record,phase:'paused'};
-      if(value.action==='resume'&&record)record={...record,phase:'waiting'};
+      if(value.action==='pause'&&record)record=record.phase==='handoff'?{...record,preHandoffPhase:'paused'}:{...record,phase:'paused'};
+      if(value.action==='resume'&&record)record=record.phase==='handoff'?{...record,preHandoffPhase:'waiting'}:{...record,phase:'waiting'};
       if(value.action==='stop'&&record)record={...record,phase:'stopped'};
       return {ok:true,url:value.url,record,composer:composerState};
     },subscribe:(fn:()=>void)=>{subscription=fn;return ()=>{subscription=null;unsubscribed++;};}});
   function element<T=HTMLButtonElement>(selector:string):T {
     const result=document.querySelector(selector);assert.ok(result,selector);return result as unknown as T;
   }
-  return {document,window,calls,state,instance,element,
+  // Only this synthetic fixture helper represents real user input. In the
+  // browser isTrusted is immutable and page-created clicks remain untrusted.
+  function click(target:HTMLElement) {
+    const event=new window.Event('click',{bubbles:true,cancelable:true});
+    Object.defineProperty(event,'isTrusted',{value:true});target.dispatchEvent(event);
+  }
+  return {document,window,calls,state,instance,element,click,
     now:()=>clock,timers:()=>timers.size,advance:async(ms:number)=>{clock+=ms;for(const [id,timer] of Array.from(timers))if(timer.at<=clock){timers.delete(id);timer.run();}await tick();},
     composerState:()=>composerState,setComposer:(value:Composer|null)=>{composerState=value;},bindable:(value=true)=>{bindable=value;},
     toggle:()=>element('[role=switch]'),details:()=>element('[aria-label="Goal settings"]'),panel:()=>element<HTMLElement>('[data-chatgpt-goal-inline=panel]'),
@@ -122,7 +128,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.document.querySelector('[data-goal-field=goal]'),null);
   assert.equal(f.document.querySelector('[data-goal-action=start]'),null);
   assert.equal(f.field('maxContinuations').value,'10');assert.equal(f.field('maxMinutes').value,'1440');
-  f.field('rules').value='Synthetic criteria';f.toggle().click();f.toggle().click();await tick();
+  f.field('rules').value='Synthetic criteria';f.click(f.toggle());f.click(f.toggle());await tick();
   assert.equal(f.calls.filter(value=>value.action==='arm').length,1);
   const armed=f.calls.find(value=>value.action==='arm')!;
   assert.equal(armed.rules,'Synthetic criteria');assert.equal(armed.maxContinuations,10);assert.equal(armed.maxMinutes,1440);
@@ -130,7 +136,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.field('rules').disabled,true);
   assert.match(f.panel().textContent!,/Write the goal in the message box and send it yourself/);
   assert.equal(f.timers(),0,'arming never starts polling or sending');
-  const armedId=f.composerState()!.id;f.toggle().click();await tick();assert.equal(f.calls.at(-1)!.action,'disarm');
+  const armedId=f.composerState()!.id;f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'disarm');
   assert.equal(f.calls.at(-1)!.armId,armedId,'Off is fenced to the exact acknowledged arming');
   assert.equal(f.toggle().getAttribute('aria-checked'),'false');assert.equal(f.field('rules').disabled,false);
   assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);assert.equal(f.draft(),'  untouched draft\nwith spacing  ');
@@ -141,10 +147,56 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   f.instance.dispose();assert.equal(f.nativeForm().isConnected,true);assert.equal(f.unsubscribed(),1);
 }
 
+// Shared DOM is not authority: page-created Arm/Disarm/Pause/Resume/Stop
+// clicks cannot mutate state, and hidden or disabled controls stay inert even
+// when the fixture models trusted input. Native browser isTrusted is immutable.
+{
+  const f=fixture();await tick();
+  const before=f.calls.length;f.toggle().click();await tick();
+  assert.equal(f.calls.length,before,'untrusted switch cannot arm');
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  f.click(f.toggle());await tick();const armed=f.calls.length;
+  f.toggle().click();await tick();assert.equal(f.calls.length,armed,'untrusted switch cannot disarm');
+  f.click(f.toggle());await tick();f.setRecord(goal());await f.instance.refresh();f.details().click();
+  const running=f.calls.length;
+  f.action('pause').click();f.action('stop').click();f.toggle().click();await tick();
+  assert.equal(f.calls.length,running,'untrusted Pause/Stop/switch cannot change active Goal');
+  f.click(f.action('resume'));await tick();assert.equal(f.calls.length,running,'hidden Resume cannot dispatch');
+  f.element('[aria-label="Close Goal settings"]').click();f.click(f.action('pause'));await tick();
+  assert.equal(f.calls.length,running,'controls in a hidden panel cannot dispatch');
+  f.details().click();f.action('pause').disabled=true;f.click(f.action('pause'));await tick();
+  assert.equal(f.calls.length,running,'disabled Pause cannot dispatch');
+  await f.instance.refresh();f.click(f.action('pause'));await tick();const paused=f.calls.length;
+  f.action('resume').click();f.click(f.action('pause'));await tick();
+  assert.equal(f.calls.length,paused,'untrusted Resume and hidden Pause cannot dispatch');
+  assert.equal(f.action('resume').hidden,false);f.click(f.action('resume'));await tick();
+  assert.equal(f.calls.at(-1)!.action,'resume');f.click(f.action('stop'));await tick();
+  assert.equal(f.calls.at(-1)!.action,'stop');f.instance.dispose();
+}
+
+// Handoff retains its own phase; Pause/Resume changes the policy carried to
+// the confirmed destination, including a paused handoff restored from storage.
+{
+  const f=fixture();await tick();
+  f.setRecord({...goal(chat,'handoff'),preHandoffPhase:'waiting'});await f.instance.refresh();f.details().click();
+  assert.equal(f.action('pause').hidden,false);assert.equal(f.action('pause').disabled,false);
+  assert.equal(f.action('resume').hidden,true);
+  f.click(f.action('pause'));await tick();
+  assert.equal(f.calls.at(-1)!.action,'pause');
+  assert.equal(f.action('pause').hidden,true);assert.equal(f.action('resume').hidden,false);
+  assert.equal(f.action('resume').disabled,false);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true','a paused transfer remains armed');
+  f.click(f.action('resume'));await tick();
+  assert.equal(f.calls.at(-1)!.action,'resume');
+  assert.equal(f.action('pause').hidden,false);assert.equal(f.action('resume').hidden,true);
+  f.setRecord({...goal(chat,'handoff'),preHandoffPhase:'paused'});f.notify();await tick();
+  assert.equal(f.action('resume').hidden,false,'persisted paused handoff exposes Resume');f.instance.dispose();
+}
+
 // Only an explicit root adapter call captures the trusted native-send intent.
 // Pending confirmation is idempotent and follows / to a permanent route.
 {
-  const f=fixture('https://chatgpt.com/');await tick();f.toggle().click();await tick();
+  const f=fixture('https://chatgpt.com/');await tick();f.click(f.toggle());await tick();
   const eventAt=f.now();
   const first=f.instance.manualIntent({text:'  User sent this exact goal  ',baselineKey:'',eventAt});
   const duplicate=await f.instance.manualIntent({text:'Must not replace',baselineKey:'',eventAt});
@@ -158,9 +210,9 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.calls.at(-1)!.action,'bind');assert.equal(f.calls.at(-1)!.url,chat);assert.equal(f.timers(),0);
   f.details().click();assert.match(f.panel().textContent!,/User sent this exact goal/);
   assert.equal(f.document.querySelector('[data-goal-objective]')!.localName,'p','bound objective is read-only');
-  f.action('pause').click();await tick();assert.equal(f.action('resume').hidden,false);
-  f.action('resume').click();await tick();assert.equal(f.action('pause').hidden,false);
-  f.toggle().click();await tick();assert.equal(f.calls.at(-1)!.action,'stop');assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  f.click(f.action('pause'));await tick();assert.equal(f.action('resume').hidden,false);
+  f.click(f.action('resume'));await tick();assert.equal(f.action('pause').hidden,false);
+  f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'stop');assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
   assert.ok(f.calls.every(value=>value.action!=='start'),'inline never authorizes a separate initial send');f.instance.dispose();
 }
@@ -168,7 +220,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 // Allocation can occur while the intent acknowledgement is in flight. A real
 // cross-chat navigation invalidates callbacks and cancels pending confirmation.
 {
-  const f=fixture('https://chatgpt.com/');await tick();f.toggle().click();await tick();
+  const f=fixture('https://chatgpt.com/');await tick();f.click(f.toggle());await tick();
   const arm=f.composerState()!,pending=deferred<Result>();f.respond(()=>pending.promise);
   const intent=f.instance.manualIntent({text:'Exact native goal',baselineKey:'',eventAt:f.now()});
   f.setUrl(chat);await f.instance.refresh();
@@ -183,7 +235,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 // The worker can confirm allocation before this page's route event arrives.
 // Keep the first-message intent pending and paint a Goal only on its real URL.
 {
-  const f=fixture('https://chatgpt.com/');await tick();f.toggle().click();await tick();
+  const f=fixture('https://chatgpt.com/');await tick();f.click(f.toggle());await tick();
   await f.instance.manualIntent({text:'Root native goal',baselineKey:'',eventAt:f.now()});
   const bound={...f.composerState()!,phase:'bound' as const,binding:{url:chat}};
   const record={...goal(chat),goal:'Root native goal'};
@@ -196,7 +248,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.timers(),1);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
   f.setUrl(chat);f.setRecord(record);f.setComposer(bound);f.respond(null);await f.instance.refresh();
   assert.equal(f.timers(),0);f.details().click();assert.match(f.panel().textContent!,/Root native goal/);f.instance.dispose();
-  const g=fixture('https://chatgpt.com/');await tick();g.toggle().click();await tick();
+  const g=fixture('https://chatgpt.com/');await tick();g.click(g.toggle());await tick();
   await g.instance.manualIntent({text:'Root native goal',baselineKey:'',eventAt:g.now()});
   g.respond(()=>({ok:true,url:chat,record,composer:{...g.composerState()!,phase:'bound',binding:{url:chat}}}));
   await g.advance(250);g.setUrl(other);g.respond(()=>({ok:true,url:other,record:null,composer:null}));await g.instance.refresh();
@@ -207,17 +259,17 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 // pretend it is off, and confirmation errors stop all polling in this instance.
 {
   const f=fixture();await tick();f.details().click();
-  f.respond(()=>({ok:false,error:'Storage unavailable'}));f.toggle().click();await tick();
+  f.respond(()=>({ok:false,error:'Storage unavailable'}));f.click(f.toggle());await tick();
   assert.equal(f.toggle().getAttribute('aria-checked'),'false');assert.match(f.panel().textContent!,/Storage unavailable/);
-  f.respond(null);f.toggle().click();await tick();
-  f.respond(()=>({ok:false,error:'Disarm refused'}));f.toggle().click();await tick();
+  f.respond(null);f.click(f.toggle());await tick();
+  f.respond(()=>({ok:false,error:'Disarm refused'}));f.click(f.toggle());await tick();
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.match(f.panel().textContent!,/Disarm refused/);
   f.respond(null);await f.instance.manualIntent({text:'Native goal',baselineKey:'/c/synthetic-goal-a|before',eventAt:f.now()});
   f.respond(()=>({ok:false,error:'Native outcome unknown'}));await f.advance(250);
   assert.equal(f.timers(),0);assert.match(f.panel().textContent!,/Native outcome unknown/);
   const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);
   f.respond(null);f.notify();await tick();assert.match(f.panel().textContent!,/Native outcome unknown/);assert.equal(f.timers(),0);
-  f.toggle().click();await tick();assert.equal(f.calls.at(-1)!.action,'disarm');assert.equal(f.toggle().getAttribute('aria-checked'),'false');f.instance.dispose();
+  f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'disarm');assert.equal(f.toggle().getAttribute('aria-checked'),'false');f.instance.dispose();
 }
 
 // Reload resumes a persisted intent only for its original 30-second window.
@@ -229,7 +281,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.timers(),1);await f.advance(250);assert.equal(f.timers(),1);await f.advance(250);
   assert.equal(f.timers(),0);f.details().click();assert.match(f.panel().textContent!,/timed out/);
   const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);f.instance.dispose();
-  const g=fixture();await tick();g.toggle().click();await tick();
+  const g=fixture();await tick();g.click(g.toggle());await tick();
   await g.instance.manualIntent({text:'Native goal',baselineKey:'before',eventAt:g.now()});
   const pending=deferred<Result>();g.respond(()=>pending.promise);await g.advance(250);g.instance.dispose();g.instance.dispose();
   pending.resolve({ok:true,record:goal(),composer:{...g.composerState()!,phase:'bound',binding:{url:chat}}});await tick();
@@ -240,7 +292,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 // A stale arm/Get response cannot expose another chat's settings or state.
 {
   const f=fixture();await tick();f.details().click();f.field('rules').value='Only for chat A';
-  const pending=deferred<Result>();f.respond(()=>pending.promise);f.toggle().click();
+  const pending=deferred<Result>();f.respond(()=>pending.promise);f.click(f.toggle());
   f.setUrl(other);f.respond(()=>({ok:true,url:other,record:null,composer:null}));await f.instance.refresh();
   pending.resolve({ok:true,url:chat,composer:{id:'stale-arm',phase:'armed',url:chat,
     config:{rules:'Only for chat A',maxContinuations:10,maxMinutes:1440}}});await tick();

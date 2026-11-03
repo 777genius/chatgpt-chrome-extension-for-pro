@@ -68,7 +68,8 @@
     for(const [action,title] of [['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
       const button=node('button',{type:'button','data-goal-action':action},title);
       buttons[action]=button;actions.append(button);
-      listen(button,'click',()=>void act(action));
+      // Shared page DOM is not authority to change durable Goal state.
+      listen(button,'click',event=>{if(consent(event,button))void act(action);});
     }
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
@@ -102,11 +103,12 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       toggle.title=!route?'Goal is available on ChatGPT chat pages':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!busy&&!active()&&!armed();
+      const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused';
       for(const input of Object.values(fields))input.disabled=!editable;
-      buttons.pause.hidden=!active()||record.phase==='paused';
-      buttons.resume.hidden=record?.phase!=='paused';
+      buttons.pause.hidden=!active()||paused;
+      buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
-      buttons.pause.disabled=busy||!loaded||record?.phase==='handoff'||!!record?.pauseRequested||!!record?.stopRequested;
+      buttons.pause.disabled=busy||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
       buttons.resume.disabled=busy||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||!loaded||!!record?.stopRequested;
       objective.hidden=!record?.goal;
@@ -182,6 +184,9 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(computed?.display==='none'||['hidden','collapse'].includes(computed?.visibility))return false;
       const rects=typeof el.getClientRects==='function'?Array.from(el.getClientRects()):[el.getBoundingClientRect()];
       return rects.some(rect=>rect.width>0&&rect.height>0);
+    }
+    function consent(event,control) {
+      return event.isTrusted===true&&!control.disabled&&!control.hidden&&visible(control);
     }
     function inlineItem(reasoning,composer) {
       // The native effort button can be block-level inside inline/block wrappers.
@@ -332,7 +337,9 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!valid())return;
       if(syncRoute()){void refresh();return;}
       if(!route||!loaded||busy)return;
-      if(buttons[action]?.disabled)return;
+      // Hidden/disabled actions fence stale events as well as duplicate clicks.
+      if(buttons[action]&&(buttons[action].disabled||buttons[action].hidden))return;
+      if(!buttons[action]&&!['arm','disarm'].includes(action))return;
       let input={};
       if(action==='arm') {
         if(active()||armed()||record?.operation||record?.phase==='blocked')return;
@@ -395,7 +402,8 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         }
       }
     }
-    listen(toggle,'click',()=>{
+    listen(toggle,'click',event=>{
+      if(!consent(event,toggle))return;
       if(syncRoute()){void refresh();return;}
       if(toggle.disabled)return;
       void act(active()&&!record.stopRequested?'stop':armed()?'disarm':'arm');

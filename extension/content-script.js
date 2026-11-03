@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.2';
+  const SCRIPT_VERSION = '1.7.3';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -163,12 +163,16 @@
     const roleNode=turn.matches?.('[data-message-author-role="assistant"]')?turn:
       turn.querySelector('[data-message-author-role="assistant"]')||turn;
     const rendered=roleNode.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
-    // Examine the actual rendered answer, not ChatGPT's surrounding Copy,
-    // Share and feedback controls. Marker inside a code block, link or styled
-    // passage is not a plain final answer. Any other assistant content still
-    // disqualifies the marker, even when it is outside the first Markdown node.
-    if(!rendered||rendered.textContent!=='GOAL_COMPLETE'||
-        rendered.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img'))return false;
+    // A native plain answer is one text-only paragraph, possibly inside the
+    // known Markdown containers. An element denylist misses Markdown headings,
+    // strikethrough and future rich nodes whose text happens to be the marker.
+    if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
+    let paragraph=rendered;
+    while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&
+        paragraph.children.length===1)paragraph=paragraph.firstElementChild;
+    if(paragraph.tagName!=='P'||paragraph.children.length||
+        paragraph.childNodes.length!==1||paragraph.firstChild.nodeType!==3||
+        paragraph.firstChild.textContent!=='GOAL_COMPLETE')return false;
     const semantic=roleNode.cloneNode(true);
     // Fallback turns expose the speaker label as a screen reader heading,
     // outside the answer itself. It is interface text in every locale.
@@ -252,13 +256,17 @@
   }
 
   function isElementVisible(node) {
-    if (!node) return false;
+    if (!node?.isConnected) return false;
     try {
-      // A stop button kept mounted but display:none must not count as
-      // "generating", otherwise completion would never be detected.
-      return typeof node.getClientRects !== 'function' || node.getClientRects().length > 0;
+      // SPA navigation and native dialogs can retain old composers with layout
+      // boxes. They must not participate in preparation or button selection.
+      if(node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'))return false;
+      const computed=document.defaultView?.getComputedStyle?.(node);
+      if(computed?.display==='none'||['hidden','collapse'].includes(computed?.visibility))return false;
+      const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
+      return rects.some(rect=>rect.width>0&&rect.height>0);
     } catch {
-      return true;
+      return false;
     }
   }
 
