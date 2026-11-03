@@ -199,5 +199,4 @@ const statusIndicatorApi = Object.freeze({
     });
   },
 });
-(globalThis as typeof globalThis & { ChatGPTStatusIndicator: typeof statusIndicatorApi })
-  .ChatGPTStatusIndicator = statusIndicatorApi;
+Object.assign(globalThis, {ChatGPTStatusIndicator:statusIndicatorApi});
