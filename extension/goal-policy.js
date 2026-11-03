@@ -11,6 +11,14 @@
         ?url.origin+url.pathname.replace(/\/$/,''):'';
     } catch {return '';}
   }
+  const DEFAULTS=Object.freeze({maxContinuations:10,maxMinutes:1440});
+  function pageUrl(value) {
+    try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&url.pathname==='/'?url.origin+'/':canonical(value);}catch{return '';}
+  }
+  function composerSettings(input={}) {
+    const {rules,maxContinuations,maxMinutes}=settings({...DEFAULTS,...Object.fromEntries(Object.entries(input).filter(([,value])=>value!==undefined)),goal:'Native message'});
+    return {rules,maxContinuations,maxMinutes};
+  }
   function settings(input) {
     const goal=typeof input?.goal==='string'?input.goal.trim():'';
     const rules=typeof input?.rules==='string'?input.rules.trim():'';
@@ -48,7 +56,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,CONTINUATION,canonical,settings,initialText,continuationText,handoffText,exactMarker,decision});
+  const api=Object.freeze({MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,exactMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

@@ -22,6 +22,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     }
   }
   let entries = null;
+  let historyReady = null;
   let recoveryEntry = null;
   let inputDeliveryError = false;
   const alertContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
@@ -34,7 +35,18 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   for (let i = 0; fiber && i < 45; i += 1, fiber = fiber.return) {
     const props = fiber.memoizedProps || {};
     if (i < 9) inspectElement(props.children);
-    if (captureHistory && Array.isArray(props.entries)) entries = props.entries;
+    if (captureHistory && Array.isArray(props.entries)) {
+      entries = props.entries;
+      historyReady = null;
+      const pageId=typeof location==='object'?location.pathname.split('/').at(-1):'';
+      const boundHistory=props.conversationId===pageId ||
+        /^local-chatgpt:[a-z0-9-]+$/.test(props.conversationId||'') &&
+        props.composerConversationId===props.conversationId && props.scrollStateConversationId===pageId;
+      if (props.isChatConversation === true && boundHistory &&
+          typeof props.isConversationFetching === 'boolean' && typeof props.isConversationLoading === 'boolean') {
+        historyReady = !props.isConversationFetching && !props.isConversationLoading && props.hasLoadError === false;
+      }
+    }
     const entry=props.entry;
     const candidate=entry?.isMostRecentTurn===true?entry:Array.isArray(props.entries)?props.entries.at(-1):null;
     if(candidate?.isMostRecentTurn===true&&candidate.isReadOnly===false)recoveryEntry=candidate;
@@ -132,9 +144,11 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
       .forEach(({ index }) => selected.add(index));
   }
   const messages = all.filter((_, index) => selected.has(index));
-  return { action, messages, incomplete: messages.some((item) => !item.text.trim()) ||
-    messages.filter((item) => item.role === 'user').length !== 2 ||
-    messages.filter((item) => item.role === 'assistant').length !== 2 };
+  const shortHistory = messages.filter((item) => item.role === 'user').length < 2 ||
+    messages.filter((item) => item.role === 'assistant').length < 2;
+  return { action, messages, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
+    messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
+
 }
 
 function inspectChatAttachment(fileName) {
@@ -200,9 +214,17 @@ function inspectHandoffAcceptance(options) {
 // ahead of React/ProseMirror and must never authorize sending a user's draft.
 function controlChatComposer(options) {
   const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
-  const visible = (node) => Boolean(node?.isConnected && node.getClientRects().length);
+  const visible = (node) => {
+    if(!node?.isConnected||node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'))return false;
+    const computed=document.defaultView?.getComputedStyle?.(node);
+    if(computed?.display==='none'||['hidden','collapse'].includes(computed?.visibility))return false;
+    const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
+    return rects.some(rect=>rect.width>0&&rect.height>0);
+  };
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
+  const composer=editor.closest('form')||editor.closest('[data-composer-body]');
+  if(!composer)return {ok:false,reason:'Не удалось связать редактор с его формой отправки'};
   let controller = null;
   for (let node = editor; node && !controller; node = node.parentElement) {
     const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
@@ -212,6 +234,19 @@ function controlChatComposer(options) {
     }
   }
   if (!controller) return { ok: false, reason: 'Не удалось проверить состояние редактора ChatGPT' };
+  function selectedMode() {
+    const reasoning=Array.from(composer.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible);
+    const effort=reasoning?.getAttribute('data-selected-reasoning-effort')||null;
+    const key=reasoning&&Object.keys(reasoning).find(name=>name.startsWith('__reactFiber$')),models=new Set();
+    for(let fiber=key&&reasoning[key],i=0;fiber&&i<24;i++,fiber=fiber.return){
+      const candidate=fiber.memoizedProps?.selectedLabelCandidate;
+      if(candidate?.reasoningEffort===effort&&typeof candidate.model==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(candidate.model))models.add(candidate.model);
+    }
+    return {effort,model:models.size===1?Array.from(models)[0]:null};
+  }
+  if(options.action==='inspect-mode') {
+    const mode=selectedMode();return {ok:Boolean(mode.effort&&mode.model),...mode};
+  }
   function visibleText() {
     if (editor.value !== undefined) return editor.value;
     if (!editor.querySelector('p, div, br, li')) return editor.textContent || '';
@@ -227,14 +262,15 @@ function controlChatComposer(options) {
   }
   const actualPrompt = controller.getChatGptPrompt();
   const prompt = actualPrompt?.prompt;
+  const systemHints = actualPrompt?.systemHints;
+  const noSystemHints = systemHints === undefined || (Array.isArray(systemHints) && systemHints.length === 0);
   const plainMatches = controller.getPlainText() === options.text && visibleText() === options.text;
   function literalSerializationMatches() {
     // Native Markdown mode escapes punctuation and wraps generated URL links.
     // Permit the native serialization only for an independently checked plain
     // document: no mentions, hidden nodes, custom links, formatting or hints.
     const doc = controller.view.state?.doc;
-    if (!doc?.toJSON || typeof controller.markdownEditor?.serialize !== 'function' ||
-        actualPrompt.systemHints?.length) return false;
+    if (!doc?.toJSON || typeof controller.markdownEditor?.serialize !== 'function') return false;
     const value = doc.toJSON();
     if (value.type !== 'doc' || value.marks?.length || !Array.isArray(value.content)) return false;
     const lines = [];
@@ -255,16 +291,25 @@ function controlChatComposer(options) {
     }
     return lines.join('\n') === options.text && controller.markdownEditor.serialize(doc) === prompt;
   }
-  const promptMatches = typeof prompt === 'string' && (prompt === options.text || (plainMatches && literalSerializationMatches()));
+  // Native hints can carry context beyond the independently checked text,
+  // including when Markdown serialization leaves that text unchanged.
+  const inspectingSeed = options.action === 'inspect-seed';
+  const promptMatches = noSystemHints && typeof prompt === 'string' && (inspectingSeed
+    ? typeof options.nativeText === 'string' && options.nativeText !== '' && prompt === options.nativeText
+    : prompt === options.text || (plainMatches && literalSerializationMatches()));
   const matches = plainMatches && promptMatches;
   const ready = controller.submitReady === true && controller.pendingSubmit == null;
-  const effort = Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
-  const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
+  const {effort,model}=selectedMode();
+  const savedMode=options.expectedEffort!==undefined||options.expectedModel!==undefined;
+  const modeMatches=!savedMode || typeof options.expectedEffort==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.expectedEffort)&&
+    typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
+    effort===options.expectedEffort&&model===options.expectedModel;
+  const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
   if (options.action === 'inspect' && !options.fileName) return inspection;
-  if (options.action !== 'inspect' && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max'))) {
-    return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort};
+  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || !modeMatches)) {
+    return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort,model};
   }
-  const attachments = root.querySelector('[data-composer-attachments]');
+  const attachments = composer.querySelector('[data-composer-attachments]');
   if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};
   if (options.fileName) {
     const found = new Set();
@@ -277,8 +322,8 @@ function controlChatComposer(options) {
     }
     if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
-  if (options.action === 'inspect') return inspection;
-  const button = Array.from(root.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
+  if (options.action === 'inspect' || inspectingSeed) return inspection;
+  const button = Array.from(composer.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.
   const clickedAt=Date.now();

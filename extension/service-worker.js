@@ -14,7 +14,15 @@ importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
 importScripts('goal-policy.js');
 importScripts('goal-store.js');
-const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});
+const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal,
+  beforeDispatch:async goal=>{
+    const tabId=goal.operation?.tabId;
+    if(!Number.isInteger(tabId)||!goal.handoffId)return;
+    const key=handoffKey(tabId),handoff=(await chrome.storage.local.get(key))[key];
+    if(handoff?.id===goal.handoffId&&handoff.stage==='sent'&&
+        ChatGPTHandoffTitle.chatUrl(handoff.targetUrl)===goal.url)
+      await renameSavedHandoff(tabId,handoff.id,{goalOperationId:goal.operation.id});
+  }});
 
 initializeJournal('worker-start').catch(console.error);
 
@@ -39,6 +47,40 @@ async function latestRequestReceipt(tabId) {
   const saved=await readRequestReceipt(tabId);
   if(saved&&!manualRequestReceiptsByTab.has(tabId))manualRequestReceiptsByTab.set(tabId,saved);
   return manualRequestReceiptsByTab.get(tabId)||null;
+}
+
+async function reconcileFailedCompletionLoading(tabId,url) {
+  let record=await completionCheckpointRead(tabId);
+  const view=await readChatStatus(url),request=await latestRequestReceipt(tabId);
+  const matches=(current,status,known)=>current?.state==='active'&&current.url===url&&current.startedAt===record?.startedAt&&
+    current.requestId===record?.requestId&&current.baselineKey===record?.baselineKey&&current.promptKey===record?.promptKey&&
+    known?.startedAt===record?.startedAt&&known.requestId===record?.requestId&&
+    (!known.url||ChatGPTHandoffTitle.chatUrl(known.url)===url)&&
+    typeof known.receipt?.epoch==='string'&&Number.isSafeInteger(known.receipt?.order)&&known.receipt.order>0&&
+    status.status?.kind==='loading'&&status.status.eventAt===record?.startedAt&&
+    status.status.receipt?.epoch===known.receipt?.epoch&&status.status.receipt?.order===known.receipt?.order;
+  if(!record?.baselineKey||!record.promptKey||!matches(record,view,request)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {changed:false};
+  const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,false,record.promptKey]});
+  const native=result?.result;
+  // Already-stuck pre-upgrade requests lack the marker. Read only a bounded
+  // journal tail after positive native rollback proof, never the whole history.
+  if(!record.requestFailedAt&&failedAttemptRollbackEvidence({...record,requestFailedAt:record.startedAt},native)) {
+    const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META],through=meta?.sequence||0;
+    const keys=Array.from({length:Math.min(300,through)},(_,i)=>`${JOURNAL_PREFIX}${String(through-i).padStart(12,'0')}`);
+    const rows=await chrome.storage.local.get(keys);
+    const failure=Object.values(rows).find(row=>row?.kind==='request.failed'&&row.tabId===tabId&&row.requestId===record.requestId&&
+      ChatGPTHandoffTitle.chatUrl(row.sourceUrl)===url&&Number.isFinite(row.recordedAt)&&row.recordedAt>=record.startedAt);
+    if(failure&&await completionCheckpointFailure(tabId,{startedAt:record.startedAt,requestId:record.requestId,failedAt:failure.recordedAt}))record=await completionCheckpointRead(tabId);
+  }
+  if(!failedAttemptRollbackEvidence(record,native))return {changed:false,pending:Boolean(record?.requestFailedAt)};
+  const current=await completionCheckpointRead(tabId),status=await readChatStatus(url),known=await latestRequestReceipt(tabId);
+  if(status.revision!==view.revision||!matches(current,status,known)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {changed:false};
+  if(!await completionCheckpointFinish(tabId,record.startedAt,'failed',record.requestId))return {changed:false};
+  const stopped=await stopChatLoading(url,record.startedAt,statusReceipt(),request.receipt);
+  await appendJournal({kind:'completion.failed_rollback',sourceUrl:url,requestId:record.requestId,startedAt:record.startedAt,
+    promptKey:record.promptKey,baselineKey:record.baselineKey},{id:tabId});
+  void broadcastChatStatus(stopped).catch(()=>{});
+  return {changed:true,...stopped};
 }
 
 function normalizePathname(url) {
@@ -216,7 +258,7 @@ async function signalConversationRequestEvent(tabId,message) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js', 'content-script.js']
+      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js', 'goal-policy.js', 'goal-inline.js', 'content-script.js']
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
@@ -233,7 +275,7 @@ async function installErrorWatchers() {
       // This pass runs once per full extension load. A same-version reload
       // must replace invalidated listeners, even if its isolated global remains.
       await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>{try{globalThis.__chatgptNotifierDispose?.();}catch{}globalThis.__chatgptNotifierDispose=null;globalThis.__chatgptNotifierVersion=null;}});
-      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','content-script.js']}); }
+      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','goal-policy.js','goal-inline.js','content-script.js']}); }
     catch (error) { journalInBackground({kind:'watcher.unavailable',reason:String(error.message || error)},tab); }
   }));
 }
@@ -277,7 +319,8 @@ chrome.webRequest.onCompleted.addListener((details) => {
 chrome.webRequest.onErrorOccurred?.addListener((details) => {
   if (!isAnswerStreamRequest(details))return;
   void journalRequest('request.failed',details).catch(()=>{});
-  void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(known=>{
+  void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(async known=>{
+    if(known)await completionCheckpointFailure(details.tabId,{startedAt:known.startedAt,requestId:known.requestId,failedAt:details.timeStamp});
     if(known)return signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_FAILED',startedAt:known.startedAt,requestId:known.requestId});
   }).catch(()=>{});
 }, CHATGPT_REQUEST_FILTER);
@@ -294,10 +337,18 @@ async function handleHandoffMessage(message, tabId) {
     const pending=handoffWrites.get(tabId);
     if(pending)await pending.catch(()=>{});
     const saved=(await chrome.storage.local.get(key))[key]||null;
-    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation','sent'].includes(saved.stage))
+    if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation'].includes(saved.stage))
       await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
+    if(saved?.id&&['sent','failed'].includes(saved.stage)) {
+      // A terminal historical recovery copy must not enroll a newer Goal in its
+      // transfer. Only an existing exact binding may need the legacy tab fill.
+      const goal=await goalController.get(saved.sourceUrl);
+      if(goal?.phase==='handoff'&&goal.handoffId===saved.id)
+        await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
+    }
     if(saved?.stage==='sent'&&saved.targetUrl)
       await goalController.handoffConfirm({sourceUrl:saved.sourceUrl,targetUrl:saved.targetUrl,handoffId:saved.id,tabId,acceptedUserId:saved.acceptance?.messageId});
+    if(saved?.stage==='failed')await goalController.handoffFailed({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId,reason:saved.reason});
     return {ok:true,record:saved};
   }
   const previous = handoffWrites.get(tabId) || Promise.resolve();
@@ -306,7 +357,7 @@ async function handleHandoffMessage(message, tabId) {
     if (message.type === 'CHATGPT_HANDOFF_BEGIN') {
       if(['sending','awaiting-confirmation'].includes(current?.stage))throw new Error('Предыдущая передача ещё ожидает подтверждения');
       let record = message.record;
-      if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string') throw new Error('Invalid handoff');
+      if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string' || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort) || typeof record.reasoningModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(record.reasoningModel)) throw new Error('Invalid handoff');
       const marker = `${key}:source:${record.sourceUrl}`;
       if ((await chrome.storage.local.get(marker))[marker]) return { ok: false, error: 'Передача этого чата уже запускалась' };
       const lineageKey=`chatgpt-handoff-title:${ChatGPTHandoffTitle.chatUrl(record.sourceUrl)}`;
@@ -318,7 +369,7 @@ async function handleHandoffMessage(message, tabId) {
       // strand the Goal waiting on a transfer that never started.
       await appendJournal({kind:'handoff.navigating', operationId:record.id, sourceUrl:record.sourceUrl,
         text:record.text, prompt:record.prompt, asFile:record.asFile, fileName:record.fileName,
-        draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,naming}, {id:tabId});
+        draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,reasoningEffort:record.reasoningEffort,reasoningModel:record.reasoningModel,naming}, {id:tabId});
       // Save the full text BEFORE navigating away from the source page.
       await chrome.storage.local.set({ [key]: { ...record, stage: 'navigating' }, [marker]: record.id });
       try {
@@ -401,13 +452,86 @@ async function handleHandoffMessage(message, tabId) {
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
     if(message.stage==='sent')
       await goalController.handoffConfirm({sourceUrl:record.sourceUrl,targetUrl:record.targetUrl,handoffId:record.id,tabId,acceptedUserId:record.acceptance?.messageId});
+    if(message.stage==='failed')await goalController.handoffFailed({sourceUrl:record.sourceUrl,handoffId:record.id,tabId,reason:record.reason});
     return { ok: true, record, notifyAwaiting:message.stage==='awaiting-confirmation'&&!current.awaitingNotifiedAt };
   });
   handoffWrites.set(tabId, write);
   try { return await write; } finally { if (handoffWrites.get(tabId) === write) handoffWrites.delete(tabId); }
 }
 
+// Adopt only a user-submitted native message. This path never clicks or edits
+// the composer, and does not infer a new chat from its URL alone.
+async function bindNativeComposerGoal(tabId,currentUrl,armId) {
+  const pending=await goalController.composerGet({tabId});
+  const canonical=ChatGPTGoalPolicy.canonical(currentUrl);
+  if(!pending||pending.id!==armId||!['intent','bound'].includes(pending.phase))
+    return {ok:false,error:'Goal больше не ожидает эту отправку'};
+  if(pending.phase==='bound') {
+    if(pending.binding?.url!==canonical)return {ok:false,error:'Чат цели изменился'};
+    return {ok:true,url:canonical,record:await goalController.get(canonical),composer:pending};
+  }
+  const waiting=()=>({ok:true,pending:true,url:currentUrl,composer:pending});
+  if(!canonical)return waiting();
+  const request=await latestRequestReceipt(tabId);
+  if(!Number.isFinite(pending.intent?.eventAt)||!request||request.startedAt<pending.intent?.eventAt||request.startedAt-pending.intent?.eventAt>10000)return waiting();
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[canonical,true]});
+  const native=checked?.result;
+  if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.userId||
+      typeof native.userText!=='string'||!native.promptKey||!Number.isFinite(native.userSentAtMs))return waiting();
+  const live=ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url),fresh=await latestRequestReceipt(tabId);
+  if(live!==canonical||fresh?.requestId!==request.requestId||fresh?.startedAt!==request.startedAt)
+    return {ok:false,error:'Отправка или чат изменились до подтверждения Goal'};
+  if(request.url&&ChatGPTGoalPolicy.canonical(request.url)!==canonical)
+    return {ok:false,error:'Запрос отправлен в другой чат'};
+  const result=await goalController.composerBind({tabId,armId,url:canonical,requestId:request.requestId,
+    startedAt:request.startedAt,promptKey:native.promptKey,userId:native.userId,userText:native.userText,
+    userSentAtMs:native.userSentAtMs,userVisibleText:native.userVisibleText,firstTurn:native.firstTurn,nativeVerified:true});
+  // The first answer may have completed before the root chat received its
+  // permanent URL. Replay that exact native completion through the coordinator.
+  if(result.ok&&native.turnStatus==='complete'&&native.generating===false&&!native.hasError&&
+      native.assistantCompleted===true&&native.assistantPhase==='final_answer'&&native.assistantKey) {
+    await goalController.completion({url:canonical,tabId,
+      completionKey:native.promptKey+'|'+native.assistantKey,promptKey:native.promptKey,
+      userId:native.userId,response:native.goalResponse||'',rawExact:native.goalRawExact===true,nativeVerified:true});
+  }
+  return {ok:result.ok,url:canonical,tabId,composer:result.record,record:await goalController.get(canonical)};
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if(message?.type==='CHATGPT_GOAL_INLINE') {
+    const tabId=sender.tab?.id,source=ChatGPTGoalPolicy.pageUrl(sender.tab?.url);
+    const requested=ChatGPTGoalPolicy.pageUrl(message.url);
+    const actions=['get','arm','disarm','intent','bind','start','pause','resume','stop'];
+    if(sender.frameId>0||typeof tabId!=='number'||!source||!requested||!actions.includes(message.action)) {
+      sendResponse?.({ok:false,error:'Goal chat binding mismatch'});return false;
+    }
+    (async()=>{
+      const live=ChatGPTGoalPolicy.pageUrl((await chrome.tabs.get(tabId)).url);
+      const pending=await goalController.composerGet({tabId});
+      const allocatedIntent=['intent','bind'].includes(message.action)&&requested==='https://chatgpt.com/'&&
+        pending?.url===requested&&Boolean(ChatGPTGoalPolicy.canonical(live));
+      if((source!==requested||live!==requested)&&!allocatedIntent)throw Error('Чат изменился');
+      let result;
+      if(message.action==='bind')return bindNativeComposerGoal(tabId,live,message.armId);
+      if(message.action==='arm')result=await goalController.composerArm({tabId,url:live,rules:message.rules,
+        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
+      else if(message.action==='disarm')result=await goalController.composerDisarm({tabId,armId:message.armId});
+      else if(message.action==='intent')result=await goalController.composerIntent({tabId,url:requested,
+        armId:message.armId,eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey});
+      else if(message.action==='start') {
+        if(!ChatGPTGoalPolicy.canonical(live))throw Error('Используйте Goal рядом с полем нового сообщения');
+        return {...await goalController.start({url:live,tabId,goal:message.goal,rules:message.rules,
+          maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes}),tabId,url:live};
+      } else if(message.action!=='get') {
+        if(!ChatGPTGoalPolicy.canonical(live))throw Error('Goal ещё ожидает первое сообщение');
+        return {...await goalController.control({action:message.action,url:live,tabId}),tabId,url:live};
+      }
+      if(result?.ok===false)return result;
+      const url=ChatGPTGoalPolicy.canonical(live);
+      return {ok:true,tabId,url:live,record:url?await goalController.get(url):null,
+        composer:result?.record||await goalController.composerGet({tabId})};
+    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));return true;
+  }
   if(message?.type==='CHATGPT_GOAL_CONTROL') {
     if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('popup.html')) {
       sendResponse?.({ok:false,error:'Goal управляется только из popup расширения'});
@@ -539,24 +663,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let retryBinding=null;
     (async () => {
       const options = message.options;
-      if (!['inspect','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
+      if (!['inspect','inspect-mode','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
       if (options.action === 'send') {
         const meta = (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
         const active = meta?.active?.[sender.tab.id];
         if (!active || active.operationId !== options.operationId || Date.now() - active.at > 15000) throw new Error('Нет сохранённого разрешения на эту автоматическую отправку');
         if (active.kind === 'retry.send_intent') {
-          if (options.text !== 'доделай е2е' || options.fileName) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
+          if (options.text !== 'доделай е2е' || options.fileName || options.requireMax || options.expectedEffort !== undefined || options.expectedModel !== undefined) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
           if(!active.sourceUrl||active.sourceUrl!==retryDraftUrl(options.url)||typeof active.promptKey!=='string'||!active.promptKey)throw new Error('Исходный запрос автоповтора не подтверждён');
           retryBinding={sourceUrl:active.sourceUrl,promptKey:active.promptKey};
         } else if (active.kind === 'goal.send_intent') {
-          if(options.requireMax||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
+          if(options.requireMax||options.expectedEffort!==undefined||options.expectedModel!==undefined||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
           const grant=await goalController.authorize({url:options.url,tabId:sender.tab.id,
             id:active.goalId,operationId:options.operationId,text:options.text});
           if(!grant?.ok)throw new Error('Goal более не разрешает отправку');
         } else if (active.kind === 'handoff.sending') {
           const key = handoffKey(sender.tab.id);
           const record = (await chrome.storage.local.get(key))[key];
-          if (!record || record.stage !== 'sending' || record.id !== options.operationId || record.prompt !== options.text || !options.requireMax ||
+          if (!record || record.stage !== 'sending' || record.id !== options.operationId || record.prompt !== options.text || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort) || options.expectedEffort !== record.reasoningEffort || typeof record.reasoningModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(record.reasoningModel) || options.expectedModel !== record.reasoningModel || options.requireMax ||
               (options.fileName || null) !== (record.asFile ? record.fileName : null)) throw new Error('Текст не совпадает с сохранённой передачей');
         } else throw new Error('Отправка пользовательского черновика запрещена');
         await appendJournal({kind:'send.authorized',operationId:options.operationId,text:options.text,sourceUrl:options.url},sender.tab);
@@ -602,12 +726,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
+    if(['retry.manual_reset','retry.preparation_superseded'].includes(event.kind)) {
+      sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
+    }
     appendJournal(event,sender.tab).then(async result=>{
-      if(['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
+      if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
         await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
-          promptKey:event.newPromptKey,goalHandoff:event.goalHandoff===true});
+          promptKey:event.newPromptKey,attemptId:event.attemptId,goalHandoff:event.goalHandoff===true});
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
+    return true;
+  }
+  if (message?.type === 'CHATGPT_INSPECT_HANDOFF_SEED') {
+    const tabId=sender.tab?.id;
+    if(sender.frameId>0||typeof tabId!=='number'||typeof message.url!=='string'||typeof message.text!=='string') {
+      sendResponse?.({ok:false});return false;
+    }
+    (async()=>{
+      const live=(await chrome.tabs.get(tabId)).url;
+      const record=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
+      if(live!==message.url||sender.tab.url!==live||!live.startsWith('https://chatgpt.com/')||
+          !record||record.id!==message.id||!['navigating','preparing'].includes(record.stage)||
+          live===record.sourceUrl||typeof record.lastUserText!=='string'||!record.lastUserText||
+          record.targetUrl&&record.targetUrl!==live)return {ok:false};
+      const fileName=message.allowHistoryFile===true&&record.asFile?record.fileName:null;
+      const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+        args:[{action:'inspect-seed',url:live,text:message.text,nativeText:record.lastUserText,fileName}]});
+      const current=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
+      if((await chrome.tabs.get(tabId)).url!==live||current?.id!==record.id||
+          !['navigating','preparing'].includes(current.stage))return {ok:false};
+      return result?.result||{ok:false};
+    })().then(sendResponse).catch(()=>sendResponse({ok:false}));
     return true;
   }
   if (message?.type === 'CHATGPT_INSPECT_ATTACHMENT') {
@@ -647,12 +796,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     reconcileLegacyHandoffStatus(sender.tab.id,url).then(view=>sendResponse?.({ok:true,changed:Boolean(view),...(view||{})})).catch(()=>sendResponse?.({ok:false}));
     return true;
   }
+  if(message?.type==='CHATGPT_RECONCILE_FAILED_COMPLETION') {
+    const url=messageChatUrl(message,sender);
+    if(!url){sendResponse?.({ok:false});return false;}
+    reconcileFailedCompletionLoading(sender.tab.id,url).then(value=>sendResponse?.({ok:true,...value})).catch(()=>sendResponse?.({ok:false}));
+    return true;
+  }
   if(message?.type==='CHATGPT_COMPLETION_CHECKPOINT') {
     const tabId=sender.tab?.id,url=completionCheckpointUrl(sender.tab?.url);
     if(sender.frameId>0||typeof tabId!=='number'||!url||completionCheckpointUrl(message.url)!==url){sendResponse?.({ok:false});return false;}
     (async()=>{
       if(message.action==='intent')return {ok:await completionCheckpointIntent(tabId,{url,baselineKey:message.baselineKey,at:message.at})};
       if(message.action==='update')return {ok:await completionCheckpointUpdate(tabId,{url,startedAt:message.startedAt,requestId:message.requestId,baselineKey:message.baselineKey,promptKey:message.promptKey,httpCompleted:message.httpCompleted})};
+      const rollback=await reconcileFailedCompletionLoading(tabId,url);
+      if(rollback.changed)return {ok:false,rollback};
       let record=await completionCheckpointRead(tabId);
       if(!record||record.state!=='active'||typeof record.baselineKey!=='string')return {ok:false};
       const view=await readChatStatus(url),tab=await chrome.tabs.get(tabId);
@@ -745,6 +902,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if(!isError&&!isWarning&&(!completionRequest||completionRequest.startedAt!==message.completionStartedAt||
         String(completionRequest.startedAt)!==message.attemptId||completionRequest.url&&completionRequest.url!==sourceUrl||
         completionRequest.requestId&&message.requestId!==completionRequest.requestId))return;
+
+    if(!isError&&!isWarning) {
+      const armed=await goalController.composerGet({tabId});
+      if(armed?.phase==='intent')await bindNativeComposerGoal(tabId,sourceUrl,armed.id);
+    }
 
     const fingerprint = String(message.fingerprint || '');
     const rawCompletionKey=String(message.completionKey||fingerprint);
@@ -843,6 +1005,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if(!request)return {ok:false,reason:'Ручная отправка не подтверждена запросом'};
         receipt=request.receipt;
         await appendJournal({kind:'retry.preparation_superseded',sourceUrl:url,requestId:message.requestId,startedAt:message.startedAt},sender.tab);
+        await goalController.manual({url,tabId:sender.tab.id,startedAt:message.startedAt});
       }
       if(message.type==='CHATGPT_STATUS_GET'){
         let view=await readChatStatus(url);
@@ -888,6 +1051,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void goalController.composerDisarm({tabId}).catch(()=>{});
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
   legacyHandoffStatusFences.delete(tabId);

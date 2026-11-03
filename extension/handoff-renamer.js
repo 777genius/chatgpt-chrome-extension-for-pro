@@ -38,7 +38,7 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{
   if (pending) pending.failure=details.error||'request-failed';
 },TITLE_REQUEST_FILTER);
 
-function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
+function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperationId=null}={}) {
   if (titleJobs.has(tabId)) return titleJobs.get(tabId);
   const job=(async()=>{
     const key=handoffKey(tabId);
@@ -46,6 +46,16 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
     if (!record || record.id!==id || record.stage!=='sent' || !record.naming || record.titleStatus==='confirmed') return {ok:true,skipped:true};
     if (record.titleStatus==='saving') return {ok:false,reason:'Предыдущая попытка переименования не подтверждена; повторная запись отключена'};
     let url=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
+    // Goal continuations and native rename dialogs share the same page. The
+    // delivery barrier may own preparation; background rename events may not
+    // open a modal over an already preparing/sending Goal.
+    const goalUrl=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
+    const goalKey=goalUrl&&'chatgpt-goal:'+goalUrl;
+    const goal=goalKey?(await chrome.storage.local.get(goalKey))[goalKey]:null;
+    const goalPreparing=goal?.phase==='preparing'&&goal.operation?.status==='reserved';
+    if(goalOperationId&&(!goalPreparing||goal.operation.id!==goalOperationId)||
+        !goalOperationId&&goal?.operation&&['preparing','sending','clicked'].includes(goal.phase))
+      return {ok:true,waiting:true,retryable:true};
     // Old versions could persist a temporary route. Never infer its server
     // destination from a title or the currently open tab alone.
     let targetAlias='';
@@ -165,7 +175,14 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false}={}) {
       await update('failed',{titleReason:String(error.message||error)});
       return {ok:false,reason:String(error.message||error)};
     } finally {
-      try {await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,args:[{action:'cancel',operationId:id}]});}catch{}
+      try {
+        for(let cleanup=0;cleanup<8;cleanup++) {
+          const result=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
+            args:[{action:'cancel',operationId:id,finalCleanup:cleanup===7}]});
+          if(!result[0]?.result?.pending)break;
+          await wait(250);
+        }
+      }catch{}
       pendingTitles.delete(tabId);
       for(const [requestId,value]of titleRequests)if(value===pending)titleRequests.delete(requestId);
     }
