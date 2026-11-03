@@ -55,3 +55,7 @@ for(const mutate of [(h:ReturnType<typeof fixture>)=>{h.record().operation.id='r
  assert.equal((await runInContext("readRequestReceipt(7,{requestId:'actual-request'})",ctx)).operationId,'operation');
 }
 console.log('Native Goal send ACK: collapsed DOM independent, exact worker operation/request/time/user proof, late races and durable correlation passed.');
+
+for(const change of [{manualStartedAt:1200},{manualPending:{requestId:'manual-newer'}}]) {
+ const h=fixture();Object.assign(h.record(),change);assert.equal((await h.run()).ok,false);assert.equal(h.reports.length,0);
+}

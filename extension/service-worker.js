@@ -505,7 +505,8 @@ async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,started
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
   const sameOperation=value=>value?.id===id&&value.url===url&&value.operation?.id===operationId&&value.operation.tabId===tabId&&
     ['sending','clicked'].includes(value.phase)&&['intent','clicked'].includes(value.operation.status)&&
-    value.operation.text===op?.text&&value.operation.baselineKey===op?.baselineKey;
+    value.operation.text===op?.text&&value.operation.baselineKey===op?.baselineKey&&!value.manualPending&&
+    !(value.manualStartedAt>value.operation.createdAt);
   if(!sameOperation(record))return {ok:false,pending:false,error:'Операция Goal изменилась'};
   const request=await latestRequestReceipt(tabId);
   const matches=known=>known?.operationId===operationId&&known.requestId===requestId&&known.startedAt===startedAt&&typeof requestId==='string'&&requestId&&
