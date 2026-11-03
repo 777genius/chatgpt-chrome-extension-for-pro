@@ -136,7 +136,7 @@ declare const module:undefined|{exports:unknown};
         if(previous?.phase==='bound') {
           const boundUrl=previous.binding?.url;
           const bound=boundUrl?await read(boundUrl):null;
-          if(bound?.id!==previous.id||bound.operation||
+          if(!bound||bound.id!==previous.id||bound.operation||
               !['completed','stopped','moved'].includes(bound.phase))
             throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
         } else if(previous?.phase==='intent') {
