@@ -23,10 +23,12 @@ interface SWMessage {
   generating?:boolean;asFile?:boolean;manual?:boolean;phase?:string;receipt?:SWHandoffRecord["sendReceipt"];
   clicked?:boolean;confirmed?:boolean;unknown?:boolean;messageId?:string;
   record?:SWHandoffRecord;event?:SWJournalEvent;options?:SWComposerOptions;
+  allowHistoryFile?:boolean;armId?:string;eventAt?:number;userText?:string;userVisibleText?:string|null;
+  userSentAtMs?:number;firstTurn?:boolean;reasoningEffort?:string;reasoningModel?:string;
 }
 interface SWComposerOptions {
-  action:"inspect"|"send";url:string;text:string;operationId?:string;
-  requireMax?:boolean;fileName?:string;[key:string]:unknown;
+  action:"inspect"|"inspect-mode"|"inspect-seed"|"send";url:string;text:string;operationId?:string;
+  requireMax?:boolean;fileName?:string;nativeText?:string;expectedEffort?:string;expectedModel?:string;[key:string]:unknown;
 }
 interface SWProof {
   auditError?:boolean;receiptError?:boolean;proof?:string;recoveryBinding?:unknown;
@@ -51,6 +53,7 @@ interface SWHandoffRecord extends Record<string,unknown> {
   id:string;stage:string;sourceUrl:string;sourceTitle?:string;targetUrl?:string;
   text?:string;prompt?:string;fileName?:string;asFile?:boolean;
   draft?:string;naming?:SWHandoffNaming;title?:string;
+  reasoningEffort?:string;reasoningModel?:string;lastUserText?:string;
   sendReceipt?:{operationId?:string;submittedText?:string;clickedAt?:number;conversationAlias?:string;sendUrl?:string};
   acceptance?:{messageId:string;entryId?:string|null;targetUrl?:string;confirmedAt?:number};
   draftRestoreClaimedAt?:number;awaitingNotifiedAt?:number;
@@ -70,6 +73,7 @@ interface SWStorageDocument extends Record<string,unknown> {
   retrySchema?:number;goalId?:string;kind?:string;at?:number;consumed?:boolean;
   receipt?:SWReceipt;startedAt?:number;requestId?:string|null;notifications?:{id:string}[];
   schema?:number;attemptId?:string;baselineKey?:string|null;promptKey?:string;httpCompleted?:boolean;
+  requestFailedAt?:number;state?:string;
 }
 interface SWStorage {
   get(keys:string|readonly string[]|null):Promise<Record<string,SWStorageDocument|undefined>>;
@@ -120,8 +124,20 @@ interface SWChrome {
     onErrorOccurred?:{addListener(listener:(details:SWRequest)=>void,filter:Record<string,unknown>):void};
   };
 }
+interface SWGoalRecord extends Record<string,unknown> {
+  id:string;url:string;phase:string;handoffId?:string|null;
+  operation?:{id:string;tabId:number;status:string}|null;
+}
+interface SWComposerGoal extends Record<string,unknown> {
+  id:string;phase:string;url:string;config?:Record<string,unknown>;
+}
 interface SWGoalAPI {
-  get(url:string):Promise<unknown>;context(url:string):Promise<string>;
+  get(url:string):Promise<SWGoalRecord|null>;context(url:string):Promise<string>;
+  composerGet(input:{tabId:number}):Promise<SWComposerGoal|null>;
+  composerArm(input:Record<string,unknown>):Promise<{ok:boolean;record:SWComposerGoal|null;goal?:SWGoalRecord|null}>;
+  composerDisarm(input:Record<string,unknown>):Promise<{ok:boolean;record:SWComposerGoal|null;goal?:SWGoalRecord|null}>;
+  composerIntent(input:Record<string,unknown>):Promise<{ok:boolean;record:SWComposerGoal|null;goal?:SWGoalRecord|null}>;
+  composerBind(input:Record<string,unknown>):Promise<{ok:boolean;record:SWComposerGoal|null;goal?:SWGoalRecord|null}>;
   start(input:Record<string,unknown>):Promise<SWProof>;
   recoverTab(input:Record<string,unknown>):Promise<SWProof>;
   control(input:Record<string,unknown>):Promise<SWProof>;
@@ -134,9 +150,10 @@ interface SWGoalAPI {
   retry(input:Record<string,unknown>):Promise<void>;
   handoffBegin(input:Record<string,unknown>):Promise<void>;
   handoffConfirm(input:Record<string,unknown>):Promise<void>;
+  handoffFailed(input:Record<string,unknown>):Promise<SWProof>;
   stageHandoffCompletion(input:Record<string,unknown>):Promise<SWProof>;
 }
-interface SWGoalPolicy {canonical(url:string|undefined):string}
+interface SWGoalPolicy {canonical(url:string|undefined):string;pageUrl(url:string|undefined):string}
 declare const chrome:SWChrome;
 declare global {
   var __chatgptNotifierDispose:(()=>void)|undefined;
@@ -188,6 +205,8 @@ declare function completionCheckpointStart(tabId:number,request:Record<string,un
 declare function completionCheckpointUpdate(tabId:number,request:Record<string,unknown>):Promise<boolean>;
 declare function completionCheckpointIntent(tabId:number,request:Record<string,unknown>):Promise<boolean>;
 declare function completionCheckpointFinish(tabId:number,startedAt:number,state:string,requestId?:string|null):Promise<boolean>;
+declare function completionCheckpointFailure(tabId:number,input:{startedAt:number;requestId:string;failedAt:number}):Promise<boolean>;
+declare function failedAttemptRollbackEvidence(record:SWStorageDocument|null,native:SWProof|undefined):unknown;
 declare function updateDeferredChat(url:string,event:Record<string,unknown>,receipt:SWReceipt):Promise<SWStatusView>;
 declare function observeChatLoading(url:string,at:number,receipt:SWReceipt):Promise<SWStatusView>;
 declare function stopChatLoading(url:string,startedAt:number,receipt:SWReceipt,startReceipt:SWReceipt|null):Promise<SWStatusView>;
@@ -204,7 +223,7 @@ declare function inspectChatError(...args:unknown[]):SWProof;
 declare function inspectChatAttachment(fileName:string):SWProof;
 declare function inspectHandoffAcceptance(...args:unknown[]):SWProof;
 declare function controlChatComposer(...args:unknown[]):SWProof;
-declare function inspectCompletedTurn(url:string):SWProof;
+declare function inspectCompletedTurn(url:string,includeGoalText?:boolean,failedPromptKey?:string|null):SWProof;
 function workerErrorMessage(cause:unknown):string {
   if(cause && (typeof cause==='object'||typeof cause==='function')) {
     const message=Reflect.get(cause,'message');
@@ -234,7 +253,15 @@ importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
 importScripts('goal-policy.js');
 importScripts('goal-store.js');
-const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});
+const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal,
+  beforeDispatch:async (goal:SWGoalRecord)=>{
+    const tabId=goal.operation?.tabId;
+    if(typeof tabId!=='number'||!Number.isInteger(tabId)||!goal.handoffId)return;
+    const key=handoffKey(tabId),handoff=(await chrome.storage.local.get(key))[key];
+    if(handoff?.id===goal.handoffId&&handoff.stage==='sent'&&
+        ChatGPTHandoffTitle.chatUrl(handoff.targetUrl)===goal.url)
+      await renameSavedHandoff(tabId,handoff.id,{goalOperationId:goal.operation?.id});
+  }});
 
 initializeJournal('worker-start').catch(console.error);
 
@@ -442,7 +469,7 @@ async function signalConversationRequestEvent(tabId:number,message:Record<string
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js', 'content-script.js']
+      files: ['memory-maintenance.js', 'handoff-title.js', 'status-indicator.js', 'deferred-task-status.js', 'completion-state.js','goal-policy.js','goal-inline.js','content-script.js']
     });
     await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
@@ -459,7 +486,7 @@ async function installErrorWatchers():Promise<void> {
       // This pass runs once per full extension load. A same-version reload
       // must replace invalidated listeners, even if its isolated global remains.
       await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>{try{globalThis.__chatgptNotifierDispose?.();}catch{}globalThis.__chatgptNotifierDispose=undefined;globalThis.__chatgptNotifierVersion=undefined;}});
-      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','content-script.js']}); }
+      await chrome.scripting.executeScript({target:{tabId:tab.id},files:['memory-maintenance.js','handoff-title.js','status-indicator.js','deferred-task-status.js','completion-state.js','goal-policy.js','goal-inline.js','content-script.js']}); }
     catch (error) { journalInBackground({kind:'watcher.unavailable',reason:workerErrorMessage(error)},tab); }
   }));
 }
@@ -503,7 +530,10 @@ chrome.webRequest.onCompleted.addListener((details) => {
 chrome.webRequest.onErrorOccurred?.addListener((details) => {
   if (!isAnswerStreamRequest(details))return;
   void journalRequest('request.failed',details).catch(()=>{});
-  void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(known=>{
+  void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(async known=>{
+    if(known&&typeof known.requestId==='string')
+      await completionCheckpointFailure(details.tabId,
+        {startedAt:known.startedAt,requestId:known.requestId,failedAt:details.timeStamp});
     if(known)return signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_FAILED',startedAt:known.startedAt,requestId:known.requestId});
   }).catch(()=>{});
 }, CHATGPT_REQUEST_FILTER);
