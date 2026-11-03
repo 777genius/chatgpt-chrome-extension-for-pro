@@ -214,3 +214,25 @@ assert.equal((await fencedRuntime.read() as any).remainingRetries,2,'a stale pla
 await fencedRuntime.append({kind:'retry.failed',attemptId:'0',error:'Unbound failure'});
 assert.equal((await fencedRuntime.read())!.blocked,true,'zero or missing attempts keep the existing conservative policy');
 console.log('PASS: persisted manual cutoff fences late old callbacks, preparation and budget while preserving new errors and unknown-attempt policy');
+
+// Unknown-attempt visible-error retries are valid, but a known released
+// operation must remain retired even if a delayed backup omits its attempt.
+const released=harness();let releasedRuntime=released.boot();
+await releasedRuntime.append({kind:'retry.planned',operationId:'released-no-attempt',attemptId:'',promptKey:'visible-error'});
+await releasedRuntime.append({kind:'retry.preparation_superseded',startedAt:1000100});
+assert.ok((released.storage[metaKey] as any).retryReleasedOperations['released-no-attempt']);
+releasedRuntime=released.boot();
+await releasedRuntime.append({kind:'retry.planned',operationId:'current-draft',attemptId:'1000100',promptKey:'manual-error'});
+await releasedRuntime.append({kind:'draft.saved',operationId:'current-draft',attemptId:'1000100',draft:'Current exact owner draft'});
+const lateReleased=await releasedRuntime.append({kind:'draft.saved',operationId:'released-no-attempt',attemptId:'',draft:'Stale detached backup'});
+assert.equal(lateReleased.ok,false);assert.equal(lateReleased.duplicate,true);
+assert.equal((released.storage[metaKey] as any).retryDraftByChat[url].operationId,'current-draft','late unbound callback cannot overwrite the newer draft index');
+await assert.rejects(releasedRuntime.append({kind:'retry.planned',operationId:'released-no-attempt',attemptId:'',promptKey:'visible-error'}),/уже запускался/);
+await releasedRuntime.append({kind:'retry.finished',operationId:'current-draft',clicked:false});
+await releasedRuntime.append({kind:'retry.planned',operationId:'fresh-no-attempt',attemptId:'',promptKey:'new-visible-error'});
+assert.equal((await releasedRuntime.append({kind:'draft.saved',operationId:'fresh-no-attempt',attemptId:'',draft:'Fresh visible-error draft'})).ok,true,'a fresh valid visible-error retry need not fabricate a positive attempt ID');
+await releasedRuntime.append({kind:'retry.preparation_superseded',startedAt:1000200});
+releasedRuntime=released.boot();
+const lateSuperseded=await releasedRuntime.append({kind:'draft.saved',operationId:'fresh-no-attempt',draft:'Late after restart'});
+assert.equal(lateSuperseded.ok,false);assert.equal((released.storage[metaKey] as any).retryDraftByChat[url].phase,'superseded');
+console.log('PASS: retired retry operation IDs fence late unbound draft backups across restart without rejecting fresh visible-error operations');

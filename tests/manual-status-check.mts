@@ -75,3 +75,38 @@ assert.equal(sent.find(m=>m.type==='CHATGPT_GENERATION_STOPPED')!.requestId,worl
 assert.equal(editor.textContent,'Private draft');
 (world.__chatgptNotifierDispose as ()=>void)();document.addEventListener=original;
 console.log('Manual status reset: trusted send plus actual request, synthetic/disabled/newline/stale/route guards passed.');
+
+// Validate the content listener's local cache fence independently from the
+// broker: an observed page request is not an accepted worker receipt yet.
+const listenerText=readFileSync('extension/content-script.js','utf8');
+const confirmSource=listenerText.slice(listenerText.indexOf('  function confirmManualStatusIntent('),listenerText.indexOf('  // Reset the indicator only'));
+function manualAckFixture() {
+ const url='https://chatgpt.com/c/manual-ack-fixture',path='/c/manual-ack-fixture';
+ const block={blocked:true,reason:'Unconfirmed prior send'};
+ const cache=new Map([[path,block]]),accepted:unknown[]=[];
+ let respond!:(value:{ok:boolean})=>void;
+ const reply=new Promise<{ok:boolean}>(resolve=>{respond=resolve;});
+ const ctx=createContext({location:{href:url,pathname:path},manualSendIntent:{url,at:100,attempt:'90',requestId:'old'},
+  retryStates:cache,__chatgptNotifierRequestStartedAt:110,__chatgptNotifierRequestId:'manual-current',
+  ChatGPTHandoffTitle:{chatUrl:(value:string)=>value},runtimeMessage:()=>reply,
+  statusIndicator:{accept:(value:unknown)=>accepted.push(value)}});
+ runInContext(confirmSource,ctx);
+ runInContext('confirmManualStatusIntent(110,"manual-current")',ctx);
+ return {cache,path,block,ctx,accepted,respond};
+}
+{
+ const h=manualAckFixture();
+ assert.equal(h.cache.get(h.path),h.block,'local retry block survives until broker acknowledgement');
+ h.respond({ok:false});await flush();
+ assert.equal(h.cache.get(h.path),h.block,'rejected native receipt never unlocks the local retry state');assert.equal(h.accepted.length,0);
+}
+{
+ const h=manualAckFixture();h.respond({ok:true});await flush();
+ assert.equal(h.cache.has(h.path),false,'accepted matching receipt resets the captured local retry state');assert.equal(h.accepted.length,1);
+}
+{
+ const h=manualAckFixture();h.ctx.__chatgptNotifierRequestStartedAt=120;h.ctx.__chatgptNotifierRequestId='newer-request';
+ h.respond({ok:true});await flush();
+ assert.equal(h.cache.get(h.path),h.block,'a delayed accepted receipt cannot erase a newer local request state');
+}
+console.log('Manual local cache: rejected/pending receipts retain blocks; only current accepted receipts reset.');

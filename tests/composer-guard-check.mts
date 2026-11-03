@@ -101,17 +101,28 @@ editor.textContent='USER DRAFT';
 assert.equal(control({text:literal}).ok,false);assert.equal(clicks,before,'draft never clicked after serialization fix');
 console.log('PASS: literal native Markdown regression, altered URL targets, rich nodes, hints, stale serialization and draft race');
 
-// Handoff effort is the saved raw source token, including lower and Pro modes.
+// Handoff power preserves the saved native effort and model combination.
 richController.getChatGptPrompt=()=>({prompt:'Prepared history',systemHints:[]});
 richController.getPlainText=()=> 'Prepared history';editor.textContent='Prepared history';
 const effortControl=document.querySelector('[data-selected-reasoning-effort]')!;
 for(const expected of ['medium','max','pro']){
  effortControl.setAttribute('data-selected-reasoning-effort',expected);
+ (effortControl as any).__reactFiber$reasoning={memoizedProps:{selectedLabelCandidate:{model:'gpt-6-thinking',reasoningEffort:expected}},return:null};
  const clicksBefore:number=clicks;
- assert.equal(control({text:'Prepared history',expectedEffort:expected}).clicked,true,'exact saved '+expected+' mode allows one click');
+ assert.equal(control({text:'Prepared history',expectedEffort:expected,expectedModel:'gpt-6-thinking'}).clicked,true,'exact saved '+expected+' mode allows one click');
  assert.equal(clicks,clicksBefore+1);
  effortControl.setAttribute('data-selected-reasoning-effort',expected==='medium'?'max':'medium');
- assert.equal(control({text:'Prepared history',expectedEffort:expected}).ok,false,'a changed mode must fail immediately before clicking');
+ assert.equal(control({text:'Prepared history',expectedEffort:expected,expectedModel:'gpt-6-thinking'}).ok,false,'a changed mode must fail immediately before clicking');
  assert.equal(clicks,clicksBefore+1);
 }
 assert.equal(control({text:'Prepared history',expectedEffort:''}).ok,false,'missing/invalid saved mode cannot authorize a native click');
+
+// Actual native Pro is a different model with the SAME medium effort token.
+effortControl.setAttribute('data-selected-reasoning-effort','medium');
+(effortControl as any).__reactFiber$reasoning={memoizedProps:{selectedLabelCandidate:{model:'gpt-6-pro',reasoningEffort:'medium'}},return:null};
+const beforeModelGuard=clicks;
+assert.equal(control({text:'Prepared history',expectedEffort:'medium',expectedModel:'gpt-6-thinking'}).ok,false);
+assert.equal(control({text:'Prepared history',expectedEffort:'medium'}).ok,false,'legacy effort alone cannot distinguish Pro from Thinking');
+assert.equal(clicks,beforeModelGuard);
+assert.equal(control({text:'Prepared history',expectedEffort:'medium',expectedModel:'gpt-6-pro'}).clicked,true);
+assert.equal(clicks,beforeModelGuard+1);

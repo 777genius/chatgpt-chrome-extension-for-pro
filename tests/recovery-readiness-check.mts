@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-const source=['memory-maintenance.js','handoff-title.js','content-script.js'].map(name=>readFileSync(`extension/${name}`,'utf8')).join('\n');
+const source=['memory-maintenance.js','handoff-title.js','completion-state.js','content-script.js'].map(name=>readFileSync(`extension/${name}`,'utf8')).join('\n');
 type Mode='delayed'|'timeout'|'manual-edit'|'generation-resumed'|'missing-stop'|'selector-miss'|'assistant-idle';
 type Message=Record<string,any>;
 const originalDraft='Owner draft\n  exact whitespace';

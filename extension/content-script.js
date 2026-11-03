@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.7';
+  const SCRIPT_VERSION = '1.7.9';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -163,16 +163,11 @@
     const roleNode=turn.matches?.('[data-message-author-role="assistant"]')?turn:
       turn.querySelector('[data-message-author-role="assistant"]')||turn;
     const rendered=roleNode.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
-    // A native plain answer is one text-only paragraph, possibly inside the
-    // known Markdown containers. An element denylist misses Markdown headings,
-    // strikethrough and future rich nodes whose text happens to be the marker.
-    if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
-    let paragraph=rendered;
-    while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&
-        paragraph.children.length===1)paragraph=paragraph.firstElementChild;
-    if(paragraph.tagName!=='P'||paragraph.children.length||
-        paragraph.childNodes.length!==1||paragraph.firstChild.nodeType!==3||
-        paragraph.firstChild.textContent!=='GOAL_COMPLETE')return false;
+    const unit=roleNode.closest?.('[data-chatgpt-search-unit-key$=":assistant"]')||
+      (roleNode.matches?.('[data-chatgpt-search-unit-key$=":assistant"]')?roleNode:null);
+    const ids=new Set((unit?.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
+    const sourceMessageId=ids.size===1?Array.from(ids)[0]:'';
+    if(!plainGoalMarkerDOM(rendered,sourceMessageId))return false;
     const semantic=roleNode.cloneNode(true);
     // Fallback turns expose the speaker label as a screen reader heading,
     // outside the answer itself. It is interface text in every locale.
@@ -525,16 +520,31 @@
     const editor = composer();
     const root = editor?.closest('form') || editor?.closest('[data-composer-body]');
     const trigger = root && Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(isElementVisible);
-    return {trigger, value:trigger?.getAttribute('data-selected-reasoning-effort') || ''};
+    const value=trigger?.getAttribute('data-selected-reasoning-effort') || '';
+    return {trigger,value};
   }
 
-  async function ensureSavedReasoning(operationId, expected) {
-    if (typeof expected !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(expected)) throw new Error('Исходный режим рассуждения не сохранён; передача остановлена');
+  async function reasoningMode() {
+    const url=location.href,editor=composer(),before=reasoningEffort();
+    const result=await runtimeMessage({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'inspect-mode',url}});
+    const after=reasoningEffort();
+    if(!result?.ok||location.href!==url||composer()!==editor||before.trigger!==after.trigger||
+        before.value!==after.value||result.effort!==after.value||typeof result.model!=='string')
+      throw Error('Нативный режим модели изменился или недоступен');
+    return {...after,model:result.model};
+  }
+
+  async function ensureSavedReasoning(operationId, expected, expectedModel) {
+    if (typeof expected !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(expected) ||
+        typeof expectedModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(expectedModel)) throw new Error('Исходный режим рассуждения и модель не сохранены; передача остановлена');
     const url = location.href;
-    const first = reasoningEffort();
-    if (!first.trigger) throw new Error('Не найден переключатель уровня рассуждения');
-    const previous = first.value;
-    if (previous !== expected) {
+    const first = await reasoningMode();
+    if (!first.trigger || !first.model) throw new Error('Не найден переключатель уровня рассуждения и модели');
+    const previous = first.value,previousModel=first.model;
+    let current=first;
+    const matches=()=>current.value===expected&&current.model===expectedModel;
+    const selection=()=>JSON.stringify([current.value,current.model]);
+    if (!matches()) {
       first.trigger.click();
       try {
         const step = async key => {
@@ -543,25 +553,28 @@
           if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
           slider.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,bubbles:true,cancelable:true}));
           await sleepUntilNextCheck();
-          if (!runtimeAvailable() || location.href !== url || !reasoningEffort().value) throw new Error('Режим рассуждения недоступен');
+          current=await reasoningMode();
+          if (!runtimeAvailable() || location.href !== url || !current.value || !current.model) throw new Error('Режим рассуждения недоступен');
         };
-        for (let i = 0; i < 16 && reasoningEffort().value !== expected; i += 1) {
-          const before = reasoningEffort().value;
+        for (let i = 0; i < 16 && !matches(); i += 1) {
+          const before = selection();
           await step('ArrowLeft');
-          if (reasoningEffort().value === before) break;
+          if (selection() === before) break;
         }
-        for (let i = 0; i < 16 && reasoningEffort().value !== expected; i += 1) {
-          const before = reasoningEffort().value;
+        for (let i = 0; i < 16 && !matches(); i += 1) {
+          const before = selection();
           await step('ArrowRight');
-          if (reasoningEffort().value === before) break;
+          if (selection() === before) break;
         }
       } finally {
         const menu = Array.from(document.querySelectorAll('[role="menu"]')).find(isElementVisible);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));
       }
     }
-    if (location.href !== url || reasoningEffort().value !== expected) throw new Error('Исходный режим рассуждения недоступен; передача остановлена');
-    await audit('reasoning.selected',{operationId,previous,expected,selected:reasoningEffort().value},true);
+    current=await reasoningMode();
+    if (location.href !== url || !matches()) throw new Error('Исходный режим рассуждения недоступен; передача остановлена');
+    const selected=current;
+    await audit('reasoning.selected',{operationId,previous,previousModel,expected,expectedModel,selected:selected.value,selectedModel:selected.model},true);
   }
 
   async function retryAfterError(error, attempt, path, promptKey, state, requestId) {
@@ -612,7 +625,7 @@
       // The native stop can clear its banner before the composer becomes
       // writable. Share one bounded budget across stop settling, button and
       // actual editor readiness; never extend it after another failed check.
-      const readinessMs=recoveryStopped||recoveryVerifiedIdle?60000:10000;
+      const readinessMs=60000;
       const deadline = Date.now() + readinessMs;
       await readiness('generation-idle',{timeoutMs:readinessMs,deadlineAt:deadline,recoveryStopped,recoveryVerifiedIdle});
       while (isGenerating()) {
@@ -787,9 +800,16 @@
     if(startedAt-intent.at>10000){manualSendIntent=null;return;}
     if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
     manualSendIntent=null;
-    if(globalThis.__chatgptNotifierRequestStartedAt===startedAt&&
-        (globalThis.__chatgptNotifierRequestId||null)===(requestId||null))retryStates.delete(location.pathname);
-    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
+    const path=location.pathname;
+    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{
+      if(!result?.ok)return;
+      // The worker owns receipt validation. A rejected or delayed ACK must not
+      // unlock this page's durable block or discard a newer local retry state.
+      if(location.pathname===path&&ChatGPTHandoffTitle.chatUrl(location.href)===intent.url&&
+          globalThis.__chatgptNotifierRequestStartedAt===startedAt&&
+          (globalThis.__chatgptNotifierRequestId||null)===(requestId||null))retryStates.delete(path);
+      statusIndicator?.accept(result);
+    });
   }
 
   // Reset the indicator only after a trusted send intent produces a request.
@@ -932,7 +952,7 @@
       }
       await updateHandoff('preparing', { targetUrl: location.href });
       verifyPreparation();
-      await ensureSavedReasoning(record.id, record.reasoningEffort);
+      await ensureSavedReasoning(record.id, record.reasoningEffort, record.reasoningModel);
       verifyPreparation();
       if (record.asFile) {
         const input = Array.from(pageRoot().querySelectorAll('input[type="file"]')).find((node) => !node.accept || /text|\.txt/.test(node.accept));
@@ -988,7 +1008,7 @@
       rememberCompletionSendIntent();
       clicked = true;
       manualSendIntent=null;
-      const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,expectedEffort:record.reasoningEffort,fileName:record.asFile?record.fileName:null});
+      const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,expectedEffort:record.reasoningEffort,expectedModel:record.reasoningModel,fileName:record.asFile?record.fileName:null});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка истории не подтверждена');
       void audit('handoff.clicked',{operationId:record.id,sourceUrl:record.sourceUrl,targetUrl:location.href});
@@ -1041,14 +1061,14 @@
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
     const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там два последних сообщения пользователя и два ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
-    const sourceEffort = reasoningEffort().value;
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sourceEffort)) throw new Error('Не удалось сохранить исходный режим рассуждения');
+    const sourceReasoning = await reasoningMode(),sourceEffort=sourceReasoning.value,sourceModel=sourceReasoning.model;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sourceEffort) || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(sourceModel)) throw new Error('Не удалось сохранить исходный режим рассуждения');
     const sourceEditor = composer();
     const draft = sourceEditor ? rawEditorText(sourceEditor) : '';
     if (sourceEditor && composerHasAttachments(sourceEditor)) throw new Error('В исходном чате есть пользовательское вложение; переход отменён');
     const record = {
       id: crypto.randomUUID(), createdAt: Date.now(), sourceUrl, sourceTitle:document.title, text, prompt, asFile, fileName,
-      draft, reasoningEffort:sourceEffort,
+      draft, reasoningEffort:sourceEffort, reasoningModel:sourceModel,
       lastUserText: info.messages.filter((item) => item.role === 'user').at(-1)?.text || ''
     };
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_BEGIN', record });
@@ -1058,7 +1078,8 @@
     try {
       button = alert.querySelector('button');
       if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
-      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || reasoningEffort().value !== sourceEffort ||
+      const liveMode=await reasoningMode();
+      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || (liveMode.value !== sourceEffort || liveMode.model !== sourceModel) ||
           sourceEditor && (rawEditorText(sourceEditor) !== draft || composerHasAttachments(sourceEditor))) {
         throw new Error('Исходный чат или черновик изменились; переход отменён');
       }
@@ -1496,10 +1517,31 @@
     if(runtimeAvailable()&&result?.changed)statusIndicator?.accept(result);
   }
 
+  async function reconcileFailedCompletionLoading() {
+    const path=location.pathname,id=globalThis.__chatgptNotifierAttemptId,requestId=globalThis.__chatgptNotifierRequestId||null;
+    for(let check=0;check<8;check++) {
+      if(!runtimeAvailable()||path!==location.pathname||id!==globalThis.__chatgptNotifierAttemptId||requestId!==(globalThis.__chatgptNotifierRequestId||null))return;
+      const result=await runtimeMessage({type:'CHATGPT_RECONCILE_FAILED_COMPLETION',url:location.href});
+      if(!runtimeAvailable()||path!==location.pathname||id!==globalThis.__chatgptNotifierAttemptId||requestId!==(globalThis.__chatgptNotifierRequestId||null))return;
+      if(result?.changed){
+        statusIndicator?.accept(result);
+        if(completionAttempt?.id===id&&completionAttempt.requestId===requestId){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;}
+        return;
+      }
+      if(!result?.pending)return;
+      await sleepUntilNextCheck();
+    }
+  }
+
   async function restoreCompletionCheckpoint() {
     const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
     const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
     if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||initial!==globalThis.__chatgptNotifierAttemptId||initialRequestId!==globalThis.__chatgptNotifierRequestId)return;
+    if(result?.rollback?.changed){
+      statusIndicator?.accept(result.rollback);
+      if(completionAttempt){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;}
+      return true;
+    }
     if(result?.pending)return 'pending';
     const record=result?.ok&&result.record;
     if(!record||record.url!==(ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/')||record.state!=='active'||typeof record.baselineKey!=='string'||
@@ -1602,7 +1644,7 @@
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&currentRequest){deferredObservedStart=0;deferredTaskObserver?.requestStarted(message.startedAt);armForCurrentPrompt();}
     if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){void inlineGoal?.refresh();scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
-    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest)armForCurrentPrompt();
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest){armForCurrentPrompt();void reconcileFailedCompletionLoading().catch(()=>{});}
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }

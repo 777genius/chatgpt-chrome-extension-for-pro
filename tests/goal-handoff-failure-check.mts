@@ -56,7 +56,7 @@ const handler=(new Function('chrome','ChatGPTHandoffTitle','goalController','app
 )) as (message:Record<string,any>,tabId:number)=>Promise<any>;
 const sourceUrl='https://chatgpt.com/c/goal-handoff-crash';
 const marker=(tab:number)=>`chatgpt-handoff:${tab}:source:${sourceUrl}`;
-const record=(id:string)=>({reasoningEffort:'max',id,sourceUrl,sourceTitle:'Goal fixture',text:'handoff text',prompt:'handoff prompt',asFile:false});
+const record=(id:string)=>({reasoningEffort:'max',reasoningModel:'gpt-6-thinking',id,sourceUrl,sourceTitle:'Goal fixture',text:'handoff text',prompt:'handoff prompt',asFile:false});
 
 await assert.rejects(()=>handler({type:'CHATGPT_HANDOFF_BEGIN',record:record('first')},7),
   /Original Goal transition refused/);

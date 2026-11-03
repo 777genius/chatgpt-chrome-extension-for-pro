@@ -206,6 +206,7 @@ function appendJournal(event, tab = {}) {
     const active = { ...meta.active };
     const retrySendClaims = { ...meta.retrySendClaims };
     const retryConsumedOperations = { ...meta.retryConsumedOperations };
+    const retryReleasedOperations = { ...meta.retryReleasedOperations };
     const retryPreparingByChat = { ...meta.retryPreparingByChat };
     const handoffSourceClaims = { ...meta.handoffSourceClaims };
     const requests = { ...meta.requests };
@@ -213,7 +214,7 @@ function appendJournal(event, tab = {}) {
     const savedDraft=meta.retryDraftByChat[retryDraftUrl(sourceUrl)];
     const retrySource=retryDraftUrl(sourceUrl);
     const superseded=retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt);
-    const staleDraftSave=event.kind==='draft.saved'&&superseded;
+    const staleDraftSave=event.kind==='draft.saved'&&(superseded||Boolean(operationId&&Object.hasOwn(retryReleasedOperations,operationId)));
     const owns=claim=>claim?.operationId===operationId&&claim.tabId===tabId;
     const duplicate=()=>Object.assign(new Error('Автоповтор этого запроса уже запускался в другой вкладке или ранее'),{journalPolicy:true,code:'RETRY_DUPLICATE'});
     function reserveRetry() {
@@ -221,7 +222,7 @@ function appendJournal(event, tab = {}) {
       // send. Real retry.planned carries this binding before any editor effect.
       if(!retrySource||!operationId||typeof event.promptKey!=='string'||!event.promptKey)return;
       if(retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt))throw duplicate();
-      if(Object.hasOwn(retryConsumedOperations,operationId))throw duplicate();
+      if(Object.hasOwn(retryConsumedOperations,operationId)||Object.hasOwn(retryReleasedOperations,operationId))throw duplicate();
       if(meta.retryDraftClaims?.[operationId])return;
       const key=JSON.stringify([retrySource,event.promptKey]);
       const claim=retrySendClaims[key],preparing=retryPreparingByChat[retrySource];
@@ -321,9 +322,13 @@ function appendJournal(event, tab = {}) {
       delete retryPreparingByChat[retrySource];
     }
     if(event.kind==='retry.preparation_superseded'&&preparation&&!retryAttemptAtOrAfter(preparation.attemptId,event.startedAt)) {
+      retryReleasedOperations[preparation.operationId]=sequence;
       if(retrySendClaims[preparation.claimKey]?.phase==='reserved')delete retrySendClaims[preparation.claimKey];
       delete retryPreparingByChat[retrySource];
     }
+    if(savedDraft?.operationId&&(event.kind==='retry.manual_reset'||
+        event.kind==='retry.preparation_superseded'&&!retryAttemptAtOrAfter(savedDraft.attemptId,event.startedAt)))
+      retryReleasedOperations[savedDraft.operationId]=sequence;
     if(event.kind==='retry.preparation_superseded') {
       // A confirmed newer manual request retires the old retry's chat slot,
       // while its consumed operation and failed-turn claim remain immutable.
@@ -333,7 +338,10 @@ function appendJournal(event, tab = {}) {
           (preparation?.operationId===entry?.operationId?preparation.attemptId:'');
         if(entry?.kind==='retry.send_intent'&&
             (entry.chatUrl||entry.sourceUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===retrySource&&
-            retryAttemptBefore(attempt,event.startedAt))delete active[owner];
+            retryAttemptBefore(attempt,event.startedAt)) {
+          if(entry.operationId)retryReleasedOperations[entry.operationId]=sequence;
+          delete active[owner];
+        }
       }
     }
     const currentSend=active[tabId];
@@ -360,9 +368,9 @@ function appendJournal(event, tab = {}) {
       sourceUrl:requestSource || sourceUrl, sourceChatId:journalChatId(requestSource || sourceUrl), targetUrl, targetChatId: journalChatId(targetUrl),
       observedTabUrl: tab.url || '', observedChatId: journalChatId(tab.url) };
     if (event.kind === 'tab.closed') delete tabs[tabId];
-    const retryDraftByChat=reduceRetryDraft(meta.retryDraftByChat,entry,meta.retryByChat?.[journalChatId(entry.sourceUrl)]?.manualStartedAt);
+    const retryDraftByChat=staleDraftSave?meta.retryDraftByChat:reduceRetryDraft(meta.retryDraftByChat,entry,meta.retryByChat?.[journalChatId(entry.sourceUrl)]?.manualStartedAt);
     await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
-      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryPreparingByChat, handoffSourceClaims, requests, tabs, lastAt: entry.recordedAt,
+      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, requests, tabs, lastAt: entry.recordedAt,
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims } });
     journalFailure = '';

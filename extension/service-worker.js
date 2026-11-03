@@ -14,7 +14,15 @@ importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
 importScripts('goal-policy.js');
 importScripts('goal-store.js');
-const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});
+const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal,
+  beforeDispatch:async goal=>{
+    const tabId=goal.operation?.tabId;
+    if(!Number.isInteger(tabId)||!goal.handoffId)return;
+    const key=handoffKey(tabId),handoff=(await chrome.storage.local.get(key))[key];
+    if(handoff?.id===goal.handoffId&&handoff.stage==='sent'&&
+        ChatGPTHandoffTitle.chatUrl(handoff.targetUrl)===goal.url)
+      await renameSavedHandoff(tabId,handoff.id,{goalOperationId:goal.operation.id});
+  }});
 
 initializeJournal('worker-start').catch(console.error);
 
@@ -39,6 +47,40 @@ async function latestRequestReceipt(tabId) {
   const saved=await readRequestReceipt(tabId);
   if(saved&&!manualRequestReceiptsByTab.has(tabId))manualRequestReceiptsByTab.set(tabId,saved);
   return manualRequestReceiptsByTab.get(tabId)||null;
+}
+
+async function reconcileFailedCompletionLoading(tabId,url) {
+  let record=await completionCheckpointRead(tabId);
+  const view=await readChatStatus(url),request=await latestRequestReceipt(tabId);
+  const matches=(current,status,known)=>current?.state==='active'&&current.url===url&&current.startedAt===record?.startedAt&&
+    current.requestId===record?.requestId&&current.baselineKey===record?.baselineKey&&current.promptKey===record?.promptKey&&
+    known?.startedAt===record?.startedAt&&known.requestId===record?.requestId&&
+    (!known.url||ChatGPTHandoffTitle.chatUrl(known.url)===url)&&
+    typeof known.receipt?.epoch==='string'&&Number.isSafeInteger(known.receipt?.order)&&known.receipt.order>0&&
+    status.status?.kind==='loading'&&status.status.eventAt===record?.startedAt&&
+    status.status.receipt?.epoch===known.receipt?.epoch&&status.status.receipt?.order===known.receipt?.order;
+  if(!record?.baselineKey||!record.promptKey||!matches(record,view,request)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {changed:false};
+  const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,false,record.promptKey]});
+  const native=result?.result;
+  // Already-stuck pre-upgrade requests lack the marker. Read only a bounded
+  // journal tail after positive native rollback proof, never the whole history.
+  if(!record.requestFailedAt&&failedAttemptRollbackEvidence({...record,requestFailedAt:record.startedAt},native)) {
+    const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META],through=meta?.sequence||0;
+    const keys=Array.from({length:Math.min(300,through)},(_,i)=>`${JOURNAL_PREFIX}${String(through-i).padStart(12,'0')}`);
+    const rows=await chrome.storage.local.get(keys);
+    const failure=Object.values(rows).find(row=>row?.kind==='request.failed'&&row.tabId===tabId&&row.requestId===record.requestId&&
+      ChatGPTHandoffTitle.chatUrl(row.sourceUrl)===url&&Number.isFinite(row.recordedAt)&&row.recordedAt>=record.startedAt);
+    if(failure&&await completionCheckpointFailure(tabId,{startedAt:record.startedAt,requestId:record.requestId,failedAt:failure.recordedAt}))record=await completionCheckpointRead(tabId);
+  }
+  if(!failedAttemptRollbackEvidence(record,native))return {changed:false,pending:Boolean(record?.requestFailedAt)};
+  const current=await completionCheckpointRead(tabId),status=await readChatStatus(url),known=await latestRequestReceipt(tabId);
+  if(status.revision!==view.revision||!matches(current,status,known)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {changed:false};
+  if(!await completionCheckpointFinish(tabId,record.startedAt,'failed',record.requestId))return {changed:false};
+  const stopped=await stopChatLoading(url,record.startedAt,statusReceipt(),request.receipt);
+  await appendJournal({kind:'completion.failed_rollback',sourceUrl:url,requestId:record.requestId,startedAt:record.startedAt,
+    promptKey:record.promptKey,baselineKey:record.baselineKey},{id:tabId});
+  void broadcastChatStatus(stopped).catch(()=>{});
+  return {changed:true,...stopped};
 }
 
 function normalizePathname(url) {
@@ -277,7 +319,8 @@ chrome.webRequest.onCompleted.addListener((details) => {
 chrome.webRequest.onErrorOccurred?.addListener((details) => {
   if (!isAnswerStreamRequest(details))return;
   void journalRequest('request.failed',details).catch(()=>{});
-  void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(known=>{
+  void readRequestReceipt(details.tabId,{requestId:details.requestId}).then(async known=>{
+    if(known)await completionCheckpointFailure(details.tabId,{startedAt:known.startedAt,requestId:known.requestId,failedAt:details.timeStamp});
     if(known)return signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_FAILED',startedAt:known.startedAt,requestId:known.requestId});
   }).catch(()=>{});
 }, CHATGPT_REQUEST_FILTER);
@@ -314,7 +357,7 @@ async function handleHandoffMessage(message, tabId) {
     if (message.type === 'CHATGPT_HANDOFF_BEGIN') {
       if(['sending','awaiting-confirmation'].includes(current?.stage))throw new Error('Предыдущая передача ещё ожидает подтверждения');
       let record = message.record;
-      if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string' || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort)) throw new Error('Invalid handoff');
+      if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string' || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort) || typeof record.reasoningModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(record.reasoningModel)) throw new Error('Invalid handoff');
       const marker = `${key}:source:${record.sourceUrl}`;
       if ((await chrome.storage.local.get(marker))[marker]) return { ok: false, error: 'Передача этого чата уже запускалась' };
       const lineageKey=`chatgpt-handoff-title:${ChatGPTHandoffTitle.chatUrl(record.sourceUrl)}`;
@@ -326,7 +369,7 @@ async function handleHandoffMessage(message, tabId) {
       // strand the Goal waiting on a transfer that never started.
       await appendJournal({kind:'handoff.navigating', operationId:record.id, sourceUrl:record.sourceUrl,
         text:record.text, prompt:record.prompt, asFile:record.asFile, fileName:record.fileName,
-        draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,reasoningEffort:record.reasoningEffort,naming}, {id:tabId});
+        draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,reasoningEffort:record.reasoningEffort,reasoningModel:record.reasoningModel,naming}, {id:tabId});
       // Save the full text BEFORE navigating away from the source page.
       await chrome.storage.local.set({ [key]: { ...record, stage: 'navigating' }, [marker]: record.id });
       try {
@@ -620,24 +663,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     let retryBinding=null;
     (async () => {
       const options = message.options;
-      if (!['inspect','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
+      if (!['inspect','inspect-mode','send'].includes(options?.action)) throw new Error('Неизвестное действие редактора');
       if (options.action === 'send') {
         const meta = (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
         const active = meta?.active?.[sender.tab.id];
         if (!active || active.operationId !== options.operationId || Date.now() - active.at > 15000) throw new Error('Нет сохранённого разрешения на эту автоматическую отправку');
         if (active.kind === 'retry.send_intent') {
-          if (options.text !== 'доделай е2е' || options.fileName || options.requireMax || options.expectedEffort !== undefined) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
+          if (options.text !== 'доделай е2е' || options.fileName || options.requireMax || options.expectedEffort !== undefined || options.expectedModel !== undefined) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
           if(!active.sourceUrl||active.sourceUrl!==retryDraftUrl(options.url)||typeof active.promptKey!=='string'||!active.promptKey)throw new Error('Исходный запрос автоповтора не подтверждён');
           retryBinding={sourceUrl:active.sourceUrl,promptKey:active.promptKey};
         } else if (active.kind === 'goal.send_intent') {
-          if(options.requireMax||options.expectedEffort!==undefined||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
+          if(options.requireMax||options.expectedEffort!==undefined||options.expectedModel!==undefined||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
           const grant=await goalController.authorize({url:options.url,tabId:sender.tab.id,
             id:active.goalId,operationId:options.operationId,text:options.text});
           if(!grant?.ok)throw new Error('Goal более не разрешает отправку');
         } else if (active.kind === 'handoff.sending') {
           const key = handoffKey(sender.tab.id);
           const record = (await chrome.storage.local.get(key))[key];
-          if (!record || record.stage !== 'sending' || record.id !== options.operationId || record.prompt !== options.text || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort) || options.expectedEffort !== record.reasoningEffort || options.requireMax ||
+          if (!record || record.stage !== 'sending' || record.id !== options.operationId || record.prompt !== options.text || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort) || options.expectedEffort !== record.reasoningEffort || typeof record.reasoningModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(record.reasoningModel) || options.expectedModel !== record.reasoningModel || options.requireMax ||
               (options.fileName || null) !== (record.asFile ? record.fileName : null)) throw new Error('Текст не совпадает с сохранённой передачей');
         } else throw new Error('Отправка пользовательского черновика запрещена');
         await appendJournal({kind:'send.authorized',operationId:options.operationId,text:options.text,sourceUrl:options.url},sender.tab);
@@ -753,12 +796,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     reconcileLegacyHandoffStatus(sender.tab.id,url).then(view=>sendResponse?.({ok:true,changed:Boolean(view),...(view||{})})).catch(()=>sendResponse?.({ok:false}));
     return true;
   }
+  if(message?.type==='CHATGPT_RECONCILE_FAILED_COMPLETION') {
+    const url=messageChatUrl(message,sender);
+    if(!url){sendResponse?.({ok:false});return false;}
+    reconcileFailedCompletionLoading(sender.tab.id,url).then(value=>sendResponse?.({ok:true,...value})).catch(()=>sendResponse?.({ok:false}));
+    return true;
+  }
   if(message?.type==='CHATGPT_COMPLETION_CHECKPOINT') {
     const tabId=sender.tab?.id,url=completionCheckpointUrl(sender.tab?.url);
     if(sender.frameId>0||typeof tabId!=='number'||!url||completionCheckpointUrl(message.url)!==url){sendResponse?.({ok:false});return false;}
     (async()=>{
       if(message.action==='intent')return {ok:await completionCheckpointIntent(tabId,{url,baselineKey:message.baselineKey,at:message.at})};
       if(message.action==='update')return {ok:await completionCheckpointUpdate(tabId,{url,startedAt:message.startedAt,requestId:message.requestId,baselineKey:message.baselineKey,promptKey:message.promptKey,httpCompleted:message.httpCompleted})};
+      const rollback=await reconcileFailedCompletionLoading(tabId,url);
+      if(rollback.changed)return {ok:false,rollback};
       let record=await completionCheckpointRead(tabId);
       if(!record||record.state!=='active'||typeof record.baselineKey!=='string')return {ok:false};
       const view=await readChatStatus(url),tab=await chrome.tabs.get(tabId);

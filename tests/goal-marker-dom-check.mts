@@ -14,6 +14,7 @@ const markerReader=source.slice(from,until);
 function matchTurn(turn:string) {
   const {document}=parseHTML(`<html><body>${turn}</body></html>`);
   const context=createContext({document});
+  runInContext(readFileSync('extension/completion-state.js','utf8'),context);
   runInContext(markerReader,context);
   return runInContext('assistantGoalMarker(document.querySelector("article"))',context)===true;
 }
@@ -69,5 +70,20 @@ assert.equal(fallback('<p><strong>GOAL_COMPLETE</strong></p>'),false,'fallback s
 assert.equal(fallback('<h1>GOAL_COMPLETE</h1>'),false,'fallback Markdown heading is not plain');
 assert.equal(fallback('<p><del>GOAL_COMPLETE</del></p>'),false,'fallback strikethrough is not plain');
 assert.equal(fallback('<p>GOAL_COMPLETE</p>','',''),false,'visible assistant headings are still content');
+
+const dil=JSON.parse(readFileSync('tests/fixtures/goal-marker-dil.json','utf8')) as {messageId:string;html:string};
+const dilTurn=(html:string,ids=dil.messageId)=>`<article data-chatgpt-search-unit-key="native-turn:1:assistant" data-chatgpt-search-message-ids="${ids}"><h4 class="sr-only" data-conversation-role="assistant">Assistant</h4><div data-markdown-text-style="assistant-message">${html}</div></article>`;
+assert.equal(matchTurn(dilTurn(dil.html)),true,'native neutral DIL run is a plain marker');
+assert.equal(matchTurn(dilTurn(dil.html,dil.messageId+' '+dil.messageId)),true,'duplicate identical native IDs remain one identity');
+for(const html of [dil.html.replace('<p ','<h1 ').replace('</p>','</h1>'),
+ dil.html.replace('GOAL_COMPLETE','<strong>GOAL_COMPLETE</strong>'),dil.html.replace('GOAL_COMPLETE','<a href="#">GOAL_COMPLETE</a>'),
+ dil.html.replace('GOAL_COMPLETE','<code>GOAL_COMPLETE</code>'),dil.html.replace('GOAL_COMPLETE','<del>GOAL_COMPLETE</del>'),
+ dil.html.replace('GOAL_COMPLETE','GOAL_COMPLETE '),dil.html.replace('</p>','</p><p>More</p>'),
+ dil.html.replace('<span data-d-stream-run','<span style="font-weight:bold" data-d-stream-run'),
+ dil.html.replace('<span data-d-stream-run','<span hidden data-d-stream-run'),
+ dil.html.replace('<p class=','<p style="display:none" class='),dil.html.replace('<div hidden=""></div>','<div hidden="">Hidden meaning</div>'),
+ dil.html.replace('data-dil-message-id="'+dil.messageId+'"','data-dil-message-id="other"')])
+ assert.equal(matchTurn(dilTurn(html)),false,'DIL markup, hidden meaning, rich spans and extra content fail closed');
+assert.equal(matchTurn(dilTurn(dil.html,'other')),false,'DIL source requires the rendered assistant native identity');
 
 console.log('Exact Goal marker DOM, visible extra content and Copy/Share toolbar passed.');

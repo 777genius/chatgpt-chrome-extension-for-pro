@@ -75,3 +75,15 @@ On the real ChatGPT website in Chrome, an isolated test tab received one substit
 - The source Medium effort was retained. Pro availability remains covered by contract tests; no live Pro claim is made.
 - The native saved-chat menu restored the original title with `(1)`. One native rename request received HTTP 200 and the durable title status became `confirmed`.
 - Full local checks passed all 48 programs; subsequent menu-isolation hardening passed typecheck and rename regressions. The final PR head must also pass CI before merge.
+
+## Recovery coordination (1.7.9)
+
+The original Goal text, ID, deadline and continuation budget follow a confirmed handoff; the history is context, not a replacement objective. Goal delivery waits for native title preparation and rechecks its reserved operation afterwards. Background title jobs defer while a Goal is preparing or sending, so a rename modal cannot invalidate an authorized continuation. Stop/pause during the wait wins.
+
+Reasoning restoration checks the native model slug as well as effort: Pro and Thinking can both report `medium`. Missing legacy model metadata stops unclicked transfers rather than guessing.
+
+Recoverable retries have one bounded 60-second preparation deadline, retaining the four-retry limit and draft/send fences. An observed failed request whose native turn rolled back can retire its loader only with exact receipt, baseline and idle-controller evidence; an older visible answer never becomes a new success.
+
+The exact completion marker also supports the native DIL text-run paragraph after binding its source/message IDs to the completed assistant turn. Rich formatting, extra or hidden meaningful text, wrong IDs and non-marker answers remain non-exact.
+
+Final 1.7.9 real Chrome canary: a trusted Goal opt-in and real observed send received one scoped terminal-error response. The confirmed destination retained the same Goal ID, exact original objective, deadline and continuation budget. The model returned the native DIL `GOAL_COMPLETE`; Goal became `completed` with zero extra continuations. One handoff send and one rename save were recorded, with title status `confirmed` and the source title plus `(1)`. The controlled response substitution does not prove actual server-side limit exhaustion.

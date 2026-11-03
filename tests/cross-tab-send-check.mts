@@ -70,6 +70,7 @@ assert.equal((await plan(loser,'different-prompt-while-preparing','/c/shared-sou
 assert.deepEqual(storage['chatgpt-journal:meta'].retryDraftByChat,beforeDuplicate);
 await intent(winner,winnerId);
 assert.equal((await send(winner,winnerId,{expectedEffort:'max'})).ok,false,'retry cannot inject a handoff effort constraint');
+assert.equal((await send(winner,winnerId,{expectedModel:'gpt-6-pro'})).ok,false,'retry cannot inject a handoff model constraint');
 const results=await Promise.all([send(winner,winnerId),send(loser,'retry-loser')]);
 assert.equal(results.filter(result=>result.clicked).length,1,'only the reserved preparation reaches an actual click');
 assert.equal(clicks.length,1);
@@ -135,7 +136,7 @@ await runInContext('rememberRequestReceipt(13,receipt)',worker);
 assert.equal((await message(13,manual)).ok,true,'only the consumed real request receipt supersedes the old preparation');
 assert.equal((await plan(13,'after-real-send','/c/manual-fixture|new-turn')).ok,true);
 
-const handoff=(tabId:number,id:string,source=sourceUrl)=>message(tabId,{type:'CHATGPT_HANDOFF_BEGIN',record:{reasoningEffort:'max',id,sourceUrl:source,sourceTitle:'Fixture task',text:'Full synthetic handoff history',prompt:'Synthetic handoff payload'}});
+const handoff=(tabId:number,id:string,source=sourceUrl)=>message(tabId,{type:'CHATGPT_HANDOFF_BEGIN',record:{reasoningEffort:'max',reasoningModel:'gpt-6-thinking',id,sourceUrl:source,sourceTitle:'Fixture task',text:'Full synthetic handoff history',prompt:'Synthetic handoff payload'}});
 const begun=await Promise.all([handoff(7,'handoff-a'),handoff(8,'handoff-b',sourceUrl+'/')]);
 assert.equal(begun.filter(result=>result.ok).length,1,'parallel BEGIN in two tabs claims one canonical source chat');
 const handoffRecords=[storage['chatgpt-handoff:7'],storage['chatgpt-handoff:8']].filter(Boolean);

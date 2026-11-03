@@ -234,6 +234,19 @@ function controlChatComposer(options) {
     }
   }
   if (!controller) return { ok: false, reason: 'Не удалось проверить состояние редактора ChatGPT' };
+  function selectedMode() {
+    const reasoning=Array.from(composer.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible);
+    const effort=reasoning?.getAttribute('data-selected-reasoning-effort')||null;
+    const key=reasoning&&Object.keys(reasoning).find(name=>name.startsWith('__reactFiber$')),models=new Set();
+    for(let fiber=key&&reasoning[key],i=0;fiber&&i<24;i++,fiber=fiber.return){
+      const candidate=fiber.memoizedProps?.selectedLabelCandidate;
+      if(candidate?.reasoningEffort===effort&&typeof candidate.model==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(candidate.model))models.add(candidate.model);
+    }
+    return {effort,model:models.size===1?Array.from(models)[0]:null};
+  }
+  if(options.action==='inspect-mode') {
+    const mode=selectedMode();return {ok:Boolean(mode.effort&&mode.model),...mode};
+  }
   function visibleText() {
     if (editor.value !== undefined) return editor.value;
     if (!editor.querySelector('p, div, br, li')) return editor.textContent || '';
@@ -286,11 +299,15 @@ function controlChatComposer(options) {
     : prompt === options.text || (plainMatches && literalSerializationMatches()));
   const matches = plainMatches && promptMatches;
   const ready = controller.submitReady === true && controller.pendingSubmit == null;
-  const effort = Array.from(composer.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
-  const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
+  const {effort,model}=selectedMode();
+  const savedMode=options.expectedEffort!==undefined||options.expectedModel!==undefined;
+  const modeMatches=!savedMode || typeof options.expectedEffort==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.expectedEffort)&&
+    typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
+    effort===options.expectedEffort&&model===options.expectedModel;
+  const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
   if (options.action === 'inspect' && !options.fileName) return inspection;
-  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || (options.expectedEffort !== undefined && (typeof options.expectedEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.expectedEffort) || effort !== options.expectedEffort)))) {
-    return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort};
+  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || !modeMatches)) {
+    return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort,model};
   }
   const attachments = composer.querySelector('[data-composer-attachments]');
   if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};

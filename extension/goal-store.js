@@ -3,7 +3,7 @@
 // Chrome worker owns the only durable Goal coordinator. No page script may
 // authorize itself to click; the journal's consumed send grant is authoritative.
 (function(root) {
-  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID()}) {
+  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),beforeDispatch=async record=>{}}) {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     let writes=Promise.resolve();
@@ -198,6 +198,10 @@
       if(!record?.operation)return;
       const op=record.operation;
       try {
+        // Native title dialogs must finish before a continuation touches the composer.
+        await beforeDispatch(record);
+        // A pause/stop/new operation during the native dialog wins.
+        if(!(await check({url:record.url,tabId:op.tabId,id:record.id,operationId:op.id})).ok)return;
         const tab=await tabs.get(op.tabId);
         if(canonical(tab.url)!==record.url)throw Error('Вкладка перешла в другой чат');
         const result=await tabs.sendMessage(op.tabId,{type:'CHATGPT_GOAL_DISPATCH',
@@ -459,7 +463,7 @@
       if(!target)return {ok:false};
       return serialize(async()=>{
         const record=await read(target);
-        if(record&&Number.isFinite(startedAt)&&record.startedAt>startedAt)return {ok:false};
+        if(record&&Number.isFinite(startedAt)&&Math.max(record.startedAt||0,record.manualStartedAt||0)>startedAt)return {ok:false};
         if(record&&Number.isFinite(startedAt)&&record.manualStart?.startedAt===startedAt)return {ok:false};
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))
           return {ok:false};

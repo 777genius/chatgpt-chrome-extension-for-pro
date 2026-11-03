@@ -125,8 +125,8 @@ function probeCheck(){
  assert.equal(runInContext('inspectChatError(1,true).action',ctx),'unknown','unrelated status must not authorize a retry');
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
-type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading';
-async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{source?:string;destination?:string;available?:string[]}={}){
+type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading'|'legacy-model'|'source-model-change';
+async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
@@ -138,7 +138,8 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  const storage:Record<string,any>={};
  const clock=testClock();
  const sourceEffort=effortOptions.source||'max',destinationEffort=effortOptions.destination||'max';
- const availableEfforts=effortOptions.available||['medium','max','pro'];
+ const sourceModel=effortOptions.sourceModel||'gpt-6-thinking',destinationModel=effortOptions.destinationModel||'gpt-6-thinking';
+ const availableModes=effortOptions.availableModes||(effortOptions.available||['medium','max','pro']).map(effort=>({effort,model:'gpt-6-thinking'}));
  let effortOpens=0;
  const rich=interference.startsWith('rich-');
  const richVisible='Continue PR #123';
@@ -168,7 +169,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     return {ok:true,text:await runInContext('goalController.context(goalContextUrl)',context)};
    }
    if(m.type==='CHATGPT_WAIT'){await new Promise<void>(resolve=>clock.setTimeout(resolve,m.delayMs));return {ok:true};}
-   if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='inspect'&&m.options.fileName&&document.querySelector('[data-composer-attachments]')?.textContent?.includes('owner-private.txt'))return {ok:false,reason:'Owner attachment alongside history'};if(m.options.action==='send'){assert.equal(m.options.expectedEffort,stored.reasoningEffort);assert.equal(effort.getAttribute('data-selected-reasoning-effort'),stored.reasoningEffort);const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
+   if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='inspect-mode')return {ok:true,effort:effort.getAttribute('data-selected-reasoning-effort'),model:nativeMode.model};if(m.options.action==='inspect'&&m.options.fileName&&document.querySelector('[data-composer-attachments]')?.textContent?.includes('owner-private.txt'))return {ok:false,reason:'Owner attachment alongside history'};if(m.options.action==='send'){assert.equal(m.options.expectedEffort,stored.reasoningEffort);assert.equal(m.options.expectedModel,stored.reasoningModel);assert.equal(nativeMode.model,stored.reasoningModel);assert.equal(effort.getAttribute('data-selected-reasoning-effort'),stored.reasoningEffort);const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
    if(m.type==='CHATGPT_LOG_EVENT'){
     logs.push(m.event);
     if(m.event.kind==='reasoning.selected'){
@@ -193,6 +194,8 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     const result=await runInContext('handleHandoffMessage(handoffMessage,7)',context);
     if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='source-edit')activeEditor().textContent=ownerEdit;
     if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='source-mode-change')effort.setAttribute('data-selected-reasoning-effort','pro');
+    if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='source-model-change')nativeMode.model='gpt-6-pro';
+    if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='legacy-model'){delete result.record.reasoningModel;delete stored.reasoningModel;}
     if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='legacy-effort'){delete result.record.reasoningEffort;delete stored.reasoningEffort;}
     return result;
    }
@@ -232,24 +235,27 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    assert.ok(stored.text.includes('Earlier answer'),'source copy must be durable');
    loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';
    document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent=interference==='whitespace'?'  \n  ':rich?richVisible:'Last request';
-   effort.setAttribute('data-selected-reasoning-effort',destinationEffort);
+   setMode(destinationEffort,destinationModel);
    if(interference==='rich-native-mismatch')richNative='Continue PR [#123](https://example.test/pull/456)';
  });
- const effort=document.createElement('button');effort.type='button';effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort',sourceEffort);document.querySelector('[data-app-shell-active-page="true"] form')!.append(effort);
+ const nativeMode={model:sourceModel,reasoningEffort:sourceEffort};
+ const setMode=(value:string,model:string)=>{effort.setAttribute('data-selected-reasoning-effort',value);nativeMode.model=model;nativeMode.reasoningEffort=value;};
+ const effort=document.createElement('button');effort.type='button';effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort',sourceEffort);document.querySelector('[data-app-shell-active-page="true"] form')!.append(effort);setMode(sourceEffort,sourceModel);
  effort.addEventListener('click',()=>{
    effortOpens++;
    const menu=document.createElement('div');menu.setAttribute('role','menu');
    const slider=document.createElement('div');slider.setAttribute('data-reasoning-slider','true');menu.append(slider);document.body.append(menu);
    slider.addEventListener('keydown',(event:any)=>{
-     const index=availableEfforts.indexOf(effort.getAttribute('data-selected-reasoning-effort')!);
-     const next=Math.max(0,Math.min(availableEfforts.length-1,index+(event.key==='ArrowLeft'?-1:1)));
-     effort.setAttribute('data-selected-reasoning-effort',availableEfforts[next]!);
+     const current=nativeMode;
+     const index=availableModes.findIndex(m=>m.effort===current.reasoningEffort&&m.model===current.model);
+     const next=Math.max(0,Math.min(availableModes.length-1,index+(event.key==='ArrowLeft'?-1:1)));
+     setMode(availableModes[next]!.effort,availableModes[next]!.model);
    });
    menu.addEventListener('keydown',(event:any)=>{if(event.key==='Escape')menu.remove();});
  });
  document.querySelector('main')!.append(alert);
  if(interference&&interference!=='rich-seed'&&interference!=='history-loading'){
-   const sourceBlocked=interference==='source-attachment'||interference==='source-edit'||interference==='source-mode-change';
+   const sourceBlocked=interference==='source-attachment'||interference==='source-edit'||interference==='source-mode-change'||interference==='source-model-change';
    await clock.until(()=>sourceBlocked?notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'):stored?.stage==='failed',`handoff preserves ${interference}`);
    assert.equal(sends.length,0,'manual interaction must cancel automatic history sending');
    if(sourceBlocked)assert.equal(loc.href,originalURL,'source draft/attachment must prevent native new-chat navigation');
@@ -261,7 +267,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    if(interference==='destination-attachment-during-upload')assert.equal(activeEditor().textContent,'Last request','unexpected attachment must stop before replacing the original composer text');
    if(interference!=='upload-edit'&&interference!=='destination-attachment-during-upload'&&!rich)assert.equal((document.querySelector('input') as any).files?.length||0,0,'private history must not attach after conflicting user interaction or navigation');
    assert.ok(notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'),'stopped handoff explains retained recovery copy');
-   if(interference==='source-edit'||interference==='source-mode-change'){
+   if(interference==='source-edit'||interference==='source-mode-change'||interference==='source-model-change'){
      assert.equal(stored.stage,'failed','pre-navigation cancellation must persist a terminal handoff state');
      loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';activeEditor().textContent='';
      (context as any).__chatgptNotifierDispose();runInContext(source,context);await clock.advance(1000);
@@ -291,9 +297,10 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  }
  assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,1,'only the source response error may set terminal error status');
  assert.equal(notices.filter(n=>n.type==='CHATGPT_OPERATION_WARNING').length,ambiguous||lateTarget?1:0,'uncertain transfer notifies once as operational metadata, never as a failed response');
+ assert.equal(stored.reasoningModel,sourceModel,'the exact source model group is durably preserved');
  assert.equal(stored.reasoningEffort,sourceEffort,'the exact source mode is durably preserved');
  assert.equal(effort.getAttribute('data-selected-reasoning-effort'),sourceEffort,'destination mode matches the source before clicking');
- assert.equal(effortOpens,sourceEffort===destinationEffort?0:1,'matching destination mode never opens or changes its selector');
+ assert.equal(effortOpens,sourceEffort===destinationEffort&&sourceModel===destinationModel?0:1,'matching destination mode never opens or changes its selector');
  assert.equal(sends.length,1,'handoff sends once');assert.notEqual(sends[0],'доделай е2е');
  if(restoredUnknown){
    assert.equal(begins,1,'a restored failed prompt with exhausted retry budget starts one existing protected handoff');
@@ -341,3 +348,10 @@ await transferCheck(false,false,false,false,false,false,'legacy-effort');
 
 await transferCheck(false,false,false,false,false,false,'history-loading');
 await transferCheck(false,false,false,false,false,false,'',{source:'pro-tier-2',destination:'medium',available:['medium','max','pro-tier-2']});
+
+const actualPowerModes=[{effort:'medium',model:'gpt-6-thinking'},{effort:'max',model:'gpt-6-thinking'},{effort:'medium',model:'gpt-6-pro'}];
+await transferCheck(false,false,false,false,false,false,'',{source:'medium',sourceModel:'gpt-6-pro',destination:'medium',destinationModel:'gpt-6-thinking',availableModes:actualPowerModes});
+await transferCheck(false,false,false,false,false,false,'',{source:'medium',sourceModel:'gpt-6-thinking',destination:'medium',destinationModel:'gpt-6-pro',availableModes:actualPowerModes});
+await transferCheck(false,false,false,false,false,false,'unavailable-effort',{source:'medium',sourceModel:'gpt-6-pro',destination:'medium',availableModes:actualPowerModes.slice(0,2)});
+await transferCheck(false,false,false,false,false,false,'legacy-model');
+await transferCheck(false,false,false,false,false,false,'source-model-change');

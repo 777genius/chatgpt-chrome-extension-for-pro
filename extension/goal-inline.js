@@ -11,7 +11,7 @@
     let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false,loading=false;
     let busy=false,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
     const cleanups=[];
-    let observer=null,binding=null,bindTimer=null,bindGeneration=0;
+    let observer=null,binding=null,bindTimer=null,bindGeneration=0,failedBinding=null;
     const ROOT_URL='https://chatgpt.com/';
     const BIND_WINDOW=30000;
     const node=(tag,attrs={},text='')=>{
@@ -158,6 +158,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(details.isConnected)details.focus();
       }
     }
+    function bindingFailure(message) {
+      binding.stopped=true;error=message;
+      failedBinding={id:binding.id,message};
+    }
     function stopBinding() {
       bindGeneration++;
       if(bindTimer!==null)win.clearTimeout(bindTimer);
@@ -174,7 +178,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record&&policy.canonical(record.url)!==next)record=null;
         return true;
       }
-      stopBinding();record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';
+      stopBinding();record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';failedBinding=null;
       open=false;panel.hidden=true;resetFields();render();
       return true;
     }
@@ -258,8 +262,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function scheduleBind() {
       if(!binding||binding.stopped||!binding.persisted||binding.inFlight||bindTimer!==null||!valid())return;
       if(Date.now()>=binding.deadline) {
-        binding.stopped=true;
-        error='Message confirmation timed out. Goal has not adopted the message. Turn Goal off and check this chat.';
+        bindingFailure('Message confirmation timed out. Goal has not adopted the message. Turn Goal off and check this chat.');
         render();return;
       }
       const token=binding.token;
@@ -275,7 +278,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
           deadline:Number(composer.intent?.eventAt??composer.eventAt)+BIND_WINDOW};
       } else binding.persisted=true;
       if(!Number.isFinite(binding.deadline)||binding.deadline<=BIND_WINDOW) {
-        binding.stopped=true;error='Goal intent has no valid confirmation time. Turn Goal off and check this chat.';render();return;
+        bindingFailure('Goal intent has no valid confirmation time. Turn Goal off and check this chat.');render();return;
       }
       scheduleBind();
     }
@@ -307,11 +310,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(!result.record||result.composer?.phase!=='bound'||result.composer.id!==id)throw Error('Goal message confirmation was not acknowledged');
         apply(result);
         if(!record||composer?.phase!=='bound')throw Error('Goal message confirmation belongs to another chat');
-        stopBinding();error='';render();
+        stopBinding();error='';failedBinding=null;render();
       } catch(cause) {
         if(!contextMatches(token))return;
-        binding.inFlight=false;binding.stopped=true;
-        error='Goal: '+String(cause?.message||cause);render();
+        binding.inFlight=false;bindingFailure('Goal: '+String(cause?.message||cause));render();
       }
     }
     async function refresh() {
@@ -327,8 +329,13 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(!result?.ok)throw Error(result?.error||result?.reason||'Could not load Goal');
         if(deferAllocation(result)){render();return;}
         validateResult(result,url);
-        const keepError=!!binding?.stopped;
-        apply(result);if(!keepError)error='';resumeBinding();render();
+        const keepError=!!binding?.stopped||failedBinding&&error===failedBinding.message;
+        apply(result);
+        const adopted=failedBinding&&(!binding||binding.id===failedBinding.id)&&composer?.phase==='bound'&&
+          composer.id===failedBinding.id&&record?.id===failedBinding.id;
+        if(adopted&&error===failedBinding.message){error='';failedBinding=null;}
+        else if(!keepError)error='';
+        resumeBinding();render();
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
         loaded=false;error='Goal: '+String(cause?.message||cause);
@@ -358,7 +365,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         stopBinding();
       }
       const url=route,revision=epoch,serial=++sequence;
-      busy=true;error='';render();
+      busy=true;error='';failedBinding=null;render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action,url,...input});
         if(!accepts(url,revision,serial))return;
@@ -385,7 +392,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       stopBinding();
       binding={id,origin:url,allocated:'',token:bindGeneration,persisted:false,inFlight:false,stopped:false,deadline:eventAt+BIND_WINDOW};
       const token=binding.token;
-      busy=true;loading=false;error='';sequence++;render();
+      busy=true;loading=false;error='';failedBinding=null;sequence++;render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt});
         if(!contextMatches(token))return {ok:false};
@@ -397,7 +404,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         return {ok:true};
       } catch(cause) {
         if(contextMatches(token)) {
-          binding.stopped=true;error='Goal: '+String(cause?.message||cause);
+          bindingFailure('Goal: '+String(cause?.message||cause));
         }
         return {ok:false};
       } finally {

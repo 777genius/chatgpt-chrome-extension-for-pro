@@ -92,9 +92,15 @@ console.log('stuck-loader native latest-turn binding: passed');
   const userBody=userUnit.querySelector('.whitespace-pre-wrap')!;
   nativeUser.message='  Read [Project](https://example.invalid/path) now  \nSecond\nline';
   userBody.innerHTML='<p>  Read <span data-rich-text-generated-autolink><a href="https://example.invalid/path">Project</a><span aria-hidden="true">Link preview label<svg></svg></span></span> now  </p><p>Second<br>line</p><span hidden>Hidden rich widget</span><button>Open link</button><span class="ProseMirror-widget">Widget</span><span data-testid="attachment-chip">Private attachment label</span>';
+  Object.defineProperty(window,'getComputedStyle',{value:(node:Element)=>({
+    display:node.classList.contains('css-hidden')?'none':node.classList.contains('contents-wrapper')?'contents':'block',
+    visibility:node.classList.contains('css-invisible')?'hidden':'visible'
+  }),configurable:true});
+  userBody.insertAdjacentHTML('beforeend','<span class="css-hidden">CSS-only hidden label</span><span class="css-invisible">Invisible label</span>');
+  userBody.querySelector('a')!.parentElement!.classList.add('contents-wrapper');
   const linked=inspectCompletedTurn(attempt.url,true);
   assert.equal(linked.userText,nativeUser.message,'native Markdown retains its destination URL');
-  assert.equal(linked.userVisibleText,'  Read Project now  \nSecond\nline','sent rich link labels preserve exact whitespace and paragraph boundaries');
+  assert.equal(linked.userVisibleText,'  Read Project now  \nSecond\nline','sent rich link labels preserve display:contents text and exclude computed-hidden descendants using their mounted originals');
   userUnit.setAttribute('data-chatgpt-search-message-ids','different-native-user');
   assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'conflicting native message ID cannot prove visible text');
   userUnit.setAttribute('data-chatgpt-search-message-ids','latest-user-id different-native-user');
@@ -161,6 +167,27 @@ console.log('stuck-loader native latest-turn binding: passed');
   for(const content of ['<p><code>GOAL_COMPLETE</code></p>','<pre>GOAL_COMPLETE</pre>','<p><strong>GOAL_COMPLETE</strong></p>','<p>GOAL_COMPLETE</p><p>Still working</p>']) {
    rendered.innerHTML=content;assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'non-plain or additional rendered answer text cannot complete a goal');
   }
+  const dil=JSON.parse(require('node:fs').readFileSync('tests/fixtures/goal-marker-dil.json','utf8')) as {messageId:string;html:string};
+  const dilHTML=dil.html.replaceAll(dil.messageId,nativeAssistant.messageId);
+  const assistantUnit=document.querySelector('[data-chatgpt-search-unit-key$=":assistant"]')!;
+  assistantUnit.setAttribute('data-chatgpt-search-message-ids',nativeAssistant.messageId+' '+nativeAssistant.messageId);
+  nativeAssistant.content='::chatgpt-content-reference{index="0"}';
+  nativeAssistant.contentReferences=[{source_message_id:nativeAssistant.messageId,model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}] as any;
+  rendered.innerHTML=dilHTML;
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'native exact fallback agrees with positively bound neutral DIL rendered run');
+  for(const html of [dilHTML.replace('GOAL_COMPLETE','<strong>GOAL_COMPLETE</strong>'),
+   dilHTML.replace('GOAL_COMPLETE','<del>GOAL_COMPLETE</del>'),dilHTML.replace('GOAL_COMPLETE','<code>GOAL_COMPLETE</code>'),
+   dilHTML.replace('<p ','<h1 ').replace('</p>','</h1>'),dilHTML.replace('</p>','</p><p>More</p>'),
+   dilHTML.replace('<div hidden=""></div>','<div hidden="">Hidden meaning</div>')]) {
+    rendered.innerHTML=html;assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'rich or additional native DIL content is not the marker');
+  }
+  rendered.innerHTML=dilHTML;
+  nativeAssistant.contentReferences=[{source_message_id:'other',model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}] as any;
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'DIL fallback must bind the native assistant source ID');
+  nativeAssistant.contentReferences=[{source_message_id:nativeAssistant.messageId,model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}] as any;
+  assistantUnit.setAttribute('data-chatgpt-search-message-ids','other');
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'native assistant ID conflicts cannot be ignored');
+  assistantUnit.removeAttribute('data-chatgpt-search-message-ids');
   rendered.innerHTML='<p>GOAL_COMPLETE</p>';
   nativeAssistant.content='GOAL_COMPLETE\nStill working';
   assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'native whole answer must also be exactly the marker');

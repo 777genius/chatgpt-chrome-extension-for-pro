@@ -306,6 +306,29 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'disarm');assert.equal(f.toggle().getAttribute('aria-checked'),'false');f.instance.dispose();
 }
 
+// A worker may finish this exact intent after this instance stopped polling.
+// A fresh GET reconciles only its own binding error, never another intent/error.
+for(const variant of ['same','different-intent','unrelated-error'] as const) {
+  const f=fixture();await tick();f.details().click();f.click(f.toggle());await tick();
+  await f.instance.manualIntent({text:'Late native goal',baselineKey:'before',eventAt:f.now()});
+  const intent=f.composerState()!;
+  f.respond(()=>({ok:false,error:'Native binding temporarily unavailable'}));await f.advance(250);
+  assert.match(f.panel().textContent!,/Native binding temporarily unavailable/);
+  if(variant==='unrelated-error') {f.respond(()=>({ok:false,error:'Unrelated permission failure'}));await f.instance.refresh();}
+  const id=variant==='different-intent'?'different-arm':intent.id;
+  const adopted={...goal(),id,goal:'Late native goal'};
+  f.setRecord(adopted);f.setComposer({...intent,id,phase:'bound',binding:{url:chat}});f.respond(null);
+  const bindCount=f.calls.filter(c=>c.action==='bind').length;
+  await f.instance.refresh();
+  if(variant==='same') {
+    assert.doesNotMatch(f.panel().textContent!,/Native binding temporarily unavailable/);
+    assert.match(f.panel().textContent!,/Waiting for full answer/);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+  } else assert.match(f.panel().textContent!,variant==='different-intent'?/Native binding temporarily unavailable/:/Unrelated permission failure/);
+  if(variant==='different-intent'){await f.instance.refresh();assert.match(f.panel().textContent!,/Native binding temporarily unavailable/);}
+  assert.equal(f.calls.filter(c=>c.action==='bind').length,bindCount,'late GET does not restart or replay binding');
+  assert.equal(f.state.nativeSends,0);f.instance.dispose();
+}
+
 // Reload resumes a persisted intent only for its original 30-second window.
 // Disposal clears timers, subscriptions and listeners and rejects late results.
 {

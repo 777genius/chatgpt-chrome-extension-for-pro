@@ -17,12 +17,16 @@ function controlChatTitle(options) {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
       const candidates=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
-      const input=state.input||(state.selected&&candidates.length===1?candidates[0]:null);
+      const input=state.input||(state.saved?state.form?.querySelector('input'):state.selected&&candidates.length===1?candidates[0]:null);
       if(chatUrl(location.href)===state.url && input && [state.title,state.previousTitle].includes(input.value)) input.closest('form')?.querySelector('button[type="button"]')?.click();
       if(chatUrl(location.href)===state.url && !state.selected) {
         const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
       }
+      const ownDialog=state.form?.closest('[role="dialog"][aria-modal="true"]');
+      const ownClosing=chatUrl(location.href)===state.url&&state.sidebarToggle&&ownDialog&&visible(ownDialog)&&
+        input&&[state.title,state.previousTitle].includes(input.value);
+      if(ownClosing&&!options.finalCleanup)return {ok:true,pending:true};
       if(chatUrl(location.href)===state.url && state.sidebarToggle && visible(state.sidebarToggle) &&
           state.sidebarToggle.getAttribute('aria-expanded')==='true' &&
           !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) state.sidebarToggle.click();
@@ -137,6 +141,7 @@ function controlChatTitle(options) {
   if (options.action==='fill') {
     if (input.value!==state.previousTitle || document.title!==state.previousTitle) return {ok:false,reason:'title-edited-by-user'};
     state.input=input;
+    state.form=form;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,state.title);
     input.dispatchEvent(new Event('input',{bubbles:true}));
     return {ok:true};

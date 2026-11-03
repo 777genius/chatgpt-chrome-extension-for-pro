@@ -37,7 +37,7 @@ const handler=new Function('chrome','ChatGPTHandoffTitle','goalController','appe
 
 const url='https://chatgpt.com/c/proven-source';
 const entry=(id:string,sourceUrl=url)=>({type:'CHATGPT_HANDOFF_BEGIN',
-  record:{reasoningEffort:'max',id,sourceUrl,sourceTitle:'Source',text:'Full history',prompt:'Full history'}});
+  record:{reasoningEffort:'max',reasoningModel:'gpt-6-thinking',id,sourceUrl,sourceTitle:'Source',text:'Full history',prompt:'Full history'}});
 const meta=()=>data['chatgpt-journal:meta'];
 
 await assert.rejects(()=>handler(entry('failed-first'),7),/Goal cannot prepare/);
