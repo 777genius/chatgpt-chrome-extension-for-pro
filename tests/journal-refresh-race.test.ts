@@ -43,7 +43,9 @@ test("compiled journal discards older reads and stale failures after a newer ref
   const latest = elements.status.textContent;
   assert.ok(latest.includes(new Date(newDate).toLocaleString()), "Newer response must be shown");
   assert.ok(firstSuccess, "Initial read should remain pending");
-  firstSuccess({ ok: true, events: [], meta: { startedAt: oldDate } });
+  const resolveFirst=firstSuccess as ((value:unknown)=>void)|null;
+  if(!resolveFirst)throw new Error("Expected pending initial journal read");
+  resolveFirst({ ok: true, events: [], meta: { startedAt: oldDate } });
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(elements.status.textContent, latest, "Older success must not overwrite newer status");
   assert.equal(elements.more.hidden, true);
