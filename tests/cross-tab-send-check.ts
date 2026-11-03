@@ -103,12 +103,12 @@ addPage(9,'https://chatgpt.com/c/other-source');
 await intent(9,'retry-other-chat');
 assert.equal((await send(9,'retry-other-chat')).clicked,true,'equal DOM turn keys in another chat do not share a claim');
 
-addPage(10);
+addPage(10,'https://chatgpt.com/c/legacy-unbound-fixture');
 await assert.rejects(append(10,'retry.send_intent','legacy-unbound'),
   /Исходный пользовательский запрос автоповтора не подтверждён/,
   'legacy intent without a failed-turn binding is rejected before reserving the chat');
 assert.equal((await send(10,'legacy-unbound')).ok,false,'unbound intent cannot authorize an automatic click');
-await intent(10,'wrong-source','/c/shared-source|user-turn-4');
+await intent(10,'wrong-source','/c/legacy-unbound-fixture|user-turn-4');
 pages.get(10)!.url='https://chatgpt.com/c/switched-chat';
 assert.equal((await send(10,'wrong-source')).ok,false,'caller cannot move a persisted retry authorization to a different chat');
 
