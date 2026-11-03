@@ -40,6 +40,11 @@ assert.equal(userOnly.context.expectedBinding.assistantId,null);
 assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",userOnly.context),true);
 userOnly.entry.turn.items[0].messageId='different-user';
 assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).ok",userOnly.context),false);
+const userBoundAssistant=regular.entry.turn.items.find(item=>item.type==='assistant-message')!;
+userBoundAssistant.messageId='remounted-assistant-id';
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",regular.context),true,
+ 'same latest user survives a replacement partial assistant identity');
+userBoundAssistant.messageId='assistant-uuid';
 for(const mutate of [
  (f:ReturnType<typeof setup>)=>{f.entry.turn.items[0].messageId='new-assistant';},
  (f:ReturnType<typeof setup>)=>{const newer=f.document.createElement('div') as any;newer.setAttribute('data-chatgpt-search-unit-key','fallback-turn-1:0:user');newer.getClientRects=()=>[{width:240,height:32}];f.document.querySelector('main')!.append(newer);},

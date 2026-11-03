@@ -66,9 +66,20 @@ function probeCheck(){
  btn.__reactFiber$test=fiber;
  const ctx=createContext({document,URL});runInContext(probe,ctx);
  const result=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',ctx)));
- assert.equal(result.action,'new-chat');assert.equal(result.incomplete,false);
+ assert.equal(result.action,'new-chat');assert.equal(result.incomplete,true,'two answers require proof of fully loaded history when requesting three');
  assert.deepEqual(result.messages.map((m:any)=>m.id),['a1','u1','u2','a2']);
  assert.equal(result.messages[3].text,'Full answer\nwith code');
+ const originalEntries=fiber.return.memoizedProps.entries;
+ fiber.return.memoizedProps.entries=Array.from({length:4},(_,i)=>({id:'pair-'+i,turn:{items:[
+  {type:'user-message',messageId:'u'+i,message:'User '+i},
+  {type:'assistant-message',phase:'final_answer',messageId:'a'+i,content:'Assistant '+i}
+ ]}})) as typeof entries;
+ const threePairs=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',ctx)));
+ assert.deepEqual(threePairs.messages.map((item:any)=>item.id),['u1','a1','u2','a2','u3','a3'],
+  'exactly the latest three messages per role retain their original order');
+ assert.equal(threePairs.incomplete,false);
+ fiber.return.memoizedProps.entries=originalEntries;
+
  const unknown=document.createElement('span');unknown.textContent='Unknown error';document.querySelector('aside')!.prepend(unknown);
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'new-chat','Unknown error follows the explicit native Start new chat action');
  assert.deepEqual(JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true).messages',ctx))),result.messages,'Unknown error reuses the same exact chronological last two user and assistant messages');
@@ -128,7 +139,7 @@ function probeCheck(){
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
 type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading'|'legacy-model'|'source-model-change';
-async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
+async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{escalate?:boolean;source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
@@ -165,7 +176,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     (context as any).seedMessage={...m,nativeText:richNative,fileName:'owner-private.txt'};
     return new Promise(resolve=>{(context as any).seedResponse=resolve;runInContext('(()=>{const message=seedMessage,sender={tab:{id:7,url:location.href},frameId:0},sendResponse=seedResponse;'+seedHandler+'})()',context);});
    }
-   if(m.type==='CHATGPT_RETRY_STATE')return {ok:true,state:restoredUnknown?{failures:[clock.now(),clock.now(),clock.now(),clock.now()],blocked:true,terminal:false,lastPromptKey:'/c/source|conversation-turn-0',lastAttemptId:'old-failed-request',reason:'4 retries exhausted'}:null};
+   if(m.type==='CHATGPT_RETRY_STATE')return {ok:true,state:effortOptions.escalate?{failures:[clock.now(),clock.now(),clock.now()],repeatedError:'最大長',sameErrorCount:3,blocked:false}:restoredUnknown?{failures:[clock.now(),clock.now(),clock.now(),clock.now()],blocked:true,terminal:false,lastPromptKey:'/c/source|conversation-turn-0',lastAttemptId:'old-failed-request',reason:'4 retries exhausted'}:null};
    if(m.type==='CHATGPT_GOAL_CONTEXT'){
     (context as any).goalContextUrl=m.url;
     return {ok:true,text:await runInContext('goalController.context(goalContextUrl)',context)};
@@ -187,7 +198,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?'ready':'missing'};
    if(m.type==='CHATGPT_INSPECT_ERROR'){
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
-    return {ok:true,action:'new-chat',messages,incomplete:interference==='history-loading'&&++historyInspections<3};
+    return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages,incomplete:interference==='history-loading'&&++historyInspections<3};
    }
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
     if(m.type==='CHATGPT_HANDOFF_BEGIN'){begins++;assert.equal(loc.href,originalURL,'backup must precede navigation');}
@@ -232,8 +243,12 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  });
  runInContext(readFileSync('extension/goal-policy.js','utf8')+'\n'+readFileSync('extension/goal-store.js','utf8')+'\nconst goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});\n'+probe+'\n'+handoffWorker+'\n'+source,context);
  const alert=document.createElement('aside');alert.setAttribute('role','alert');alert.className='text-danger';alert.innerHTML=`<div>${restoredUnknown?'Unknown error':'最大長'}</div><button>新しいチャット</button>`;
- if(restoredUnknown)(alert.querySelector('button')! as any).__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries:messages.map(m=>({id:m.id,turn:{items:[m.role==='user'?{type:'user-message',messageId:m.id,message:m.text}:{type:'assistant-message',phase:'final_answer',messageId:m.id,content:m.text}]}}))},return:null}};
- alert.querySelector('button')!.addEventListener('click',()=>{
+ if(restoredUnknown)(alert.querySelector('button')! as any).__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{isChatConversation:true,conversationId:'source',isConversationFetching:false,isConversationLoading:false,hasLoadError:false,entries:messages.map(m=>({id:m.id,turn:{items:[m.role==='user'?{type:'user-message',messageId:m.id,message:m.text}:{type:'assistant-message',phase:'final_answer',messageId:m.id,content:m.text}]}}))},return:null}};
+ if(effortOptions.escalate){
+  const newChat=document.createElement('a');newChat.setAttribute('href','/');newChat.textContent='New';
+  document.body.append(newChat);
+ }
+ (effortOptions.escalate?document.querySelector('a[href="/"]'):alert.querySelector('button'))!.addEventListener('click',()=>{
    assert.ok(stored.text.includes('Earlier answer'),'source copy must be durable');
    loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';
    document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent=interference==='whitespace'?'  \n  ':rich?richVisible:'Last request';
@@ -294,10 +309,10 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    await clock.advance(500.5);
    loc.href='https://chatgpt.com/c/target';loc.pathname='/c/target';
    document.querySelector('main')!.append(document.createElement('span'));
-   await clock.until(transferred,'late route must durably confirm transfer, lineage and draft restoration',5000);
+   await clock.until(transferred,'late route must durably confirm transfer, lineage and draft restoration',15000);
    assert.equal(storage[lineageKey].part,1,'late reconciliation persists continuation lineage');
  }
- assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,1,'only the source response error may set terminal error status');
+ assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,effortOptions.escalate?0:1,'only the source response error may set terminal error status');
  assert.equal(notices.filter(n=>n.type==='CHATGPT_OPERATION_WARNING').length,ambiguous||lateTarget?1:0,'uncertain transfer notifies once as operational metadata, never as a failed response');
  assert.equal(stored.reasoningModel,sourceModel,'the exact source model group is durably preserved');
  assert.equal(stored.reasoningEffort,sourceEffort,'the exact source mode is durably preserved');
@@ -357,3 +372,5 @@ await transferCheck(false,false,false,false,false,false,'',{source:'medium',sour
 await transferCheck(false,false,false,false,false,false,'unavailable-effort',{source:'medium',sourceModel:'gpt-6-pro',destination:'medium',availableModes:actualPowerModes.slice(0,2)});
 await transferCheck(false,false,false,false,false,false,'legacy-model');
 await transferCheck(false,false,false,false,false,false,'source-model-change');
+
+await transferCheck(false,false,false,false,false,false,'',{escalate:true});

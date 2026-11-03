@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.19';
+  const SCRIPT_VERSION = '1.8.22';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -299,7 +299,8 @@
         retryStates.set(path,{failures:(saved?.failures||[]).filter(at=>Date.now()-at<=RETRY_WINDOW_MS),
           blocked:result?.ok!==true||Boolean(saved?.blocked),reason:saved?.reason||(result?.ok?'':'Не удалось восстановить журнал повторов'),
           lastAttempt:saved?.lastPromptKey?`${saved.lastPromptKey}|${saved.lastAttemptId||''}`:'',
-          restoredPromptKey:saved?.lastPromptKey||'',terminalHandled:Boolean(saved?.terminal),remainingRetries:saved?.remainingRetries});
+          restoredPromptKey:saved?.lastPromptKey||'',terminalHandled:Boolean(saved?.terminal),remainingRetries:saved?.remainingRetries,
+          repeatedError:saved?.repeatedError||'',sameErrorCount:saved?.sameErrorCount||0});
       }
       retryRestoredPath=path;
     }).finally(()=>{
@@ -772,6 +773,9 @@
     // Rewording/remounting one error does not count as another failed request.
     if (state.lastAttempt === attemptKey) return;
     state.lastAttempt = attemptKey;
+    const repeatedError=normalize(error.response);
+    state.sameErrorCount=state.repeatedError===repeatedError?(state.sameErrorCount||0)+1:1;
+    state.repeatedError=repeatedError;
     const now = Date.now();
     state.failures = state.failures.filter((at) => now - at <= RETRY_WINDOW_MS);
     state.failures.push(now);
@@ -857,7 +861,7 @@
     const history = messages.map((item, index) =>
       `--- Сообщение ${index + 1}. ${item.role === 'user' ? 'Пользователь' : 'ChatGPT'} ---\n${item.text}`
     ).join('\n\n');
-    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние доступные сообщения: не более двух сообщений пользователя и двух ответов ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
+    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние доступные сообщения: не более трёх сообщений пользователя и трёх ответов ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
   }
 
   async function updateHandoff(stage, extra = {}) {
@@ -1083,7 +1087,7 @@
     const text=handoffText(info.messages,error.response,sourceUrl)+(goalContext.text?'\n\n'+goalContext.text:'');
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
-    const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там два последних сообщения пользователя и два ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
+    const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там три последних сообщения пользователя и три ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
     const sourceReasoning = await reasoningMode(),sourceEffort=sourceReasoning.value,sourceModel=sourceReasoning.model;
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sourceEffort) || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(sourceModel)) throw new Error('Не удалось сохранить исходный режим рассуждения');
     const sourceEditor = composer();
@@ -1099,7 +1103,9 @@
     handoffRecord = result.record;
     let button;
     try {
-      button = alert.querySelector('button');
+      button = error.escalated
+        ?Array.from(document.querySelectorAll('a[href="/"],button.button-toolbar:has(svg path[d^="M8.16675 2.50127C8.53391"])')).find(isElementVisible)
+        :alert.querySelector('button');
       if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
       const liveMode=await reasoningMode();
       if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || (liveMode.value !== sourceEffort || liveMode.model !== sourceModel) ||
@@ -1148,6 +1154,19 @@
     }
     await audit('error.detected',{error:error.response,action:info?.action || 'unknown',promptKey,durationMs:error.durationMs,attemptId,recoveryBinding:info?.recoveryBinding||null});
     if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId || (globalThis.__chatgptNotifierRequestId||null)!==requestId) return;
+    if(info?.ok&&info.action==='retry'&&retryState().repeatedError===normalize(error.response)&&retryState().sameErrorCount>=3&&
+        (!retryState().blocked||retryState().reason==='Дополнительные автоповторы исчерпаны'||
+          retryState().reason==='Автопродолжение остановлено: 4 автоповтора за 2 минуты')) {
+      const history=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
+        alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),
+        captureHistory:true,captureRetryHistory:true});
+      if(history?.ok&&history.action==='retry'&&!history.incomplete&&history.messages?.length) {
+        await audit('retry.escalated',{promptKey,attemptId,reason:'Три неудачных повтора; перенос истории'});
+        try {await beginHandoff({...error,escalated:true},{...history,action:'new-chat'},alert);}
+        catch(cause){notifyOperationWarning(error,String(cause.message||cause));}
+        return;
+      }
+    }
     if (info?.ok && info.action === 'retry') {
       handleError({...error,recoveryBinding:info.recoveryBinding||null}, promptKey);
       return;

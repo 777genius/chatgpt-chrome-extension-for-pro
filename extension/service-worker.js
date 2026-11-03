@@ -850,7 +850,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     chrome.scripting.executeScript({
       target: { tabId: sender.tab.id }, world: 'MAIN', func: inspectChatError,
-      args: [message.alertIndex, Boolean(message.captureHistory)]
+      args: [message.alertIndex, Boolean(message.captureHistory),null,'','',null,Boolean(message.captureRetryHistory)]
     }).then((results) => sendResponse({ ok: true, ...results[0]?.result }))
       .catch(() => sendResponse({ ok: false, action: 'unknown' }));
     return true;

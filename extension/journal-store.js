@@ -120,6 +120,9 @@ function reduceRetrySummary(retryByChat, event) {
     const duplicate = (previous.lastPromptKey === promptKey && previous.lastAttemptId === attemptId) ||
       state.recentErrors.some((item) => item.promptKey === promptKey && item.attemptId === attemptId);
     if (!duplicate) {
+      const repeatedError=String(event.error||'').replace(/\s+/g,' ').trim();
+      state.sameErrorCount=previous.repeatedError===repeatedError?(previous.sameErrorCount||0)+1:1;
+      state.repeatedError=repeatedError;
       const at = Number.isFinite(event.eventAt) ? Math.min(event.eventAt, now) : now;
       if (inWindow(at)) {
         state.failures.push(at);

@@ -2,7 +2,7 @@
 
 // Serialized into ChatGPT's MAIN world by chrome.scripting. No closure state,
 // cookies, network requests, or translated-string matching.
-function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null) {
+function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null, captureRetryHistory = false) {
   const alert = document.querySelectorAll('aside[role="alert"].text-danger, [role="status"]:has(.text-chatgpt-recovery)')[alertIndex];
   const button = alert?.querySelector('button');
   const origin = button || alert;
@@ -84,7 +84,10 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     const visibleRecoveryNode=node=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
     const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).filter(visibleRecoveryNode).at(-1);
     const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
-    const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&['kind','url','entryId','assistantId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key]));
+    const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&
+      ['kind','url','entryId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key])&&
+      (recoveryBinding.kind==='user'&&Boolean(recoveryBinding.userId)||
+        recoveryBinding.assistantId===expectedRecoveryBinding.assistantId));
     const assistantOnly=sameRecovery&&recoveryBinding.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
     if(expectedRecoveryBinding&&!sameRecovery)return {ok:false,reason:'Нативный ответ перед восстановлением изменился'};
     if(expectedPromptKey&&!assistantOnly&&(!latestUserKey||location.pathname+'|'+latestUserKey!==expectedPromptKey))return {ok:false,reason:'Запрос пользователя перед остановкой изменился'};
@@ -121,7 +124,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     stop.click();
     return {ok:true,stopped:true};
   }
-  if (!captureHistory || action !== 'new-chat') return { action, messages: [], recoveryBinding,
+  if (!captureHistory || action !== 'new-chat'&&!(captureRetryHistory&&action==='retry')) return { action, messages: [], recoveryBinding,
     deliveryUserSentAtMs:inputDeliveryError?recoveryEntry?.timestampTurns?.filter(item=>item.role==='user').at(-1)?.sentAtMs:null };
   if (!entries) return { action, messages: [], incomplete: true };
   function messageText(item) {
@@ -142,12 +145,12 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   const selected = new Set();
   for (const role of ['user', 'assistant']) {
-    all.map((item, index) => ({ item, index })).filter(({ item }) => item.role === role).slice(-2)
+    all.map((item, index) => ({ item, index })).filter(({ item }) => item.role === role).slice(-3)
       .forEach(({ index }) => selected.add(index));
   }
   const messages = all.filter((_, index) => selected.has(index));
-  const shortHistory = messages.filter((item) => item.role === 'user').length < 2 ||
-    messages.filter((item) => item.role === 'assistant').length < 2;
+  const shortHistory = messages.filter((item) => item.role === 'user').length < 3 ||
+    messages.filter((item) => item.role === 'assistant').length < 3;
   return { action, messages, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
     messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
 

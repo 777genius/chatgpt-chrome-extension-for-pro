@@ -39,3 +39,16 @@ const before=result.events.length;fail=true;await assert.rejects(append({kind:'r
 result=await runInContext('readJournal()',ctx);assert.equal(result.events.length,before);assert.match(result.storageError,/Disk full/);
 fail=false;await append({kind:'watcher.started'});result=await runInContext('readJournal()',ctx);assert.equal(result.events.length,before+1);assert.equal(result.storageError,'');
 console.log('PASS: concurrent durable audit, exact payload export, worker restart correlation, source/target chat IDs, no false manual attribution, disk failure recovery');
+
+// Consecutive same-error count survives worker restart and duplicate DOM scans.
+const repeatTab={id:91,url:'https://chatgpt.com/c/repeated-error',title:'Test'};
+for(let i=0;i<3;i++)await append({kind:'error.detected',action:'retry',sourceUrl:repeatTab.url,
+ promptKey:'prompt-'+i,attemptId:String(Date.now()+i),error:'Timeout'},repeatTab);
+ctx=boot();ctx.repeatUrl=repeatTab.url;
+assert.equal((await runInContext('readRetryState(repeatUrl)',ctx)).sameErrorCount,3);
+await append({kind:'error.detected',action:'retry',sourceUrl:repeatTab.url,
+ promptKey:'prompt-2',attemptId:(await runInContext('readRetryState(repeatUrl)',ctx)).lastAttemptId,error:'Timeout'},repeatTab);
+assert.equal((await runInContext('readRetryState(repeatUrl)',ctx)).sameErrorCount,3);
+await append({kind:'error.detected',action:'retry',sourceUrl:repeatTab.url,
+ promptKey:'different',attemptId:String(Date.now()+5),error:'Another failure'},repeatTab);
+assert.equal((await runInContext('readRetryState(repeatUrl)',ctx)).sameErrorCount,1);
