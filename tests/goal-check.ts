@@ -11,7 +11,7 @@ const URL_B='https://chatgpt.com/c/goal-fixture-b';
 let sequence=0;
 type Env={data:Record<string,any>;messages:{tabId:number,message:any}[];events:any[];
   tabs:Record<number,string>;time:number;store:any;fresh:()=>any;failWrite:boolean;busy:boolean};
-function fixture():Env {
+function fixture(beforeDispatch:(record:any)=>Promise<void>=async()=>{}):Env {
   const env:Env={data:{},messages:[],events:[],tabs:{7:URL_A,8:URL_A},time:1000000,store:null,
     fresh:()=>null,failWrite:false,busy:false};
   const storage={
@@ -29,7 +29,7 @@ function fixture():Env {
     }
   };
   const journal=async(event:any)=>{env.events.push(structuredClone(event));return {ok:true};};
-  env.fresh=()=>create({storage,tabs,appendJournal:journal,now:()=>env.time,
+  env.fresh=()=>create({storage,tabs,appendJournal:journal,beforeDispatch,now:()=>env.time,
     uuid:()=>`fixture-operation-${++sequence}`});
   env.store=env.fresh();
   return env;
@@ -160,6 +160,19 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
   assert.equal(state(env).phase,'preparing');
   assert.equal(state(env).operation.kind,'continuation');
   assert.equal(env.messages.length,2);
+}
+
+// A delayed older manual ACK must not cancel a reservation created after a
+// newer verified manual request was paused and explicitly resumed.
+{
+  const env=fixture();await begin(env);await confirm(env);
+  env.time+=20;
+  assert.equal((await env.store.manual({url:URL_A,tabId:7,startedAt:env.time})).ok,true);
+  await env.store.control({action:'resume',url:URL_A,tabId:7});
+  const before=structuredClone(state(env)),messages=env.messages.length;
+  assert.equal((await env.store.manual({url:URL_A,tabId:7,startedAt:env.time-10})).ok,false);
+  assert.deepEqual(state(env),before,'older ACK preserves the newer reserved continuation and manual cutoff');
+  assert.equal(env.messages.length,messages);
 }
 
 // A fully completed assistant answer can race the native send acknowledgement.
@@ -372,14 +385,11 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
 // transfers the goal identity and budget only after confirmed acceptance.
 {
   const env=fixture();await begin(env);await confirm(env);
-  const failedGoalTurn=state(env).expectedPromptKey;
-  await env.store.retry({url:URL_A,tabId:7,kind:'retry.planned',
-    operationId:'retry-fixture-1',sourcePromptKey:failedGoalTurn});
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.planned'});
   assert.equal(state(env).phase,'recovering');
   await answer(env);
   assert.equal(env.messages.length,1,'no sending while retry underway');
-  await env.store.retry({url:URL_A,tabId:7,kind:'retry.confirmed',promptKey:'/c/goal-fixture-a|retry-1',
-    operationId:'retry-fixture-1',sourcePromptKey:failedGoalTurn});
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.confirmed',promptKey:'/c/goal-fixture-a|retry-1'});
   assert.equal(state(env).phase,'waiting');
   assert.equal(state(env).expectedPromptKey,'/c/goal-fixture-a|retry-1');
   await env.store.retry({url:URL_A,tabId:7,kind:'retry.blocked',goalHandoff:true});
@@ -486,3 +496,15 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
 }
 
 console.log('Goal policy, durable lifecycle, dedupe, marker, recovery and handoff checks passed.');
+
+// Native rename preparation is a delivery barrier; stopping during it wins.
+for(const stop of [false,true]) {
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+  const env=fixture(async record=>{assert.equal(record.operation.status,'reserved');entered();await gate;});
+  const pending=env.store.start({url:URL_A,tabId:7,goal:'Barrier canary',rules:'',maxContinuations:2,maxMinutes:60});
+  await started;assert.equal(env.messages.length,0,'no continuation may reach the composer while native title UI is preparing');
+  if(stop)await env.store.control({url:URL_A,tabId:7,action:'stop'});
+  release();await pending;
+  assert.equal(env.messages.length,stop?0:1,'stop during title preparation cancels the exact reserved dispatch');
+}

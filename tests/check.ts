@@ -14,11 +14,11 @@ async function waitFor(predicate:()=>boolean) {
 const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><div aria-hidden="true">decorative</div><div>${text}</div><button>Повторить</button></aside>`;
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
 async function domCheck() {
-  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false) {
+  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0) {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
     Object.defineProperty(window.Node, 'DOCUMENT_POSITION_FOLLOWING', { value: 4, configurable: true });
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
-      return this.hidden || this.style.display === 'none' ? [] : [{}];
+      return this.hidden || this.style.display === 'none' ? [] : [{width:240,height:32}];
     }});
     const messages: any[] = [], sends: string[] = [], logs: any[] = [];
     const draftStorage:Record<string,any>={};
@@ -51,7 +51,7 @@ async function domCheck() {
           if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
           return {ok:true,matches:true,ready:true};
         }
-        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
+        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(message.event.kind==='retry.readiness'&&message.event.phase==='settling')now+=readinessClockDelay;if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
         if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
         if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
         messages.push(message);
@@ -75,6 +75,21 @@ async function domCheck() {
       }
     };
   }
+  const delayedReadiness = setup('Exact owner draft\n  Keep spaces',true,true,'',null,false,false,15000);
+  await delayedReadiness.fail('Delivery timeout while native composer settles');
+  await waitFor(()=>delayedReadiness.logs.some(e=>e.kind==='draft.restored'||e.kind==='retry.failed'));
+  assert.deepEqual(delayedReadiness.sends,['доделай е2е'],'slow UI/journal readiness beyond 10s must still allow one bounded retry');
+  assert.equal(delayedReadiness.logs.filter(e=>e.kind==='retry.send_intent').length,1);
+  assert.equal(delayedReadiness.logs.filter(e=>e.kind==='retry.confirmed').length,1);
+  assert.equal(delayedReadiness.document.querySelector('#prompt-textarea')!.textContent,'Exact owner draft\n  Keep spaces');
+  const expiredReadiness = setup('Never send this owner draft',true,true,'',null,false,false,61000);
+  await expiredReadiness.fail('Composer never became ready within the bounded deadline');
+  await waitFor(()=>expiredReadiness.logs.some(e=>e.kind==='retry.failed')&&expiredReadiness.document.querySelector('#prompt-textarea')!.textContent==='Never send this owner draft');
+  assert.equal(expiredReadiness.sends.length,0,'readiness after 60s must remain a zero-click failure');
+  assert.equal(expiredReadiness.logs.some(e=>e.kind==='retry.send_intent'),false);
+  assert.equal(expiredReadiness.logs.find(e=>e.kind==='retry.failed')?.clicked,false);
+  assert.equal(expiredReadiness.document.querySelector('#prompt-textarea')!.textContent,'Never send this owner draft');
+  if(process.argv[2]==='retry-deadline'){console.log('PASS: bounded slow retry readiness, one confirmed send, over-budget zero click and exact draft restoration');return;}
   const duplicate = setup('Keep this owner draft',true,true,'',null,false,true);
   await duplicate.fail('Failed request already owned by another tab');
   assert.equal(duplicate.sends.length,0);
@@ -150,6 +165,7 @@ async function domCheck() {
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].operationId,run.logs.find(e=>e.kind==='retry.planned').operationId);
+  assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].attemptId,run.logs.find(e=>e.kind==='retry.planned').attemptId,'retry lifecycle remains bound to its failed request after a newer request starts');
   const noLog=setup('Draft');noLog.breakJournal();await noLog.fail('error');
   assert.equal(noLog.sends.length,0,'journal failure must prevent automatic send');
   assert.equal(noLog.document.querySelector('#prompt-textarea')!.textContent,'Draft');
@@ -181,6 +197,7 @@ async function domCheck() {
   const frozenTimers=setup('Draft survives background throttling');
   runInContext('setTimeout=()=>0',frozenTimers.context);
   await frozenTimers.fail('error in background');
+  await waitFor(()=>frozenTimers.logs.some(e=>e.kind==='draft.restored'||e.kind==='retry.failed'));
   assert.deepEqual(frozenTimers.sends,['доделай е2е'],'error handling must not depend on page timers');
   assert.equal(frozenTimers.document.querySelector('#prompt-textarea')!.textContent,'Draft survives background throttling');
   console.log('PASS: continuation and draft restoration with page timers completely disabled');
@@ -292,7 +309,7 @@ async function workerCheck() {
   assert.ok(injections.at(-1).files.includes('status-indicator.js'));
   assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===125000).length,2,'start is redelivered only after the missing receiver is installed');
   assert.ok(notifications.every(n => !/click to return/i.test(n.contextMessage)));
-  const record={id:'handoff-test',sourceUrl:'https://chatgpt.com/c/source',sourceTitle:'Original name',text:'complete history'};
+  const record={reasoningEffort:'max',reasoningModel:'gpt-6-thinking',id:'handoff-test',sourceUrl:'https://chatgpt.com/c/source',sourceTitle:'Original name',text:'complete history'};
   Object.assign(workerContext,{record});
   const begun=await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_BEGIN',record},7)",workerContext);
   assert.equal(begun.record.stage,'navigating');
@@ -776,7 +793,9 @@ async function statusMigrationCheck() {
   console.log('PASS: one atomic bounded journal status migration, exact active legacy notification binding, manual-request proof, existing state protection, live race and immutable history');
 }
 if(process.argv[2]!=='worker') await domCheck();
+if(process.argv[2]!=='retry-deadline'){
 await workerCheck();
 await popupRecoveryCheck();
 await notificationStatusCheck();
 await statusMigrationCheck();
+}
