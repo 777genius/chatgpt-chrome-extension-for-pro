@@ -3,6 +3,22 @@ interface GoalOperation {id:string;kind:"initial"|"continuation";text:string;tab
 interface GoalCompletion {url:string;tabId:number;completionKey:string;promptKey:string;response:string;nativeVerified:boolean;rawExact:boolean;userId:string}
 interface GoalSettings {goal:string;rules:string;maxContinuations:number;maxMinutes:number}
 interface GoalRecovery { operationId:string; sourcePromptKey:string; tabId:number }
+interface GoalComposerConfig {rules:string;maxContinuations:number;maxMinutes:number}
+interface GoalComposerIntent {text:string;eventAt:number;baselineKey:string}
+interface GoalComposerBinding extends Record<string,unknown> {
+  url:string;requestId:string;startedAt:number;promptKey:string;userId:string;userSentAtMs:number;
+  userText:string;userVisibleText:string|null;
+}
+interface GoalComposerRecord {
+  schema:number;id:string;phase:'armed'|'intent'|'bound';url:string;
+  config:GoalComposerConfig;armedAt:number;
+  intent?:GoalComposerIntent;binding?:GoalComposerBinding;
+}
+interface GoalEventRecord {
+  id:string;url:string;phase:string;reason?:string;continuations?:number;
+  operation?:GoalOperation|null;
+}
+interface GoalManualStart extends GoalComposerBinding {tabId:number;sourceUrl:string}
 interface GoalRecord extends GoalSettings {
  schema:number;id:string;url:string;originUrl:string;deadlineAt:number;startedAt:number;phase:string;reason:string;continuations:number;
  expectedPromptKey:string|null;lastCompletionKey:string;pendingCompletion:{key:string;promptKey:string}|null;
@@ -11,21 +27,30 @@ interface GoalRecord extends GoalSettings {
  handoffEarlyCompletion?:GoalCompletion|null;handoffEarlyCompletions?:GoalCompletion[];
  handoffAcceptedUserId?:string;preHandoffPhase?:string;manualOverride?:boolean;
  lastSendTabId?:number;recovery?:GoalRecovery|null;
+ manualStartedAt?:number;manualStart?:GoalManualStart;handoffTabId?:number;
 }
 type GoalView=Omit<GoalRecord,"operation"> & {operation:Pick<GoalOperation,"id"|"kind"|"status"|"createdAt">|null};
 interface GoalHost {
  storage:{get(key:string):Promise<Record<string,unknown>>;set(value:Record<string,unknown>):Promise<unknown>};
  tabs:{get(id:number):Promise<{id?:number;url?:string}>;sendMessage(id:number,message:Record<string,unknown>):Promise<{ok?:boolean;idle?:boolean;reason?:string}|undefined>};
  appendJournal(event:Record<string,unknown>,tab:{id:number|null;url:string}):Promise<unknown>;
- now?:()=>number;uuid?:()=>string;
+ now?:()=>number;uuid?:()=>string;beforeDispatch?:(record:GoalRecord)=>Promise<void>;
 }
 interface GoalPolicy {
- MARKER:string;canonical(url:string|undefined):string;settings(input:GoalSettings):GoalSettings;
+ MARKER:string;canonical(url:string|undefined):string;pageUrl(url:string|undefined):string;
+ settings(input:GoalSettings):GoalSettings;
+ composerSettings(input:Partial<GoalComposerConfig>):GoalComposerConfig;
  initialText(record:GoalSettings):string;continuationText(record:GoalSettings):string;handoffText(record:GoalRecord):string;
  decision(record:GoalRecord,response:string,rawExact:boolean,nativeVerified:boolean,time:number):string;
 }
 interface GoalOperationRef {url:string;tabId:number;id:string;operationId:string}
 interface GoalStore {
+ composerGet(input:{tabId:number}):Promise<unknown>;
+ composerArm(input:{tabId:number;url:string;rules:string;maxContinuations?:number;maxMinutes?:number}):Promise<unknown>;
+ composerDisarm(input:{tabId:number;armId?:string}):Promise<unknown>;
+ composerIntent(input:{tabId:number;url:string;armId:string;eventAt:number;text:string;baselineKey:string}):Promise<unknown>;
+ composerBind(input:{tabId:number;armId:string;url:string;requestId:string;startedAt:number;promptKey:string;
+ userId:string;userText:string;userVisibleText?:string|null;userSentAtMs:number;firstTurn:boolean;nativeVerified:boolean}):Promise<unknown>;
  get(url:string):Promise<unknown>;start(input:GoalSettings & {url:string;tabId:number}):Promise<unknown>;recoverTab(tab:{id?:number;url?:string}):Promise<unknown>;
  control(input:{action:string;url:string;tabId:number}):Promise<unknown>;
  check(input:GoalOperationRef & {phase?:string}):Promise<unknown>;
@@ -35,6 +60,7 @@ interface GoalStore {
  completion(input:GoalCompletion):Promise<unknown>;manual(input:{url:string;tabId:number}):Promise<unknown>;
  retry(input:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;goalHandoff?:boolean}):Promise<unknown>;
  handoffBegin(input:{sourceUrl:string;handoffId:string;tabId:number}):Promise<unknown>;
+ handoffFailed(input:{sourceUrl:string;handoffId:string;tabId:number;reason?:string}):Promise<unknown>;
  handoffConfirm(input:{sourceUrl:string;targetUrl:string;handoffId:string;tabId:number;acceptedUserId:string}):Promise<unknown>;
  stageHandoffCompletion(input:GoalCompletion & {sourceUrl:string;targetUrl:string;handoffId:string}):Promise<unknown>;
  context(url:string):Promise<string>;
@@ -48,7 +74,7 @@ declare const module:undefined|{exports:unknown};
       ? Reflect.get(value,"message"):undefined;
     return String(message||value);
   }
-  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID()}:GoalHost):GoalStore {
+  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),beforeDispatch=async (_record:GoalRecord)=>{}}:GoalHost):GoalStore {
     const policy:GoalPolicy=(()=>{
       const selected=root.ChatGPTGoalPolicy;
       if(!selected)throw Error('Goal policy is not loaded');
@@ -62,6 +88,8 @@ declare const module:undefined|{exports:unknown};
     };
     const key=(url:string):string=>'chatgpt-goal:'+policy.canonical(url);
     const canonical=(url:string|undefined):string=>policy.canonical(url);
+    const composerKey=(tabId:number)=>'chatgpt-goal-composer:'+tabId;
+    const composerBindingKey=(id:string)=>'chatgpt-goal-composer-binding:'+id;
     const buffered=(record:GoalRecord|null|undefined,plural:'earlyCompletions'|'handoffEarlyCompletions',singular:'earlyCompletion'|'handoffEarlyCompletion'):GoalCompletion[]=>{
       if(!record)return [];
       const list=record[plural];
@@ -73,24 +101,174 @@ declare const module:undefined|{exports:unknown};
       if(!value)throw Error('Goal доступен только в сохранённом чате ChatGPT');
       return value;
     }
+    function requireTab(tabId:number):number {
+      if(!Number.isInteger(tabId)||tabId<0)throw Error('Вкладка Goal не подтверждена');
+      return tabId;
+    }
+    function requirePage(url:string):string {
+      const value=policy.pageUrl(url);
+      if(!value)throw Error('Goal доступен только на странице чата ChatGPT');
+      return value;
+    }
+    function requireAvailable(previous:GoalRecord|null):void {
+      if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат или вручную разберите журнал');
+      if(previous&&!['completed','stopped','moved'].includes(previous.phase))
+        throw Error('Для этого чата уже запущена цель. Сначала остановите её');
+    }
     async function read(url:string):Promise<GoalRecord|null> {
       const path=requireUrl(url),name=key(path);
       const stored=(await storage.get(name))[name];return stored?stored as GoalRecord:null;
     }
     async function save(record:GoalRecord):Promise<void> {await storage.set({[key(record.url)]:record});}
+    async function readComposer(tabId:number):Promise<GoalComposerRecord|null> {
+      const name=composerKey(requireTab(tabId));
+      const saved=(await storage.get(name))[name];
+      return saved&&typeof saved==='object'?saved as GoalComposerRecord:null;
+    }
+    async function composerGet({tabId}:{tabId:number}) {return serialize(()=>readComposer(tabId));}
+    async function composerArm({tabId,url,rules,maxContinuations,maxMinutes}:{tabId:number;url:string;rules:string;maxContinuations?:number;maxMinutes?:number}) {
+      requireTab(tabId);
+      const target=requirePage(url);
+      const config=policy.composerSettings({rules,...(maxContinuations===undefined?{}:{maxContinuations}),
+        ...(maxMinutes===undefined?{}:{maxMinutes})});
+      return serialize(async()=>{
+        const previous=await readComposer(tabId);
+        if(previous?.phase==='bound') {
+          const boundUrl=previous.binding?.url;
+          const bound=boundUrl?await read(boundUrl):null;
+          if(bound?.id!==previous.id||bound.operation||
+              !['completed','stopped','moved'].includes(bound.phase))
+            throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
+        } else if(previous?.phase==='intent') {
+          if(!canonical(previous.url)||previous.url===target)
+            throw Error('Ручная отправка Goal уже ожидает подтверждения; сначала явно выключите Goal');
+          await event('composer_superseded',previous,tabId,{oldArmId:previous.id,oldIntent:previous.intent,
+            targetUrl:target,reason:'Явное включение Goal в другом чате отменило непривязанное намерение'});
+        }
+        if(previous?.phase==='armed'&&previous.url===target&&
+            JSON.stringify(previous.config)===JSON.stringify(config))return {ok:true,record:previous};
+        const record:GoalComposerRecord={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt:now()};
+        await storage.set({[composerKey(tabId)]:record});
+        return {ok:true,record};
+      });
+    }
+    async function composerDisarm({tabId,armId}:{tabId:number;armId?:string}) {
+      requireTab(tabId);
+      return serialize(async()=>{
+        const current=await readComposer(tabId);
+        if(armId!==undefined&&current?.id!==armId)throw Error('Разрешение Goal уже изменилось');
+        const changes:Record<string,unknown>={[composerKey(tabId)]:null};
+        let stopped:GoalRecord|null=null;
+        if(current?.phase==='bound'&&current.binding?.url) {
+          const goal=await read(current.binding.url);
+          if(goal?.id===current.id&&!['completed','stopped','moved'].includes(goal.phase)) {
+            stopped=stopTransition(goal);
+            await event(stopped.stopRequested||goal.operation?'stop_requested':'stopped',stopped,tabId);
+            changes[key(goal.url)]=stopped;
+          }
+        }
+        await storage.set(changes);
+        return {ok:true,record:null,...(stopped?{goal:view(stopped)}:{})};
+      });
+    }
+    async function composerIntent({tabId,url,armId,eventAt,text,baselineKey}:{tabId:number;url:string;armId:string;eventAt:number;text:string;baselineKey:string}) {
+      requireTab(tabId);
+      const target=requirePage(url);
+      return serialize(async()=>{
+        const current=await readComposer(tabId);
+        if(!current||current.id!==armId||current.url!==target)
+          throw Error('Разрешение ручной отправки Goal изменилось');
+        if(['intent','bound'].includes(current.phase)) {
+          const prior=current.intent;
+          if(prior?.eventAt===eventAt&&prior.text===text&&prior.baselineKey===baselineKey)
+            return {ok:true,record:current};
+          throw Error('Другая ручная отправка Goal уже ожидает подтверждения');
+        }
+        if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<current.armedAt||
+            eventAt>now()||now()-eventAt>10000)
+          throw Error('Ручная отправка Goal не относится к свежему включению');
+        if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string')
+          throw Error('Ручная цель должна содержать точный текст до 10000 символов');
+        if(baselineKey&&(target==='https://chatgpt.com/'||!baselineKey.startsWith(new URL(target).pathname+'|')))
+          throw Error('Исходное сообщение Goal относится к другому чату');
+        const record:GoalComposerRecord={...current,phase:'intent',intent:{text,eventAt,baselineKey}};
+        await storage.set({[composerKey(tabId)]:record});
+        return {ok:true,record};
+      });
+    }
+    async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,firstTurn,nativeVerified}:{
+      tabId:number;armId:string;url:string;requestId:string;startedAt:number;promptKey:string;userId:string;
+      userText:string;userVisibleText?:string|null;userSentAtMs:number;firstTurn:boolean;nativeVerified:boolean
+    }) {
+      requireTab(tabId);
+      const target=requireUrl(url);
+      return serialize(async()=>{
+        const current=await readComposer(tabId),intent=current?.intent;
+        if(!current||current.id!==armId||!['intent','bound'].includes(current.phase)||!intent)
+          throw Error('Нет сохранённого намерения ручной отправки Goal');
+        if(nativeVerified!==true||typeof requestId!=='string'||!requestId||typeof userId!=='string'||!userId||
+            !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
+            !Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000||
+            typeof userText!=='string'||!userText.trim()||userText.length>10000||
+            (userText!==intent.text&&userVisibleText!==intent.text)||
+            typeof promptKey!=='string'||promptKey===intent.baselineKey||
+            !promptKey.startsWith(new URL(target).pathname+'|'))
+          throw Error('Нативная ручная отправка Goal не подтверждена точным запросом и текстом');
+        if(current.url==='https://chatgpt.com/'?firstTurn!==true:current.url!==target)
+          throw Error('Ручная отправка Goal относится к другому чату или не является первым сообщением');
+        const binding:GoalComposerBinding={url:target,requestId,startedAt,promptKey,userId,userSentAtMs,
+          userText,userVisibleText:typeof userVisibleText==='string'?userVisibleText:null};
+        const sameBinding=(value:unknown):boolean=>value!==null&&typeof value==='object'&&
+          Object.keys(binding).every(name=>(value as Record<string,unknown>)[name]===binding[name]);
+        const name=composerBindingKey(armId),prior=(await storage.get(name))[name];
+        const previous=await read(target);
+        if(current.phase==='bound') {
+          if(!sameBinding(current.binding)||!sameBinding(prior)||
+              !(prior&&typeof prior==='object'&&'tabId' in prior&&prior.tabId===tabId)||
+              previous?.id!==armId||previous.goal!==userText)
+            throw Error('Разрешение Goal уже связано с другой отправкой или более новой целью');
+          return {ok:true,record:current,goal:view(previous)};
+        }
+        if(prior)throw Error('Разрешение Goal уже связано с другим чатом');
+        requireAvailable(previous);
+        const record:GoalComposerRecord={...current,phase:'bound',binding};
+        const next:GoalRecord={schema:1,id:armId,url:target,originUrl:target,goal:userText,rules:current.config.rules,
+          maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
+          startedAt,manualStartedAt:startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,
+          phase:'waiting',reason:'',continuations:0,expectedPromptKey:promptKey,lastCompletionKey:'',
+          pendingCompletion:null,pauseRequested:false,stopRequested:false,handoffPending:false,
+          handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
+        await event('manual_started',next,tabId,{text:userText,intentText:intent.text,
+          userVisibleText:binding.userVisibleText,rules:next.rules,maxContinuations:next.maxContinuations,
+          maxMinutes:next.maxMinutes,deadlineAt:next.deadlineAt,
+          requestId,startedAt,promptKey,userId,userSentAtMs,composerSourceUrl:current.url});
+        await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId}});
+        return {ok:true,record,goal:view(next)};
+      });
+    }
     function view(record:GoalRecord|null):GoalView|null {
       if(!record)return null;
       const {operation, ...safe}=record;
       return {...safe,operation:operation?{id:operation.id,kind:operation.kind,status:operation.status,createdAt:operation.createdAt}:null};
     }
-    async function event(kind:string,record:GoalRecord,tabId:number|null,details:Record<string,unknown>={}) {
+    async function event(kind:string,record:GoalEventRecord,tabId:number|null,details:Record<string,unknown>={}) {
       await appendJournal({kind:'goal.'+kind,sourceUrl:record.url,operationId:record.operation?.id||record.id,
         goalId:record.id,phase:record.phase,continuations:record.continuations,reason:record.reason||'',...details},
         {id:tabId,url:record.url});
     }
     function operation(record:GoalRecord,kind:GoalOperation['kind'],tabId:number,time:number):GoalOperation {
+      if(kind==='continuation'&&record.continuations>=record.maxContinuations)
+        throw Error('Лимит продолжений исчерпан');
       return {id:uuid(),kind,text:kind==='initial'?policy.initialText(record):policy.continuationText(record),
         tabId,createdAt:time,status:'reserved'};
+    }
+    function stopTransition(old:GoalRecord):GoalRecord {
+      const inFlight=['sending','clicked'].includes(old.phase);
+      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
+        ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?
+          {operation:null,pendingSendKind:null}:{}),
+        reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
+          'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
     }
     function canSend(record:GoalRecord|null,tabId:number,id:string,operationId:string,phase:string):record is GoalRecord & {operation:GoalOperation} {
       return !!record&&record.id===id&&Boolean(record.url)&&record.operation?.id===operationId&&
@@ -100,6 +278,9 @@ declare const module:undefined|{exports:unknown};
       if(!record?.operation)return;
       const op=record.operation;
       try {
+        await beforeDispatch(record);
+        // Pause/stop/new operation during the native dialog wins.
+        if(!(await check({url:record.url,tabId:op.tabId,id:record.id,operationId:op.id})).ok)return;
         const tab=await tabs.get(op.tabId);
         if(canonical(tab.url)!==record.url)throw Error('Вкладка перешла в другой чат');
         const result=await tabs.sendMessage(op.tabId,{type:'CHATGPT_GOAL_DISPATCH',
