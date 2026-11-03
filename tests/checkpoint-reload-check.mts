@@ -72,7 +72,10 @@ try{
  const allocation=await restore();
  assert.equal(allocation.ok,true,'a completed first prompt adopts its allocated chat URL after reload');
  assert.equal(storage[key].url,url);assert.equal(storage[key].promptKey,native().promptKey);
- bootContent();await pause();await pause();
+ const receipts=storage['chatgpt-request-receipts'];
+ assert.ok(receipts?.some((item:any)=>item.requestId==='actual-request-1'));
+ storage['chatgpt-request-receipts']=receipts.map((item:any)=>({...item,url:'https://chatgpt.com/'}));
+ bootWorker();bootContent();await pause();await pause();
  assert.equal(storage[key].state,'complete','the existing completion pipeline finalizes the allocated request');
  assert.equal(notifications,2,'allocated completion is reported once');
  assert.equal(document.querySelector('#prompt-textarea')!.textContent,'KEEP PRIVATE DRAFT');

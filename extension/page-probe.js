@@ -62,23 +62,23 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   // explicit Start new chat also transfers Unknown error through the existing
   // history handoff. Without that action, its native fallback retries in place.
   const unknownServerError=Boolean(fiberKey) && /^unknown error[.!]?$/i.test(visibleError);
+  const recoverySurface = alert.matches('[role="status"]:has(.text-chatgpt-recovery)');
   const action = messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
     : unknownServerError || messageIds.has('chatgptConversations.responseError.retry') ||
-      (alert.querySelector('.text-chatgpt-recovery') && messageIds.has('errors.network.reconnecting_fallback')) || inputDeliveryError ? 'retry' : 'unknown';
-  const recoverySurface=Boolean(alert.querySelector('.text-chatgpt-recovery'))&&messageIds.has('errors.network.reconnecting_fallback');
+      recoverySurface || inputDeliveryError ? 'retry' : 'unknown';
   const nativeUsers=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='user-message');
   const nativeAssistant=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='assistant-message'&&typeof item.messageId==='string'&&item.messageId).at(-1);
   const nativeUser=nativeUsers.at(-1);
   const recoveryContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
   const recoveryContainerKey=recoveryContainer?.getAttribute('data-content-search-turn-key')||recoveryContainer?.getAttribute('data-testid');
-  const recoveryBinding=recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&nativeAssistant&&(!nativeUser||nativeUser.messageId)?{
+  const recoveryBinding=recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&(nativeUser?.messageId||nativeAssistant)&&(!nativeUser||nativeUser.messageId)?{
     kind:nativeUsers.length?'user':'assistant-only',url:location.origin+location.pathname,entryId:recoveryEntry.id,
-    assistantId:nativeAssistant.messageId,userId:nativeUser?.messageId||null}:null;
+    assistantId:nativeAssistant?.messageId||null,userId:nativeUser?.messageId||null}:null;
   if (recoveryAction === 'stop-recovery'||recoveryAction==='inspect-recovery') {
     const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
     const chatRoute=value=>{try{const u=new URL(value);return u.origin==='https://chatgpt.com'?u.origin+(u.pathname==='/'?'/':u.pathname.replace(/\/$/,'')):'';}catch{return '';}};
     if (!chatRoute(expectedUrl)||chatRoute(location.href)!==chatRoute(expectedUrl) || !root.contains(alert) || !alert.getClientRects().length ||
-        !alert.querySelector('.text-chatgpt-recovery') || !messageIds.has('errors.network.reconnecting_fallback')) {
+        !recoverySurface) {
       return {ok:false,reason:'Статус прерванного соединения не подтверждён'};
     }
     const visibleRecoveryNode=node=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
@@ -121,7 +121,8 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     stop.click();
     return {ok:true,stopped:true};
   }
-  if (!captureHistory || action !== 'new-chat') return { action, messages: [], recoveryBinding };
+  if (!captureHistory || action !== 'new-chat') return { action, messages: [], recoveryBinding,
+    deliveryUserSentAtMs:inputDeliveryError?recoveryEntry?.timestampTurns?.filter(item=>item.role==='user').at(-1)?.sentAtMs:null };
   if (!entries) return { action, messages: [], incomplete: true };
   function messageText(item) {
     if (item.type === 'user-message') return typeof item.message === 'string' ? item.message : '';

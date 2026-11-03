@@ -27,6 +27,19 @@ const user=regular.document.createElement('div');user.setAttribute('data-chatgpt
 (user as any).getClientRects=()=>[{width:240,height:32}];regular.document.querySelector('main')!.prepend(user);
 regular.context.expectedBinding=runInContext('inspectChatError(0,false).recoveryBinding',regular.context);
 assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",regular.context),true,'regular user-bound recoveries require the same explicit idle proof');
+// An interrupted request can fail before creating any assistant message.
+const userOnly=setup();
+userOnly.entry.turn.items=[{type:'user-message',messageId:'user-only-id',completed:false}];
+const userOnlyNode=userOnly.document.createElement('div');
+userOnlyNode.setAttribute('data-chatgpt-search-unit-key','fallback-turn-0:0:user');
+(userOnlyNode as any).getClientRects=()=>[{width:240,height:32}];
+userOnly.document.querySelector('main')!.prepend(userOnlyNode);
+userOnly.context.expectedBinding=runInContext('inspectChatError(0,false).recoveryBinding',userOnly.context);
+assert.equal(userOnly.context.expectedBinding.kind,'user');
+assert.equal(userOnly.context.expectedBinding.assistantId,null);
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",userOnly.context),true);
+userOnly.entry.turn.items[0].messageId='different-user';
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).ok",userOnly.context),false);
 for(const mutate of [
  (f:ReturnType<typeof setup>)=>{f.entry.turn.items[0].messageId='new-assistant';},
  (f:ReturnType<typeof setup>)=>{const newer=f.document.createElement('div') as any;newer.setAttribute('data-chatgpt-search-unit-key','fallback-turn-1:0:user');newer.getClientRects=()=>[{width:240,height:32}];f.document.querySelector('main')!.append(newer);},

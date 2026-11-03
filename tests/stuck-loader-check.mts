@@ -29,7 +29,7 @@ const last={id:'fallback-turn-2',isMostRecentTurn:true,isReadOnly:false,errorMes
  {type:'assistant-message',messageId:'assistant-id',phase:'final_answer',completed:true}]}};
 const node=(key:string)=>({getAttribute:(name:string)=>name==='data-chatgpt-search-unit-key'?key:null});
 const element={getAttribute:(name:string)=>name==='data-content-search-turn-key'?'fallback-turn-2':null,
- querySelectorAll:(selector:string)=>[node(selector.includes(':user')?'fallback-turn-2:0:user':'fallback-turn-2:2:assistant')],
+ querySelectorAll:(selector:string)=>selector.startsWith('aside')?[]:[node(selector.includes(':user')?'fallback-turn-2:0:user':'fallback-turn-2:2:assistant')],
  __reactFiber$fixture:{memoizedProps:{entries:[{...last,id:'fallback-turn-1'},last]},return:null}};
 const root={querySelectorAll:(selector:string)=>selector.startsWith('[data-content-search-turn-key]')?[element]:[]};
 const globals=globalThis as unknown as Record<string,unknown>;
@@ -79,6 +79,22 @@ console.log('stuck-loader native latest-turn binding: passed');
  const saved={document:globals.document,location:globals.location};
  globals.document=document;globals.location={origin:'https://chatgpt.com',pathname:'/c/exact'};
  try {
+  const normalTurn=latest.turn;
+  latest.turn={status:'cancelled',items:[nativeUser,{type:'chatgpt-reasoning-group'}] as typeof normalTurn.items};
+  assert.equal(inspectCompletedTurn(attempt.url).reasoningFailed,true);
+  latest.turn={...latest.turn,status:'complete'};
+  assert.equal(inspectCompletedTurn(attempt.url).reasoningFailed,false);
+  latest.turn={status:'cancelled',items:[nativeUser,nativeAssistant]};
+  assert.equal(inspectCompletedTurn(attempt.url).reasoningFailed,false);
+  latest.turn=normalTurn;
+  const historicalError=document.createElement('aside');
+  historicalError.setAttribute('role','alert');historicalError.className='text-danger';
+  historicalError.innerHTML='<span class="text-chatgpt-recovery">Historical failed request</span>';
+  element.before(historicalError);
+  assert.equal(inspectCompletedTurn(attempt.url).hasError,false,'a retained older error cannot block the latest healthy final answer');
+  element.append(historicalError);
+  assert.equal(inspectCompletedTurn(attempt.url).hasError,true,'a visible error inside the latest turn still blocks completion');
+  historicalError.remove();
   const metadata=inspectCompletedTurn(attempt.url);
   for(const key of ['userText','userVisibleText','userSentAtMs','goalResponse','goalRawExact'])assert.equal(Object.hasOwn(metadata,key),false,'default snapshot remains metadata only');
   assert.deepEqual(inspectCompletedTurn(attempt.url,false),metadata);
@@ -88,6 +104,56 @@ console.log('stuck-loader native latest-turn binding: passed');
   assert.equal(goal.firstUserSentAtMs,null,'first-turn allocation evidence is unchanged');
   assert.equal(goal.goalResponse,'GOAL_COMPLETE');assert.equal(goal.goalRawExact,true,'speaker heading and feedback are interface content');
   assert.equal(goal.userVisibleText,'Rendered sent request','sent body excludes speaker and copy controls');
+  const summaryRendered=document.querySelector('[data-markdown-text-style="assistant-message"], .markdown')!;
+  const savedSummaryHTML=summaryRendered.innerHTML;
+  const savedSummaryContent=nativeAssistant.content;
+  nativeAssistant.content='GOAL\\_COMPLETE\n\nИтог\\:\n\n\\- Вычислено 2+2 = 4.';
+  summaryRendered.innerHTML='<p>GOAL_COMPLETE</p><p>Итог:</p><ul><li>Вычислено 2+2 = 4.</li></ul>';
+  const summary=inspectCompletedTurn(attempt.url,true);
+  assert.equal(summary.goalResponse,'GOAL_COMPLETE');
+  assert.equal(summary.goalRawExact,true,'native escaped summary with separately rendered marker completes');
+  summaryRendered.innerHTML='<p><code>GOAL_COMPLETE</code></p><p>Итог:</p><ul><li>Вычислено 2+2 = 4.</li></ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'quoted code cannot complete a goal');
+  const detailedBullets=[
+    'Implemented the requested catalog and independent filters, verified the changes and merged '+
+      '[catalog change](https://example.invalid/catalog/pull/42) and [registry change](https://example.invalid/registry/pull/57). '+
+      'Every entry now appears by default and the two independent filters remain available through the options dialog.',
+    'Completed the production validation chain with '+
+      '[scan and progress publication](https://example.invalid/actions/runs/1001) followed by '+
+      '[the deployed site verification](https://example.invalid/actions/runs/1002).\n'+
+      '  Required checks and the production deployment completed successfully.',
+    'Recorded the verification snapshot and its remaining coverage limits in the reviewed changes.\n\n'+
+      '  The task is complete and its waiting automation was disabled.'
+  ];
+  assert.ok(detailedBullets[0].length>240,'regression fixture exceeds the old per-bullet limit');
+  const detailedSummary='GOAL_COMPLETE\n\nИтог:\n\n'+detailedBullets.map(text=>'- '+text).join('\n\n');
+  const summaryReference='::chatgpt-content-reference{index="0" source_message_id="latest-assistant-id"}';
+  nativeAssistant.content=summaryReference;
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:detailedSummary.replace(/[_:\-]/g,'\\$&')}}];
+  summaryRendered.innerHTML='<p>GOAL_COMPLETE</p><p>Итог:</p><ul>'+detailedBullets.map(text=>'<li>'+text+'</li>').join('')+'</ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,
+    'three long linked DIL summary bullets with wrapped lines and blank paragraphs complete the goal');
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalResponse,'GOAL_COMPLETE');
+  summaryRendered.innerHTML='<p dir="auto"><span>GOAL_COMPLETE</span></p><p><span>Итог:</span></p><ul><li>Completed <a href="https://example.invalid/result">verification</a>.</li></ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'native paragraph renderer uses a neutral text-only span');
+  for(const inner of ['<code>GOAL_COMPLETE</code>','<a href="https://example.invalid">GOAL_COMPLETE</a>','<strong>GOAL_COMPLETE</strong>']) {
+    summaryRendered.innerHTML='<p><span>'+inner+'</span></p><p>Итог:</p><ul><li>Quoted only</li></ul>';
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'rich marker inside a neutral span does not declare completion');
+  }
+  summaryRendered.innerHTML='<p>GOAL_COMPLETE</p><p>Итог:</p><ul><li>Verified summary</li></ul>';
+  for(const body of [detailedSummary.replace('GOAL_COMPLETE','`GOAL_COMPLETE`'),
+    detailedSummary.replace('GOAL_COMPLETE','> GOAL_COMPLETE'),
+    'Example:\n\n'+detailedSummary]) {
+    nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:body}}];
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'quoted or embedded native marker does not declare completion');
+  }
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:detailedSummary}}];
+  summaryRendered.innerHTML='<blockquote><p>GOAL_COMPLETE</p></blockquote><p>Итог:</p><ul><li>Quoted only</li></ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'a rendered quoted marker cannot corroborate completion');
+  nativeAssistant.contentReferences=[];
+  nativeAssistant.content=savedSummaryContent;
+  summaryRendered.innerHTML=savedSummaryHTML;
+
   const userUnit=document.querySelector('[data-chatgpt-search-unit-key$=":user"]')!;
   const userBody=userUnit.querySelector('.whitespace-pre-wrap')!;
   nativeUser.message='  Read [Project](https://example.invalid/path) now  \nSecond\nline';

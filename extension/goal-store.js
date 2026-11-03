@@ -317,10 +317,12 @@
             await save(record);
             return {record};
           }
-          if(old.phase!=='paused'||old.operation)
+          const recoveryBlocked=old.phase==='blocked'&&!old.operation&&
+            old.reason==='Восстановление запроса завершилось ошибкой';
+          if((old.phase!=='paused'&&!recoveryBlocked)||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
-          if(old.manualOverride) {
+          if(old.manualOverride||recoveryBlocked) {
             // An explicit Resume after a real manual intervention is a fresh
             // user authorization, but the current chat must be idle first.
             const ready=await tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url:target});
@@ -328,7 +330,7 @@
           }
           let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
           const pendingKind=old.manualPending?null:old.pendingSendKind||
-            (old.pendingCompletion||old.manualOverride?'continuation':null);
+            (old.pendingCompletion||old.manualOverride||recoveryBlocked?'continuation':null);
           if(pendingKind) {
             record={...record,pendingSendKind:null,pendingCompletion:null};
             record=pendingKind==='continuation'&&record.continuations>=record.maxContinuations
@@ -520,7 +522,8 @@
         if(!['preparing','sending','clicked','waiting','recovering','paused','blocked'].includes(old.phase)||
             pending.tabId!==tabId||pending.requestId!==requestId||pending.startedAt!==startedAt||old.manualStartedAt!==startedAt||
             nativeVerified!==true||typeof userId!=='string'||!userId||typeof userText!=='string'||!userText.trim()||userText.length>10000||
-            (userText!==pending.text&&userVisibleText!==pending.text)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
+            (userText!==pending.text&&userVisibleText!==pending.text&&
+              !(typeof userVisibleText==='string'&&userVisibleText.replace(/\s+/g,' ').trim()===pending.text.replace(/\s+/g,' ').trim()))||typeof promptKey!=='string'||promptKey===pending.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
           return {ok:false};
         if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};
@@ -542,7 +545,9 @@
       if(!target)return;
       await serialize(async()=>{
         const record=await read(target);
-        if(!record||!['waiting','recovering','paused'].includes(record.phase))return;
+        const recoveredBlock=record?.phase==='blocked'&&!record.operation&&
+          record.reason==='Восстановление запроса завершилось ошибкой'&&kind==='retry.confirmed';
+        if(!record||!['waiting','recovering','paused'].includes(record.phase)&&!recoveredBlock)return;
         // Journal delivery and Goal writes use different queues. Recheck the
         // request fence here, after serialization: an accepted old callback
         // may arrive after a manual send or a newly started Goal.
@@ -553,7 +558,7 @@
         let next=record;
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
-          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey};
+          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,reason:''};
         if(['retry.failed','retry.blocked'].includes(kind))
           next={...record,phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'};
         if(next===record)return;

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.0';
+  const SCRIPT_VERSION = '1.8.19';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -905,10 +905,14 @@
   function scheduleHandoffCheck() {
     if(handoffCheckScheduled||!['sending','awaiting-confirmation'].includes(handoffRecord?.stage))return;
     handoffCheckScheduled=true;
-    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,Math.ceil(2000-(performance.now()-handoffLastCheckAt)))}).then(async result=>{
+    const interval=handoffRecord.stage==='awaiting-confirmation'?10000:2000;
+    void runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.max(250,Math.ceil(interval-(performance.now()-handoffLastCheckAt)))}).then(async result=>{
       handoffCheckScheduled=false;
       if(result?.ok&&runtimeAvailable()) {
         try {await reconcileHandoff();}catch{}
+        // A server acknowledgement can arrive without a DOM mutation or focus
+        // event. Reconcile the consumed receipt, never repeat its send.
+        scheduleHandoffCheck();
       }
     });
   }
@@ -1226,7 +1230,21 @@
       const firstSeen=recoveryFirstSeen.get(alert);
       // A still-mounted unchanged banner belongs to the previous request.
       // Only a changed/reappearing error can consume another retry, not time.
-      if(firstSeen.inherited)continue;
+      if(firstSeen.inherited) {
+        if(!firstSeen.checking) {
+          firstSeen.checking=true;
+          void runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
+            alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert)}).then(info=>{
+            const started=globalThis.__chatgptNotifierRequestStartedAt;
+            if(recoveryFirstSeen.get(alert)!==firstSeen||!Number.isFinite(started)||
+                info?.action!=='retry'||!Number.isFinite(info.deliveryUserSentAtMs)||
+                Math.abs(info.deliveryUserSentAtMs-started)>10000)return;
+            firstSeen.inherited=false;
+            scheduleErrorCheck(0);
+          }).finally(()=>{firstSeen.checking=false;});
+        }
+        continue;
+      }
       if (alert.querySelector('.text-chatgpt-recovery')) {
         const remaining = RECOVERY_GRACE_MS - (Date.now() - firstSeen.at);
         if (remaining > 0) { scheduleErrorCheck(remaining); continue; }
@@ -1381,6 +1399,24 @@
         if (!text) {
           stableText = '';
           stableSince = 0;
+          const promptKey=attempt.promptKey;
+          const now=Date.now();
+          if(!promptKey||snapshot?.promptKey!==promptKey||!attempt.requestId||
+              completionProbeBusy||now-lastCompletionProbeAt<1000)return;
+          completionProbeBusy=true;
+          lastCompletionProbeAt=now;
+          void runtimeMessage({type:'CHATGPT_COMPLETION_PROBE',url:attempt.url,
+            startedAt:attempt.startedAt,requestId:attempt.requestId,boundPromptKey:promptKey})
+            .then(native=>{
+              if(!isCurrent()||settled||isGenerating()||currentErrors().length||
+                  !native?.ok||native.reasoningFailed!==true||native.generating!==false||
+                  native.isLatest!==true||native.isReadOnly!==false||native.promptKey!==promptKey)return;
+              const latest=latestPromptSnapshot();
+              if(latest?.promptKey!==promptKey||latest.response)return;
+              finish(null);
+              handleError({sourceUrl:attempt.url,sessionTitle:document.title,
+                response:'Обдумывание не удалось',durationMs:Date.now()-attempt.startedAt},promptKey);
+            }).catch(()=>{}).finally(()=>{completionProbeBusy=false;});
           return;
         }
 
@@ -1410,6 +1446,7 @@
                 attempt.goalNativeVerified=nativeFinal;
                 attempt.goalNativeUserId=nativeFinal&&typeof native.userId==='string'?native.userId:'';
                 void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
+                sendCompletion(latest,attempt);
                 finish(text);
               }
             }).catch(()=>{}).finally(()=>{completionProbeBusy=false;});
@@ -1468,8 +1505,7 @@
     if (fingerprint === lastSentFingerprint) return;
 
     lastSentFingerprint = fingerprint;
-    deferredTaskObserver?.refresh();
-    void renameHandoff();
+    void audit('completion.delivery_started',{promptKey:snapshot.promptKey,startedAt:attempt.startedAt});
     runtimeMessage({
       type: 'CHATGPT_RESPONSE_COMPLETE',
       attemptId:attempt.id,completionStartedAt:attempt.startedAt,requestId:attempt.requestId,
@@ -1484,7 +1520,11 @@
         ? `${snapshot.promptKey}|${snapshot.assistantKey}`
         : '',
       dismissOnReturn: false
-    }).catch(() => {});
+    }).then(result=>{
+      void audit('completion.delivery_result',{reason:result?.ok===true?'acknowledged':result?.ok===false?'rejected':'no-ack'});
+    });
+    deferredTaskObserver?.refresh();
+    void renameHandoff();
   }
 
   function scheduleActiveCompletionRecovery() {
@@ -1498,7 +1538,7 @@
       let recovered=false,pendingRestore=false;
       try{
         if(!completionAttempt||completionAttempt.path!==location.pathname){
-          const restored=await restoreCompletionCheckpoint();recovered=restored===true;pendingRestore=restored==='pending';
+          const restored=await restoreCompletionCheckpoint();recovered=restored===true;pendingRestore=restored==='pending'||Boolean(globalThis.__chatgptNotifierAttemptId);
         }
         if(!recovered)recovered=await recoverActiveCompletion()===true;
       }catch{}
@@ -1600,12 +1640,7 @@
       return completionAttempt===attempt&&attempt.token===watchToken&&attempt.path===location.pathname&&
         attempt.id===globalThis.__chatgptNotifierAttemptId&&attempt.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&attempt.requestId===(globalThis.__chatgptNotifierRequestId||null);
     };
-    waitForAnswerBoundToLatestPrompt(isCurrent,attempt).then(async text=>{
-      await attempt.checkpointWrite;
-      if(!isCurrent()||!text)return;
-      const resolved=latestPromptSnapshot();
-      if(resolved?.response&&resolved.promptKey===attempt.promptKey)sendCompletion(resolved,attempt);
-    });
+    void waitForAnswerBoundToLatestPrompt(isCurrent,attempt);
   }
 
   function isStopButton(node) {

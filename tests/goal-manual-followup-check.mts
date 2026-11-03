@@ -43,8 +43,21 @@ for(const phase of ['waiting','paused']) {
 for(const patch of [{userText:'Other text'},{userSentAtMs:80000},{userId:''},{promptKey:baseline},{isLatest:false},{isReadOnly:true}]) {
  const h=await fixture();await h.manual();h.setNative(patch);await h.bind();assert.ok(h.record().manualPending);assert.equal(h.record().supplements,undefined);assert.equal(h.messages.length,0);
 }
+{
+ const h=await fixture('paused');await h.manual();
+ const original=structuredClone(h.record());
+ h.setRequest(null);
+ h.setNative({isLatest:false,userText:'[Additional task](https://example.com) keep exact',
+   userVisibleText:'  Additional task\n\nkeep exact  '});
+ assert.equal((await h.bind()).pending,false,'historic native user survives superseded request cache');
+ assert.equal(h.record().supplements.length,1);
+ assert.equal(h.record().supplements[0].text,original.manualPending.text,'preserve original user wording');
+ for(const key of ['id','goal','deadlineAt','maxContinuations','continuations'])assert.equal(h.record()[key],original[key]);
+ assert.equal(h.messages.length,0,'historical adoption never sends a user draft');
+ assert.equal(h.record().phase,'paused','historical adoption preserves pause');
+}
 for(const request of [null,{requestId:'wrong',startedAt:100020,url},{requestId:'manual-2',startedAt:100020,url:'https://chatgpt.com/c/other'}]) {
- const h=await fixture();await h.manual();h.setRequest(request);await h.bind();assert.equal(h.record().supplements,undefined);assert.equal(h.probes.length,0);
+ const h=await fixture();await h.manual();h.setRequest(request);await h.bind();assert.equal(h.record().supplements,undefined);assert.equal(h.probes.length,1,'a historical read cannot adopt a latest-turn fixture after cache supersession');
 }
 {
  const h=await fixture();await h.manual();h.onProbe(()=>h.setRequest({requestId:'newer',startedAt:100030,url}));await h.bind();assert.equal(h.record().supplements,undefined);assert.equal(h.messages.length,0);

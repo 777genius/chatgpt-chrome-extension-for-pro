@@ -103,7 +103,8 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       toggle.title=!route?'Goal is available on ChatGPT chat pages':!loaded&&error?'Retry loading Goal':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
-      const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused';
+      const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused'||
+        record?.phase==='blocked'&&!record.operation&&record.reason==='Восстановление запроса завершилось ошибкой';
       for(const input of Object.values(fields))input.disabled=!editable;
       buttons.pause.hidden=!active()||paused;
       buttons.resume.hidden=!paused;

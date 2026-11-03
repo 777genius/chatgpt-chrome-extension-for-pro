@@ -531,7 +531,24 @@ async function bindNativeManualSupplement(tabId,url) {
   if(pending.tabId!==tabId)return {ok:false,pending:true};
   const request=await latestRequestReceipt(tabId);
   if(request?.requestId!==pending.requestId||request.startedAt!==pending.startedAt||
-      request.url&&ChatGPTGoalPolicy.canonical(request.url)!==url)return {ok:false,pending:true};
+      request.url&&ChatGPTGoalPolicy.canonical(request.url)!==url) {
+    // A later automatic retry may supersede the request cache while a sent
+    // user clarification still awaits adoption. Recover only its exact native
+    // timestamp and rendered sent text, never the current composer draft.
+    const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+      func:inspectCompletedTurn,args:[url,true,null,pending.startedAt]});
+    const native=checked?.result,current=await goalController.get(url);
+    if(!native?.ok||native.isLatest!==false||native.isReadOnly!==false||native.url!==url||!native.userId||!native.promptKey||
+        !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-pending.startedAt)>10000||
+        (native.userText!==pending.text&&native.userVisibleText!==pending.text&&
+          !(typeof native.userVisibleText==='string'&&native.userVisibleText.replace(/\s+/g,' ').trim()===pending.text.replace(/\s+/g,' ').trim()))||
+        current?.id!==record.id||JSON.stringify(current.manualPending)!==JSON.stringify(pending)||
+        ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false,pending:true};
+    const bound=await goalController.manualBind({url,tabId,id:record.id,requestId:pending.requestId,
+      startedAt:pending.startedAt,promptKey:native.promptKey,userId:native.userId,
+      userText:native.userText,userVisibleText:native.userVisibleText,userSentAtMs:native.userSentAtMs,nativeVerified:true});
+    return {ok:bound.ok,pending:!bound.ok};
+  }
   const waiting=()=>({ok:true,pending:true});
   const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
   const native=checked?.result;
@@ -788,9 +805,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
     appendJournal(event,sender.tab).then(async result=>{
-      if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind))
+      if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind)) {
+        const observed=event.kind==='retry.confirmed'?await latestRequestReceipt(sender.tab.id):null;
+        const confirmedAttempt=observed?.operationId===event.operationId&&Number.isFinite(observed.startedAt)
+          ?String(observed.startedAt):event.attemptId;
         await goalController.retry({url:event.sourceUrl||sender.tab.url,tabId:sender.tab.id,kind:event.kind,
-          promptKey:event.newPromptKey,attemptId:event.attemptId,goalHandoff:event.goalHandoff===true});
+          promptKey:event.newPromptKey,attemptId:confirmedAttempt,goalHandoff:event.goalHandoff===true});
+      }
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
     return true;
@@ -894,7 +915,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if(message?.type==='CHATGPT_COMPLETION_PROBE') {
     const url=messageChatUrl(message,sender),initial=manualRequestReceiptsByTab.get(sender.tab?.id);
-    if(!url||!Number.isFinite(message.startedAt)||message.startedAt<=0||initial&&(initial.startedAt!==message.startedAt||initial.requestId&&initial.requestId!==message.requestId||initial.url&&initial.url!==url)){
+    if(!url||!Number.isFinite(message.startedAt)||message.startedAt<=0||initial&&(initial.startedAt!==message.startedAt||initial.requestId&&initial.requestId!==message.requestId||initial.url&&initial.url!==url&&initial.url!=='https://chatgpt.com/')){
       sendResponse?.({ok:false,reason:'attempt-changed'});return false;
     }
     (async()=>{
@@ -904,6 +925,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const before=initial?null:await readChatStatus(url);
       const checkpoint=await completionCheckpointRead(sender.tab.id);
       if(checkpoint&&(checkpoint.state!=='active'||checkpoint.startedAt!==message.startedAt||checkpoint.requestId&&checkpoint.requestId!==message.requestId||checkpoint.url!==url))return {ok:false,reason:'checkpoint-changed'};
+      if(initial?.url==='https://chatgpt.com/'&&(!checkpoint?.promptKey||
+          checkpoint.promptKey!==message.boundPromptKey||checkpoint.baselineKey!==''))return {ok:false,reason:'allocation-unbound'};
       if(!initial&&(before.status?.kind!=='loading'||before.status.eventAt!==message.startedAt))return {ok:false,reason:'attempt-changed'};
       const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectCompletedTurn,args:[url]});
       const native=results[0]?.result||{ok:false,reason:'native-turn-missing'};
@@ -914,7 +937,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const boundFinal=typeof message.boundPromptKey==='string'&&message.boundPromptKey&&message.boundPromptKey===native.promptKey&&
           native.turnStatus==='complete'&&native.generating===false&&native.assistantCompleted===true&&
           native.assistantPhase==='final_answer'&&Boolean(native.assistantId)&&Boolean(native.assistantKey);
-        if(!native.ok||(!liveProgress&&!boundFinal)||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
+        const boundReasoningFailure=checkpoint?.state==='active'&&checkpoint.promptKey===message.boundPromptKey&&
+          native.promptKey===checkpoint.promptKey&&native.reasoningFailed===true&&native.generating===false;
+        if(!native.ok||(!liveProgress&&!boundFinal&&!boundReasoningFailure)||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
         const runtime=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'ISOLATED',func:()=>({attempt:globalThis.__chatgptNotifierAttemptId,startedAt:globalThis.__chatgptNotifierRequestStartedAt})});
         const current=await readChatStatus(url);
         if(runtime[0]?.result?.attempt!==String(message.startedAt)||runtime[0]?.result?.startedAt!==message.startedAt||
@@ -958,13 +983,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const completionRequest=isWarning?manualRequestReceiptsByTab.get(tabId)||null:await latestRequestReceipt(tabId);
     if(isError&&message.requestId&&completionRequest?.requestId!==message.requestId)return;
     if(!isError&&!isWarning&&(!completionRequest||completionRequest.startedAt!==message.completionStartedAt||
-        String(completionRequest.startedAt)!==message.attemptId||completionRequest.url&&completionRequest.url!==sourceUrl||
-        completionRequest.requestId&&message.requestId!==completionRequest.requestId))return;
+        String(completionRequest.startedAt)!==message.attemptId||
+        completionRequest.requestId&&message.requestId!==completionRequest.requestId)){
+      journalInBackground({kind:'completion.delivery_refused',sourceUrl,attemptId:message.attemptId,
+        reason:!completionRequest?'missing-request':completionRequest.startedAt!==message.completionStartedAt?'request-time-changed':
+          String(completionRequest.startedAt)!==message.attemptId?'attempt-changed':'request-id-changed'},sender.tab);
+      return;
+    }
 
-    if(!isError&&!isWarning) {
-      await bindNativeManualSupplement(tabId,sourceUrl);
-      const armed=await goalController.composerGet({tabId});
-      if(armed?.phase==='intent')await bindNativeComposerGoal(tabId,sourceUrl,armed.id);
+    if(!isError&&!isWarning&&completionRequest.url&&completionRequest.url!==sourceUrl) {
+      // The first request can start on the empty composer. Its durable
+      // checkpoint adopts the permanent URL only after native turn binding.
+      if(completionRequest.url!=='https://chatgpt.com/'||!sourceUrl||message.goalNativeVerified!==true)return;
+      const allocated=await completionCheckpointRead(tabId);
+      if(allocated?.state!=='active'||allocated.url!==sourceUrl||allocated.baselineKey!==''||
+          allocated.startedAt!==message.completionStartedAt||allocated.requestId!==message.requestId||
+          !allocated.promptKey||allocated.promptKey!==message.goalPromptKey||
+          ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==sourceUrl||
+          await latestRequestReceipt(tabId)!==completionRequest)return;
     }
 
     const fingerprint = String(message.fingerprint || '');
@@ -978,6 +1014,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
         rawExact:message.goalRawExact,userId:message.goalNativeUserId};
       try {
+        await bindNativeManualSupplement(tabId,sourceUrl);
+        const armed=await goalController.composerGet({tabId});
+        if(armed?.phase==='intent')await bindNativeComposerGoal(tabId,sourceUrl,armed.id);
+        if(goalAnswer.nativeVerified===true&&typeof message.response==='string'&&
+            !goalAnswer.rawExact&&message.response.startsWith(ChatGPTGoalPolicy.MARKER)) {
+          const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+            func:inspectCompletedTurn,args:[sourceUrl,true]});
+          const native=checked?.result;
+          if(native?.ok&&native.isLatest===true&&native.isReadOnly===false&&!native.hasError&&!native.generating&&
+              native.turnStatus==='complete'&&native.assistantCompleted===true&&native.assistantPhase==='final_answer'&&
+              native.userId===goalAnswer.userId&&native.promptKey===goalAnswer.promptKey&&
+              native.promptKey+'|'+native.assistantKey===rawCompletionKey&&native.goalRawExact===true&&
+              native.goalResponse===ChatGPTGoalPolicy.MARKER) {
+            goalAnswer.response=native.goalResponse;
+            goalAnswer.rawExact=true;
+          }
+        }
         const handoff=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
         if(handoff?.id&&['sending','awaiting-confirmation','sent'].includes(handoff.stage)&&
             ChatGPTGoalPolicy.canonical(handoff.sourceUrl)!==sourceUrl&&

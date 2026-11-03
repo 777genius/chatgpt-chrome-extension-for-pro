@@ -67,6 +67,20 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
         if(target.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(alias||''))targetAlias=alias;
       } catch {}
     }
+    // This native refusal happens before save.click(). Allow a bounded fresh
+    // preparation after React replaced the form or the generated title changed.
+    if(record.titleStatus==='failed'&&record.titleReason==='title-form-changed'&&
+        (record.titleRefusalRetries||0)<2) {
+      const next={...record,titleStatus:'waiting',titlePreparationVersion:1,
+        titlePrepareAttempts:0,titleRetryAfter:0,titleRefusalRetries:(record.titleRefusalRetries||0)+1};
+      delete next.previousTitle;
+      delete next.titleSaveStartedAt;
+      delete next.titlePreparationTitle;
+      await appendJournal({kind:'handoff.title_no_click_recovered',operationId:id,sourceUrl:record.sourceUrl,
+        targetUrl:record.targetUrl}, {id:tabId});
+      await chrome.storage.local.set({[key]:next});
+      record=next;
+    }
     const noSaveIntent=!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt');
     const recoverFailed=record.titleStatus==='failed'&&recoverTemporaryTarget&&targetAlias&&noSaveIntent&&
       record.titleReason==='Открыт другой чат; переименование отменено';

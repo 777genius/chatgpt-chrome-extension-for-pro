@@ -134,7 +134,12 @@ function controlChatTitle(options) {
   }
   if (!state.selected) return {ok:false,reason:'rename-not-selected'};
   const inputs=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
-  const input=state.input || (inputs.length===1&&inputs[0]);
+  const input=state.input?.isConnected?state.input:(inputs.length===1&&inputs[0]);
+  // React may replace the input between fill and save. Rebind only inside
+  // this operation's same mounted form with the already verified value.
+  if(options.action==='save'&&state.input&&!state.input.isConnected&&input&&
+      input.closest('form')===state.form&&input.value===state.title&&document.title===state.previousTitle)
+    state.input=input;
   const form=input?.closest('form');
   if (!input || !visible(input) || !form || !form.querySelector('h2') || form.querySelectorAll('input').length!==1 ||
       !form.querySelector('button[type="submit"]') || form.querySelectorAll('button').length!==2) return {ok:false,retryable:true,reason:'rename-form-not-ready'};

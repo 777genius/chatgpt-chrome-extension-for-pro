@@ -210,4 +210,21 @@ function fixture() {
   assert.equal(env.data[goalKey].phase,'recovering','current request recovery remains enabled');
 }
 
+{
+ const env=fixture();await env.waitingGoal();
+ const original=structuredClone(env.data[goalKey]);
+ env.data[goalKey]={...env.data[goalKey],phase:'blocked',operation:null,reason:'Восстановление запроса завершилось ошибкой'};
+ const confirmed={url,tabId:7,kind:'retry.confirmed',attemptId:'1000100',promptKey:'/c/manual-retry-fence|recovered-user'};
+ await env.evaluate('goalController.retry(confirmed)',{confirmed});
+ assert.equal(env.data[goalKey].phase,'waiting','confirmed recovery resumes a no-operation recovery block');
+ assert.equal(env.data[goalKey].expectedPromptKey,confirmed.promptKey);
+ for(const key of ['id','goal','deadlineAt','maxContinuations','continuations'])assert.equal(env.data[goalKey][key],original[key]);
+ env.data[goalKey]={...env.data[goalKey],phase:'stopped',reason:'Stopped by user'};
+ await env.evaluate('goalController.retry(confirmed)',{confirmed});
+ assert.equal(env.data[goalKey].phase,'stopped','retry confirmation cannot resume a stopped goal');
+ env.data[goalKey]={...env.data[goalKey],phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',operation:{id:'unknown-click'}};
+ await env.evaluate('goalController.retry(confirmed)',{confirmed});
+ assert.equal(env.data[goalKey].phase,'blocked','unresolved send retains its fence');
+}
+
 console.log('Goal/retry fences: confirmed manual supersession, stale callbacks, restart, exact consumed grants and new Goal binding passed.');

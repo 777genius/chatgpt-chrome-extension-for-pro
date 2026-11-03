@@ -3,7 +3,7 @@
 // Serialized into MAIN. Metadata by default; an armed Goal may explicitly
 // request already-sent message text. Never reads drafts or invokes handlers.
 // The expected attempt is bound by the extension caller.
-function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null) {
+function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null) {
   function plainGoalMarkerDOM(rendered,sourceMessageId='') {
     if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
     const plain=node=>node?.tagName==='P'&&!node.children.length&&node.childNodes.length===1&&
@@ -40,7 +40,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   if(url!==expectedUrl)return {ok:false,reason:'route-changed'};
   const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
   const turns=Array.from(root.querySelectorAll('[data-content-search-turn-key],[data-testid^="conversation-turn-"]'));
-  const element=turns.at(-1);
+  let element=turns.at(-1);
   if(!element)return {ok:false,reason:'turn-missing'};
   const fiberKey=Object.keys(element).find(key=>key.startsWith('__reactFiber$'));
   let fiber=fiberKey&&element[fiberKey],entry=null,entryCount=0,nativeEntries=null;
@@ -52,17 +52,29 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     if(latest?.id===domKey&&latest.isMostRecentTurn===true){entry=latest;entryCount=entries.length;nativeEntries=entries;break;}
   }
   if(!entry)return {ok:false,reason:'native-turn-missing'};
+  let historicalUserIndex=null;
+  if(Number.isFinite(sentAt)&&includeGoalText===true) {
+    const candidates=(nativeEntries||[]).flatMap(candidate=>
+      (candidate.timestampTurns||[]).filter(item=>item.role==='user').map((time,index)=>({candidate,index,at:time.sentAtMs})))
+      .filter(item=>Number.isFinite(item.at)&&Math.abs(item.at-sentAt)<=10000);
+    if(candidates.length!==1)return {ok:false,reason:'historical-user-ambiguous'};
+    entry=candidates[0].candidate;
+    historicalUserIndex=candidates[0].index;
+    element=turns.find(node=>(node.getAttribute('data-content-search-turn-key')||node.getAttribute('data-testid'))===entry.id);
+    if(!element)return {ok:false,reason:'historical-user-not-rendered'};
+  }
   const users=(entry.turn?.items||[]).filter(item=>item.type==='user-message');
   const assistants=(entry.turn?.items||[]).filter(item=>item.type==='assistant-message'&&item.phase==='final_answer');
-  const user=users.at(-1),assistant=assistants.at(-1);
-  const domUser=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]')).at(-1);
+  const user=historicalUserIndex===null?users.at(-1):users[historicalUserIndex],assistant=assistants.at(-1);
+  const domUsers=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]'));
+  const domUser=historicalUserIndex===null?domUsers.at(-1):domUsers[historicalUserIndex];
   const domAssistant=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":assistant"],[data-message-author-role="assistant"],[data-turn="assistant"]')).at(-1);
   const userKey=domUser?.getAttribute('data-testid')||domUser?.getAttribute('data-chatgpt-search-unit-key');
   const assistantKey=domAssistant?.getAttribute('data-testid')||domAssistant?.getAttribute('data-chatgpt-search-unit-key');
   if(!user?.messageId||!userKey)return {ok:false,reason:'bound-messages-missing'};
   const visible=node=>!!node.getClientRects().length;
   const generating=Array.from(root.querySelectorAll('button[data-testid="stop-button"],button[data-testid="fruitjuice-stop-button"],[data-composer-body] button:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).some(visible);
-  const hasError=Boolean(entry.errorMessage)||Array.from(root.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(visible);
+  const hasError=Boolean(entry.errorMessage)||Array.from(element.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(visible);
   const userTimes=(entry.timestampTurns||[]).filter(item=>item.role==='user');
   const firstUserSentAtMs=entryCount===1&&users.length===1&&userTimes.length===1?userTimes[0].sentAtMs:null;
   let goalText={};
@@ -77,14 +89,15 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     if((unitBound||idsBound)&&(messageIds==null||idsBound)) {
       // Read only a concrete sent-message body after binding its unit or native
       // message ID. A whole turn also contains speaker, file and toolbar text.
-      const candidates=Array.from(domUser.querySelectorAll('[data-user-message-bubble="true"] [data-search-result-target] > div > div.whitespace-pre-wrap[dir="auto"]'))
+      const candidates=Array.from(domUser.querySelectorAll('[data-user-message-bubble="true"] [data-search-result-target] div.whitespace-pre-wrap'))
         .filter(node=>node.isConnected&&visible(node)&&!node.closest('[aria-hidden="true"],[hidden],[inert],[data-app-shell-active-page="false"]'));
       const body=candidates.find(node=>!candidates.some(parent=>parent!==node&&parent.contains(node)));
       if(body&&candidates.every(node=>body.contains(node))) {
-        const copy=body.cloneNode(true);
+        const textBody=body.querySelector('[data-markdown-text-tone="user-message"]')||body;
+        const copy=textBody.cloneNode(true);
         // Computed visibility belongs to mounted originals, not detached
         // clones. Do not use child rects: display:contents wrappers have none.
-        const originals=Array.from(body.querySelectorAll('*')),clones=Array.from(copy.querySelectorAll('*'));
+        const originals=Array.from(textBody.querySelectorAll('*')),clones=Array.from(copy.querySelectorAll('*'));
         for(let index=0;index<originals.length;index++) {
           const style=document.defaultView?.getComputedStyle?.(originals[index]);
           if(style?.display==='none'||['hidden','collapse'].includes(style?.visibility))clones[index].remove();
@@ -126,7 +139,27 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
       semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
       goalRawExact=semantic.textContent.trim()==='GOAL_COMPLETE';
     }
-    const sentAtMs=userTimes.at(-1)?.sentAtMs;
+    // Require the exact native completion envelope and corroborate its marker
+    // in the rendered answer. Preserve the existing marker-only protocol.
+    const summaryBody=goalResponse.replace(/\\([_:\-])/g,'$1');
+    // The marker declares completion. Summary length, links, wrapping and
+    // paragraph spacing do not change that declaration.
+    const summary = /^GOAL_COMPLETE\r?\n\r?\nИтог:\r?\n(?:\r?\n)?- \S[\s\S]*$/.test(summaryBody);
+    if(summary&&rendered) {
+      const marker = Array.from(rendered.querySelectorAll('p')).find(node=>
+        node.textContent==='GOAL_COMPLETE'&&!node.closest('[hidden],[aria-hidden="true"],blockquote,li,pre'));
+      const run=marker?.firstElementChild;
+      const plainSpan=marker?.childNodes.length===1&&run?.tagName==='SPAN'&&run.attributes.length===0&&
+        run.childNodes.length===1&&run.firstChild.nodeType===3&&run.firstChild.textContent==='GOAL_COMPLETE';
+      if(marker&&(plainGoalMarkerDOM(marker)||plainSpan||boundDIL&&marker.closest('[data-dil-message-id]')?.getAttribute('data-dil-message-id')===boundDIL&&
+          marker.children.length===1&&marker.firstElementChild?.matches('span[data-d-stream-run]')&&
+          marker.firstElementChild.children.length===0&&
+          !marker.closest('[hidden],[aria-hidden="true"],[style*="display: none"]'))) {
+        goalResponse='GOAL_COMPLETE';
+        goalRawExact=true;
+      }
+    }
+    const sentAtMs=(historicalUserIndex===null?userTimes.at(-1):userTimes[historicalUserIndex])?.sentAtMs;
     goalText={userText:typeof user.message==='string'?user.message:'',userVisibleText,userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
       goalResponse,goalRawExact};
   }
@@ -155,6 +188,9 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   }
   return {ok:true,url,firstUserSentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
     assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
+    reasoningFailed:entry.turn.status==='cancelled'&&
+      entry.turn.items.some(item=>item.type==='chatgpt-reasoning-group')&&
+      !entry.turn.items.some(item=>item.type==='assistant-message'),
     turnStatus:entry.turn.status,assistantPhase:assistant?.phase,assistantCompleted:assistant?.completed===true,
     generating,hasError,...(failedPromptKey?{composerIdle,absentPromptKey}:{}),...goalText};
 }

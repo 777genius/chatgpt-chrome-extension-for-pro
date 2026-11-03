@@ -121,8 +121,10 @@ function probeCheck(){
  assert.equal(runInContext("inspectChatError(1,false,'stop-recovery','https://chatgpt.com/c/other').ok",ctx),false);assert.equal(stops,0);
  assert.equal(runInContext("inspectChatError(1,false,'stop-recovery','https://chatgpt.com/c/test').stopped",ctx),true);assert.equal(stops,1);
  status.__reactFiber$test.memoizedProps.children.props.children.props.id='unrelated.status';
- assert.equal(runInContext("inspectChatError(1,false,'stop-recovery','https://chatgpt.com/c/test').ok",ctx),false);assert.equal(stops,1,'only confirmed recovery may trigger native stop');
- assert.equal(runInContext('inspectChatError(1,true).action',ctx),'unknown','unrelated status must not authorize a retry');
+ assert.equal(runInContext('inspectChatError(1,true).action',ctx),'retry','recovery structure does not require a localization ID');
+ status.querySelector('.text-chatgpt-recovery').classList.remove('text-chatgpt-recovery');
+ assert.equal(runInContext("inspectChatError(1,false,'stop-recovery','https://chatgpt.com/c/test').ok === true",ctx),false);assert.equal(stops,1,'only confirmed recovery may trigger native stop');
+ assert.notEqual(runInContext('inspectChatError(1,true).action',ctx),'retry','unrelated status must not authorize a retry');
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
 type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading'|'legacy-model'|'source-model-change';
