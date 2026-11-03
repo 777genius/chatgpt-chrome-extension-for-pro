@@ -1,0 +1,90 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL("../", import.meta.url));
+const dir = join(root, "dist", "extension");
+const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as {
+  background: { service_worker: string };
+  content_scripts: { js: string[] }[];
+  icons: Record<string, string>;
+};
+// Node's ESM package scope must never silently reinterpret classic Chrome
+// scripts required by the historical and generated-distribution test suites.
+const scriptPackage = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { type?: string };
+if (scriptPackage.type !== "commonjs") {
+  throw new Error("Chrome classic-script compatibility requires extension/package.json type=commonjs");
+}
+const files = new Set<string>([
+  manifest.background.service_worker,
+  ...manifest.content_scripts.flatMap((script) => script.js),
+  ...Object.values(manifest.icons),
+  "popup.js",
+  "offscreen.js",
+  "journal.js",
+  "journal-modular.js",
+]);
+const worker = readFileSync(join(dir, manifest.background.service_worker), "utf8");
+for (const match of worker.matchAll(/\bimportScripts\(([^)]+)\)/g)) {
+  for (const spec of match[1]?.matchAll(/['"]([^'"]+\.js)['"]/g) ?? []) {
+    if (spec[1]) files.add(spec[1]);
+  }
+}
+for (const name of ["popup.html", "journal.html", "offscreen.html"]) {
+  const html = readFileSync(join(dir, name), "utf8");
+  for (const match of html.matchAll(/<script[^>]+src=['"]([^'"]+)['"]/g)) {
+    if (match[1]) files.add(match[1]);
+  }
+}
+for (const file of files) {
+  if (!existsSync(join(dir, file))) throw new Error("Missing generated MV3 resource " + file);
+}
+const scanner = new Bun.Transpiler({ loader: "js", target: "browser" });
+const js = readdirSync(dir).filter((name) => name.endsWith(".js")).sort();
+const legacy = join(root, "extension");
+const typed = join(root, "src", "extension");
+// The worker loads classic helpers into one shared execution environment.
+// A TypeScript refactor must not reorder those globals, even when every
+// individual resource exists and parses successfully.
+function loadedClassicScripts(source: string): string[] {
+  return Array.from(source.matchAll(/\bimportScripts\(\s*['"]([^'"]+)['"]\s*\)/g),
+    match => match[1] ?? "");
+}
+const originalWorker = readFileSync(join(legacy, manifest.background.service_worker), "utf8");
+const emittedWorker = readFileSync(join(dir, manifest.background.service_worker), "utf8");
+if (JSON.stringify(loadedClassicScripts(originalWorker)) !==
+    JSON.stringify(loadedClassicScripts(emittedWorker))) {
+  throw new Error("MV3 service worker importScripts load order changed");
+}
+for (const name of js) {
+  if (name === "journal-modular.js") continue; // independently bundled IIFE
+  if (!existsSync(join(typed, name.replace(/\.js$/, ".ts")))) {
+    const original = readFileSync(join(legacy, name));
+    const output = readFileSync(join(dir, name));
+    if (!original.equals(output)) {
+      throw new Error("Unported legacy script was silently changed by the build: " + name);
+    }
+  }
+}
+for (const name of ["manifest.json", "popup.html", "offscreen.html"]) {
+  if (readFileSync(join(legacy, name), "utf8") !== readFileSync(join(dir, name), "utf8")) {
+    throw new Error("Chrome MV3 entry or permissions changed during build: " + name);
+  }
+}
+const expectedJournalHtml=readFileSync(join(legacy, "journal.html"), "utf8")
+  .replace('<script src="journal.js"></script>',
+    '<script src="journal-modular.js"></script><script src="journal.js"></script>');
+if (readFileSync(join(dir, "journal.html"), "utf8") !== expectedJournalHtml) {
+  throw new Error("Journal module entry or order was changed by build");
+}
+for (const file of js) {
+  const bytes = readFileSync(join(dir, file), "utf8");
+  const scanned = scanner.scan(bytes);
+  if (scanned.imports.length > 0 || scanned.exports.length > 0) {
+    throw new Error("Import/export or module require found in classic Chrome script: " + file);
+  }
+  const check = spawnSync("node", ["--check", join(dir, file)], { stdio: "inherit" });
+  if (check.error || check.status !== 0) throw new Error("Generated script failed syntax: " + file);
+}
+console.log("Generated Chrome MV3 resources and syntax verified (" + js.length + " scripts).");

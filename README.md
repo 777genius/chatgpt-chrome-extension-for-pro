@@ -6,7 +6,7 @@
 <img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
-Version **1.7.0** · Chrome / Chromium **116+** · No build required
+Version **1.7.0** · Chrome / Chromium **116+** · Bun source build
 
 ## Features
 
@@ -34,11 +34,18 @@ Version **1.7.0** · Chrome / Chromium **116+** · No build required
 
 **Message queue / Steer is not implemented.** It remains a separate proposal in the [development brief](docs/queue-and-goal.md). See the [Goal protocol and validation gates](docs/goal-protocol.md).
 
-## Install
+## Install from source
 
-1. Clone or download this repository.
-2. Open `chrome://extensions` and enable **Developer mode**.
-3. Select **Load unpacked** and choose the [`extension/`](extension/) folder.
+Requires **Bun 1.4.3** and **Node.js 26**. From a checkout of the released branch:
+
+```sh
+bun install --frozen-lockfile
+bun run build
+```
+
+Open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose **`dist/extension/`**. Alternatively, use the unpacked artifact from a successful GitHub Actions build of the exact release commit.
+
+**Do not install `extension/`**: those original JavaScript files are retained exclusively as a regression-test reference during the migration. The generated `dist/extension/` contains the supported TypeScript runtime.
 
 No Chrome restart is needed. The extension attempts to attach to existing ChatGPT tabs without refreshing them. Chrome may block access to unloaded or restricted tabs.
 
@@ -49,21 +56,46 @@ Use the extension popup to test sound and notifications. ChatGPT page access is 
 Inspect JavaScript heaps or explicitly collect unreachable objects without closing or reloading tabs:
 
 ```sh
-npm run memory -- --cdp http://127.0.0.1:9222
-npm run memory -- --cdp http://127.0.0.1:9222 --collect --max-tabs 3
+bun run memory -- --cdp http://127.0.0.1:9222
+bun run memory -- --cdp http://127.0.0.1:9222 --collect --max-tabs 3
 ```
 
 Requires Node.js 26+ and an existing local debugging connection. An existing authenticated connection can be reused with `--bridge-config`. Shared heaps are collected once; a private ledger enforces cooldowns and unknown-outcome blocks; reports record results. JavaScript heap savings do **not** guarantee lower physical RAM usage. [Options and safety behavior](docs/memory-cleanup.md).
 
 Strict mode refuses collection when another page's shared heap identity is unknown. `--collect --include-active --allow-unmeasured-peers` is an explicit alternative for measurable heaps; shared activity with unreachable pages remains unverified. Private macOS shortcuts can provide separate **Inspect** and **Clean available memory** actions, using the same private ledger at `$HOME/.local/state/chatgpt-chrome-memory`. [Shortcut behavior and reports](docs/memory-cleanup.md#daily-use-on-macos).
 
-## Development
+## Draft TypeScript migration (PR #4)
 
-Node.js **26+**:
+This branch is **not release-ready**. It incrementally replaces the classic
+extension JavaScript with strict TypeScript and generates browser-compatible
+classic scripts into `dist/extension/` using Bun. The original `extension/`
+remains an intentional behavior reference until full parity is qualified.
+Install and test **`dist/extension/`**, not `extension/`, when validating
+the migration build. Do not load the draft into a real work profile or real
+ChatGPT conversations.
+
+The frozen-lock build and nonbrowser checks are:
 
 ```sh
-npm ci
-npm run check
+bun install --frozen-lockfile
+bun run check
+bun run check:complete
+```
+
+This includes tests executed against both the original and generated runtime.
+It **does not** prove live Chrome/ChatGPT behavior; the owner will run a
+dedicated test-chat smoke test before merge. Read the
+[migration contract](docs/typescript-bun-modular-migration.md) for the checklist
+and current blockers.
+
+## Development
+
+Node.js **26.x**, Bun **1.4.3**, TypeScript **7.0.2** (from `bun.lock`):
+
+```sh
+bun install --frozen-lockfile
+bun run check
+bun run check:complete
 ```
 
 Checks cover syntax, manifest resources, TypeScript, and synthetic DOM / Chrome API tests. Live ChatGPT sending, attachments, reasoning selection, and server-side renaming require a separate browser test.

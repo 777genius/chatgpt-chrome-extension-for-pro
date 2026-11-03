@@ -372,11 +372,14 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
 // transfers the goal identity and budget only after confirmed acceptance.
 {
   const env=fixture();await begin(env);await confirm(env);
-  await env.store.retry({url:URL_A,tabId:7,kind:'retry.planned'});
+  const failedGoalTurn=state(env).expectedPromptKey;
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.planned',
+    operationId:'retry-fixture-1',sourcePromptKey:failedGoalTurn});
   assert.equal(state(env).phase,'recovering');
   await answer(env);
   assert.equal(env.messages.length,1,'no sending while retry underway');
-  await env.store.retry({url:URL_A,tabId:7,kind:'retry.confirmed',promptKey:'/c/goal-fixture-a|retry-1'});
+  await env.store.retry({url:URL_A,tabId:7,kind:'retry.confirmed',promptKey:'/c/goal-fixture-a|retry-1',
+    operationId:'retry-fixture-1',sourcePromptKey:failedGoalTurn});
   assert.equal(state(env).phase,'waiting');
   assert.equal(state(env).expectedPromptKey,'/c/goal-fixture-a|retry-1');
   await env.store.retry({url:URL_A,tabId:7,kind:'retry.blocked',goalHandoff:true});

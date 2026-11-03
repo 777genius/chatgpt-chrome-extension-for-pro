@@ -1,0 +1,19 @@
+# Draft reviews are manual until the implementation stabilizes.
+# Source, CI, runtime manifests, and all executable tests remain in scope.
+language: "en-US"
+reviews:
+  profile: "assertive"
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/*.md"
+    - "!bun.lock"
+    - "!package-lock.json"
+  path_instructions:
+    - path: "src/extension/**"
+      instructions: "Block any regressions in exact send authorization, unknown ACK, durable receipt ownership, worker suspension, Chrome MV3 classic-script compatibility and user draft preservation. TypeScript erasure must preserve baseline behavior."
+    - path: "tests/**"
+      instructions: "Verify the tests actually run on emitted dist/extension bytes and cannot silently skip protected Goal, retry, handoff, native reply association, and worker-restart scenarios."
+    - path: "scripts/**"
+      instructions: "Review build and release admission fail-closed logic, including Bun vs Node execution, frozen-lock checks, browser bundle environment and required CI."

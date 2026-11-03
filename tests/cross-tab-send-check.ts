@@ -40,6 +40,14 @@ function boot() {
   worker=createContext({chrome,console:{error(){}},URL,setTimeout,clearTimeout,
     messageChatUrl:(message:Value)=>message.url,
     statusReceipt:()=>({epoch:'fixture',order:1}),
+    // The worker routes retry journal events through the Goal coordinator.
+    // This test isolates the shared journal/send locks, so preserve the port
+    // while intentionally leaving Goal state outside this fixture.
+    goalController:{
+      retry:async()=>{},
+      handoffBegin:async()=>{},
+      handoffConfirm:async()=>{},
+    },
     visitChatNotifications:async()=>({}),broadcastChatStatus:async()=>{}});
   for(const code of [readFileSync('extension/journal-store.js','utf8'),readFileSync('extension/request-receipts.js','utf8'),readFileSync('extension/handoff-title.js','utf8'),pageSource,handoffSource,listenerSource])runInContext(code,worker);
 }

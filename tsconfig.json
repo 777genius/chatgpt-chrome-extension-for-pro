@@ -7,7 +7,22 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node",
+      "bun"
+    ],
+    "esModuleInterop": true,
+    "moduleDetection": "force",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable",
+      "ESNext.Disposable"
+    ]
   },
-  "include": ["scripts/**/*.mts", "tests/**/*.mts"]
+  "include": [
+    "scripts/**/*.ts",
+    "src/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }

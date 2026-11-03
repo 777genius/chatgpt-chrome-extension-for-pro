@@ -139,6 +139,7 @@
         if(!old)throw Error('Сохранённая цель не найдена');
         if(action==='pause') {
           if(['completed','stopped','blocked','moved'].includes(old.phase))throw Error('Goal уже завершён');
+          if(old.phase==='handoff')throw Error('Передача в новый чат уже начата; пауза недоступна');
           const inFlight=['sending','clicked'].includes(old.phase);
           const ready=old.phase==='preparing'&&old.operation?.status==='reserved';
           const record={...old,phase:inFlight?old.phase:'paused',pauseRequested:inFlight,

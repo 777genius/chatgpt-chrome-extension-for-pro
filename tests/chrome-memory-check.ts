@@ -9,7 +9,7 @@ import {promisify} from 'node:util';
 import {pathToFileURL} from 'node:url';
 import {runInNewContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
-import {runMemory,parseArgs,openStore,acquireLock,isolateKey,connect,MemoryFault,PAGE_GUARD,type Call,type Options} from '../scripts/chrome-memory.mts';
+import {runMemory,parseArgs,openStore,acquireLock,isolateKey,connect,MemoryFault,PAGE_GUARD,type Call,type Options} from '../scripts/chrome-memory.ts';
 
 const root=await mkdtemp(join(tmpdir(),'chrome-memory-test-'));
 const mb=1024**2;
@@ -104,7 +104,7 @@ try {
     }],
     ['signal lock release',async()=>{
       for(const signal of ['SIGINT','SIGTERM'] as const) {
-        const directory=join(root,`signal-${signal}`),moduleURL=pathToFileURL(resolve('scripts/chrome-memory.mts')).href;
+        const directory=join(root,`signal-${signal}`),moduleURL=pathToFileURL(resolve('scripts/chrome-memory.ts')).href;
         const child=spawn(process.execPath,['--input-type=module','-e',`const {openStore}=await import(${JSON.stringify(moduleURL)});const store=await openStore(${JSON.stringify(directory)},'signal-run');await store.save();console.log('ready');setInterval(()=>{},1000);`],{stdio:['ignore','pipe','pipe'],timeout:5000,killSignal:'SIGKILL'});
         const closed=new Promise<{code:number|null;signal:NodeJS.Signals|null}>(yes=>child.once('close',(code,signal)=>yes({code,signal})));
         try {
@@ -124,7 +124,7 @@ try {
   for(const flags of [['--allow-unmeasured-peers'],['--collect','--allow-unmeasured-peers'],['--include-active','--allow-unmeasured-peers']])assert.throws(()=>parseArgs(flags),/invalid-options/);
   assert.equal(parseArgs(['--collect','--include-active','--allow-unmeasured-peers']).allowUnmeasuredPeers,true);
   const empty=join(root,'empty');await import('node:fs/promises').then(fs=>fs.mkdir(empty,{mode:0o700}));
-  const script=resolve('scripts/chrome-memory.mts');
+  const script=resolve('scripts/chrome-memory.ts');
   const help=spawnSync(process.execPath,[script,'--help','--bridge-config',join(root,'missing')],{cwd:empty,encoding:'utf8'});
   assert.equal(help.status,0);assert.match(help.stdout,/Default: inspect only/);
   const imported=spawnSync(process.execPath,['--input-type=module','-e',`await import(${JSON.stringify(pathToFileURL(script).href)});console.log('import-ok')`],{cwd:empty,encoding:'utf8'});
