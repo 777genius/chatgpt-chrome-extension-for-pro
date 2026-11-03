@@ -27,6 +27,7 @@ interface CheckpointRecord extends Record<string, unknown> {
   baselineKey?: string | null;
   promptKey?: string;
   httpCompleted?: boolean;
+  requestFailedAt?: number;
   pendingIntent?: CheckpointIntent;
 }
 interface CheckpointChromeStorage {
@@ -180,4 +181,24 @@ function completionAllocationEvidence(
     native.assistantCompleted === true && native.assistantPhase === "final_answer" &&
     Boolean(native.assistantId && native.assistantKey);
   return progress || final ? { url, promptKey: native.promptKey } : null;
+}
+
+// An observed transport failure alone is not terminal: ChatGPT may keep polling.
+function completionCheckpointFailure(tabId:number,{startedAt,requestId,failedAt}:{startedAt:number;requestId:string;failedAt:number}):Promise<boolean> {
+  if(!Number.isFinite(failedAt)||failedAt<startedAt)return Promise.resolve(false);
+  return completionCheckpointChange(tabId,current=>{
+    if(!current||current.state!=='active'||current.startedAt!==startedAt||!requestId||current.requestId!==requestId)return {value:false};
+    return {record:{...current,requestFailedAt:failedAt},value:true};
+  });
+}
+interface RollbackNativeEvidence extends AllocationNativeEvidence {absentPromptKey?:string;composerIdle?:boolean}
+function failedAttemptRollbackEvidence(record:CheckpointRecord|null|undefined,native:RollbackNativeEvidence|null|undefined):{startedAt:number;requestId:string}|null {
+  if(record?.state!=='active'||typeof record.requestId!=='string'||typeof record.startedAt!=='number'||
+      typeof record.requestFailedAt!=='number'||!Number.isFinite(record.requestFailedAt)||record.requestFailedAt<record.startedAt||
+      !record.baselineKey||!record.promptKey||record.baselineKey===record.promptKey||!native?.ok||native.url!==record.url||
+      native.promptKey!==record.baselineKey||native.absentPromptKey!==record.promptKey||native.composerIdle!==true||
+      native.isLatest!==true||native.isReadOnly!==false||native.generating!==false||native.hasError!==false||
+      native.turnStatus!=='complete'||native.assistantPhase!=='final_answer'||native.assistantCompleted!==true||
+      !native.assistantId||!native.assistantKey)return null;
+  return {startedAt:record.startedAt,requestId:record.requestId};
 }
