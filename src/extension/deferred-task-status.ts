@@ -247,5 +247,5 @@ interface DeferredMeta {
     return Object.freeze({refresh,requestStarted,dispose});
   }
   const api=Object.freeze({inspect,create,pollIntervalMs:300000});
-  (globalThis as typeof globalThis & {ChatGPTDeferredTaskStatus:typeof api}).ChatGPTDeferredTaskStatus=api;
+  Object.assign(globalThis,{ChatGPTDeferredTaskStatus:api});
 })();
