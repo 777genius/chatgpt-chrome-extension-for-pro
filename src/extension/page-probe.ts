@@ -40,6 +40,8 @@ interface ReactFiber {
     selectedLabelCandidate?: {reasoningEffort?:string;model?:string};
     attachment?: NativeAttachment;
     conversationId?: string;
+    composerConversationId?:string;scrollStateConversationId?:string;isChatConversation?:boolean;
+    isConversationFetching?:boolean;isConversationLoading?:boolean;hasLoadError?:boolean;
   };
 }
 interface RecoveryBinding {
@@ -88,8 +90,9 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
       }
     }
   }
-  let entries:NativeEntry[]|null = null;
-  let recoveryEntry:NativeEntry|null = null;
+  let entries:NativeEntry[]|null=null;
+  let historyReady:boolean|null=null;
+  let recoveryEntry:NativeEntry|null=null;
   let inputDeliveryError = false;
   const alertContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
   const alertContainerKey=alertContainer?.getAttribute('data-content-search-turn-key')||alertContainer?.getAttribute('data-testid');
@@ -101,7 +104,18 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
   for (let i = 0; fiber && i < 45; i += 1, fiber = fiber.return??null) {
     const props = fiber.memoizedProps || {};
     if (i < 9) inspectElement(props.children);
-    if (captureHistory && Array.isArray(props.entries)) entries = props.entries;
+    if(captureHistory&&Array.isArray(props.entries)) {
+      entries=props.entries;
+      historyReady=null;
+      const pageId=location.pathname.split('/').at(-1)||'';
+      const boundHistory=props.conversationId===pageId||
+        /^local-chatgpt:[a-z0-9-]+$/.test(props.conversationId||'')&&
+        props.composerConversationId===props.conversationId&&props.scrollStateConversationId===pageId;
+      if(props.isChatConversation===true&&boundHistory&&
+          typeof props.isConversationFetching==='boolean'&&typeof props.isConversationLoading==='boolean') {
+        historyReady=!props.isConversationFetching&&!props.isConversationLoading&&props.hasLoadError===false;
+      }
+    }
     const entry=props.entry;
     const candidate=entry?.isMostRecentTurn===true?entry:Array.isArray(props.entries)?props.entries.at(-1):null;
     if(candidate?.isMostRecentTurn===true&&candidate.isReadOnly===false)recoveryEntry=candidate;
@@ -209,9 +223,12 @@ function inspectChatError(alertIndex: number = 0, captureHistory: boolean = fals
       .forEach(({ index }) => selected.add(index));
   }
   const messages = all.filter((_, index) => selected.has(index));
-  return { action, messages, incomplete: messages.some((item) => !item.text.trim()) ||
-    messages.filter((item) => item.role === 'user').length !== 2 ||
-    messages.filter((item) => item.role === 'assistant').length !== 2 };
+  const shortHistory=messages.filter(item=>item.role==='user').length<2||
+    messages.filter(item=>item.role==='assistant').length<2;
+  return {action,messages,incomplete:historyReady===false||
+    !messages.some(item=>item.role==='user')||
+    messages.some(item=>!item.text.trim())||
+    (shortHistory&&historyReady!==true)};
 }
 
 function inspectChatAttachment(fileName:string):{status:string} {
