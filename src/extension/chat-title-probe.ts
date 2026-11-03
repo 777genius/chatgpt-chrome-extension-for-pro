@@ -10,13 +10,17 @@ interface TitleOptions {
   title: string;
   previousTitle: string;
   expiresAt?: number;
+  finalCleanup?: boolean;
 }
 interface TitleOperation {
   id: string;
   url: string;
   title: string;
   previousTitle: string;
-  triggerId: string;
+  triggerId: string | null;
+  form?: HTMLFormElement | null;
+  sidebarFallback?: boolean;
+  sidebarToggle?: HTMLButtonElement | null;
   createdAt: number;
   selected?: boolean;
   saved?: boolean;
@@ -47,6 +51,7 @@ interface TitleProbeResult {
   reason?: string;
   retryable?: boolean;
   clicked?: boolean;
+  pending?: boolean;
   ready?: boolean;
   streaming?: boolean;
   title?: string;
@@ -79,7 +84,7 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
     if (state?.id === options.operationId) {
       const candidates = Array.from(document.querySelectorAll<HTMLInputElement>(
         '[role="dialog"][aria-modal="true"] form input')).filter(visible);
-      const input = state.input || (state.selected && candidates.length === 1 ? candidates[0] : null);
+      const input = state.input || (state.saved ? state.form?.querySelector<HTMLInputElement>('input') : state.selected && candidates.length === 1 ? candidates[0] : null);
       if (chatUrl(location.href) === state.url && input &&
           [state.title, state.previousTitle].includes(input.value)) {
         input.closest("form")?.querySelector<HTMLButtonElement>('button[type="button"]')?.click();
@@ -90,6 +95,16 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
         menu?.dispatchEvent(new KeyboardEvent("keydown", {
           key: "Escape", code: "Escape", bubbles: true,
         }));
+      }
+      const ownDialog = state.form?.closest('[role="dialog"][aria-modal="true"]');
+      const ownClosing = chatUrl(location.href) === state.url &&
+        state.sidebarToggle && ownDialog && visible(ownDialog) &&
+        input && [state.title, state.previousTitle].includes(input.value);
+      if (ownClosing && !options.finalCleanup) return { ok: true, pending: true };
+      if (chatUrl(location.href) === state.url && state.sidebarToggle &&
+          visible(state.sidebarToggle) && state.sidebarToggle.getAttribute('aria-expanded') === 'true' &&
+          !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) {
+        state.sidebarToggle.click();
       }
       delete globals.__chatgptNotifierTitleOperation;
     }
@@ -208,6 +223,7 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
       return { ok: false, reason: "title-edited-by-user" };
     }
     state.input = input;
+    state.form = form;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
     if (!setter) return { ok: false, reason: "title-model-not-ready" };
     setter.call(input, state.title);
@@ -232,7 +248,7 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
     state.saved = true;
     save.click();
     state.input = null;
-    delete globals.__chatgptNotifierTitleOperation;
+    if (!state.sidebarToggle) delete globals.__chatgptNotifierTitleOperation;
     return { ok: true, clicked: true };
   }
   return { ok: false, reason: "unknown-title-action" };
