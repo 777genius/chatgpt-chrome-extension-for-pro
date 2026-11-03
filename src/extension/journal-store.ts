@@ -352,6 +352,12 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
       if(journalObject(goal)&&goal.operation&&typeof goal.phase==='string'&&
           ['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))throw duplicate();
     }
+    // A legacy/unbound retry intent never authorizes a click. Reject it
+    // before recording an active tab/chat send fence; otherwise a malformed
+    // intent could permanently block a later correctly bound operation.
+    if(event.kind==='retry.send_intent'&&(!retrySource||!operationId||
+        typeof event.promptKey!=='string'||!event.promptKey))
+      throw Object.assign(new Error('Исходный пользовательский запрос автоповтора не подтверждён'),{journalPolicy:true});
     if(event.kind==='retry.planned'||event.kind==='retry.send_intent')reserveRetry();
     if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft?.operationId!==operationId||savedDraft?.savedSequence!==event.savedSequence)) {
       throw Object.assign(new Error('Восстановление черновика уже выполнено или исход отправки неизвестен'),{journalPolicy:true});
