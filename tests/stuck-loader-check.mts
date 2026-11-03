@@ -57,9 +57,9 @@ console.log('stuck-loader native latest-turn binding: passed');
 // Goal reads only the already-sent latest native message, with an explicit
 // opt-in. Composer drafts and interface speaker/feedback labels are unrelated.
 {
- const {document}=parseHTML(`<html><body><section data-app-shell-active-page="true">
+ const {document,window}=parseHTML(`<html><body><section data-app-shell-active-page="true">
   <article data-content-search-turn-key="latest-turn">
-   <div data-chatgpt-search-unit-key="latest-turn:0:user">Rendered sent request</div>
+   <div data-chatgpt-search-unit-key="latest-turn:0:user" data-chatgpt-search-message-ids="latest-user-id"><h4 class="sr-only" data-conversation-role="user">You said:</h4><div data-user-message-bubble="true"><div data-search-result-target><div><div class="whitespace-pre-wrap" dir="auto">Rendered sent request</div></div></div></div><button>Copy request</button></div>
    <article data-chatgpt-search-unit-key="latest-turn:2:assistant">
     <h4 class="sr-only" data-conversation-role="assistant"><span>ChatGPT сказал:</span><span aria-hidden="true">ChatGPT</span></h4>
     <div data-markdown-text-style="assistant-message"><div class="markdown"><p>GOAL_COMPLETE</p></div></div>
@@ -67,6 +67,7 @@ console.log('stuck-loader native latest-turn binding: passed');
    </article>
   </article><form data-composer-body><textarea id="prompt-textarea">UNSENT PRIVATE DRAFT</textarea></form>
  </section></body></html>`);
+ Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
  const nativeUser={type:'user-message',messageId:'latest-user-id',message:'  Sent goal instruction\nwith exact whitespace  '};
  const nativeAssistant={type:'assistant-message',messageId:'latest-assistant-id',phase:'final_answer',completed:true,content:'GOAL_COMPLETE',
   contentReferences:[] as {model_dil_v2?:{fallbackMarkdown?:string}}[]};
@@ -79,13 +80,41 @@ console.log('stuck-loader native latest-turn binding: passed');
  globals.document=document;globals.location={origin:'https://chatgpt.com',pathname:'/c/exact'};
  try {
   const metadata=inspectCompletedTurn(attempt.url);
-  for(const key of ['userText','userSentAtMs','goalResponse','goalRawExact'])assert.equal(Object.hasOwn(metadata,key),false,'default snapshot remains metadata only');
+  for(const key of ['userText','userVisibleText','userSentAtMs','goalResponse','goalRawExact'])assert.equal(Object.hasOwn(metadata,key),false,'default snapshot remains metadata only');
   assert.deepEqual(inspectCompletedTurn(attempt.url,false),metadata);
   const goal=inspectCompletedTurn(attempt.url,true);
   assert.equal(goal.userText,nativeUser.message,'native sent text preserves whitespace and excludes the composer draft');
   assert.equal(goal.userSentAtMs,100002,'latest user timestamp is exposed even after the first turn');
   assert.equal(goal.firstUserSentAtMs,null,'first-turn allocation evidence is unchanged');
   assert.equal(goal.goalResponse,'GOAL_COMPLETE');assert.equal(goal.goalRawExact,true,'speaker heading and feedback are interface content');
+  assert.equal(goal.userVisibleText,'Rendered sent request','sent body excludes speaker and copy controls');
+  const userUnit=document.querySelector('[data-chatgpt-search-unit-key$=":user"]')!;
+  const userBody=userUnit.querySelector('.whitespace-pre-wrap')!;
+  nativeUser.message='  Read [Project](https://example.invalid/path) now  \nSecond\nline';
+  userBody.innerHTML='<p>  Read <span data-rich-text-generated-autolink><a href="https://example.invalid/path">Project</a><span aria-hidden="true">Link preview label<svg></svg></span></span> now  </p><p>Second<br>line</p><span hidden>Hidden rich widget</span><button>Open link</button><span class="ProseMirror-widget">Widget</span><span data-testid="attachment-chip">Private attachment label</span>';
+  const linked=inspectCompletedTurn(attempt.url,true);
+  assert.equal(linked.userText,nativeUser.message,'native Markdown retains its destination URL');
+  assert.equal(linked.userVisibleText,'  Read Project now  \nSecond\nline','sent rich link labels preserve exact whitespace and paragraph boundaries');
+  userUnit.setAttribute('data-chatgpt-search-message-ids','different-native-user');
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'conflicting native message ID cannot prove visible text');
+  userUnit.setAttribute('data-chatgpt-search-message-ids','latest-user-id different-native-user');
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'multiple native message IDs cannot prove one sent body');
+  userUnit.setAttribute('data-chatgpt-search-unit-key','latest-turn:1:user');
+  userUnit.setAttribute('data-chatgpt-search-message-ids','latest-user-id');
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,linked.userVisibleText,'exact native message-ID metadata independently binds the sent body');
+  userUnit.removeAttribute('data-chatgpt-search-message-ids');
+  userUnit.setAttribute('data-chatgpt-search-unit-key','latest-turn:1:user');
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'unit position must identify the exact latest native user item');
+  userUnit.setAttribute('data-chatgpt-search-unit-key','latest-turn:0:user');
+  userBody.removeAttribute('class');
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'unknown body markup never falls back to whole-turn text');
+  userBody.className='whitespace-pre-wrap';
+  userBody.setAttribute('aria-hidden','true');
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'a hidden message body is not visible-text proof');
+  userBody.removeAttribute('aria-hidden');
+  const duplicateBody=document.createElement('div');duplicateBody.className='whitespace-pre-wrap';duplicateBody.setAttribute('dir','auto');duplicateBody.textContent='Other message body';userBody.parentElement!.append(duplicateBody);
+  assert.equal(inspectCompletedTurn(attempt.url,true).userVisibleText,null,'multiple concrete user bodies are ambiguous');
+  duplicateBody.remove();
   const rendered=document.querySelector('[data-markdown-text-style]')!;
   const reference='::chatgpt-content-reference{index="0" source_message_id="latest-assistant-id"}';
   nativeAssistant.content=reference;

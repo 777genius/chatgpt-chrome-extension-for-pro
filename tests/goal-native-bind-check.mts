@@ -55,11 +55,21 @@ for(const source of [chat,'https://chatgpt.com/']) {
  assert.equal(bound.ok,true);assert.equal(bound.record.phase,'waiting');assert.equal(bound.record.goal,h.native().userText);
  assert.deepEqual(structuredClone(h.probes[0].args),[chat,true],'only an explicit adoption requests sent native text');
  assert.deepEqual(h.binds[0],{tabId:7,armId:'native-arm',url:chat,requestId:'native-request',startedAt:100011,
-  promptKey:h.native().promptKey,userId:'native-user',userText:h.native().userText,userSentAtMs:100011,firstTurn:true,nativeVerified:true});
+  promptKey:h.native().promptKey,userId:'native-user',userText:h.native().userText,userSentAtMs:100011,userVisibleText:undefined,firstTurn:true,nativeVerified:true});
  assert.equal(h.completions.length,0);assert.equal(h.messages.length,0,'adoption never sends or clicks');
  assert.equal((await h.bind()).ok,true);assert.equal(h.binds.length,1,'already bound adoption is idempotent');
  assert.equal(h.probes.length,1);assert.equal(h.completions.length,0);
  assert.equal((await h.bind(other)).ok,false,'a bound arm cannot adopt another destination');
+}
+{
+ const h=await fixture();
+ const visible=h.native().userText;
+ const raw='  [Exact](https://example.test/task) sent objective\nwith whitespace  ';
+ h.patchNative({userText:raw,userVisibleText:visible});
+ const adopted=await h.bind();
+ assert.equal(adopted.record.goal,raw,'worker forwards the native-bound visible proof while retaining actual submitted URLs');
+ assert.equal(h.binds[0].userVisibleText,visible);
+ assert.equal(h.messages.length,0);
 }
 {
  const h=await fixture();assert.equal((await h.bind(chat,'other-arm')).ok,false);

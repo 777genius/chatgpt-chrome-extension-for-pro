@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.3';
+  const SCRIPT_VERSION = '1.7.4';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -898,10 +898,18 @@
           throw new Error('Чат или черновик изменились во время подготовки передачи');
         }
       };
-      // The built-in new-chat action can seed the last prompt. Anything else
-      // may be a new draft and must not be silently overwritten.
+      let nativeSeed = false;
+      const verifyNativeSeed = async (allowHistoryFile = false) => {
+        const proof = await runtimeMessage({type:'CHATGPT_INSPECT_HANDOFF_SEED',id:record.id,url:initialUrl,
+          text:existing,allowHistoryFile});
+        verifyPreparation();
+        if (!proof?.ok || !proof.matches || !proof.ready) throw new Error('В новом чате уже есть другой черновик');
+      };
+      // Native new-chat can render saved Markdown links as visible labels.
+      // Accept that seed only when the actual native prompt is still exact.
       if (existing !== '' && existing !== record.lastUserText && existing !== record.draft && existing !== record.prompt) {
-        throw new Error('В новом чате уже есть другой черновик');
+        await verifyNativeSeed(record.asFile && composerHasAttachments(editor));
+        nativeSeed = true;
       }
       await updateHandoff('preparing', { targetUrl: location.href });
       verifyPreparation();
@@ -930,10 +938,13 @@
           if (file?.status === 'error') throw new Error('Ошибка загрузки файла истории');
           return file?.ok && file.status === 'ready';
         }, 60000);
-        const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
-        verifyPreparation();
-        if (!attachments?.ok || !attachments.matches) throw new Error(attachments?.reason || 'Не подтверждено единственное вложение истории');
+        if (!nativeSeed) {
+          const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
+          verifyPreparation();
+          if (!attachments?.ok || !attachments.matches) throw new Error(attachments?.reason || 'Не подтверждено единственное вложение истории');
+        }
       }
+      if (nativeSeed) await verifyNativeSeed(record.asFile);
       verifyPreparation();
       if (!record.asFile && composerHasAttachments(editor)) throw new Error('В новом чате есть пользовательское вложение');
       replaceEditorText(editor, record.prompt);

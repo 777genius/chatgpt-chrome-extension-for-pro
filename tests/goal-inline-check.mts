@@ -22,7 +22,7 @@ function deferred<T>() {
   const promise=new Promise<T>(done=>{resolve=done;});
   return {promise,resolve};
 }
-function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReasoning=false) {
+function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReasoning=false,failInitialGet=false) {
   const {window,document}=parseHTML('<html><head></head><body><main></main></body></html>');
   const calls:Request[]=[];
   let url=initial,record:GoalRecord|null=null,composerState:Composer|null=null,bindable=false,armCounter=0,nativeText='',live=true,subscription:(()=>void)|null=null,unsubscribed=0;
@@ -79,6 +79,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   const instance:Instance=runInContext('ChatGPTGoalInline',context).create({document,getUrl:()=>url,alive:()=>live,
     request:async(value:Request)=>{
       calls.push(value);
+      if(value.action==='get'&&failInitialGet){failInitialGet=false;return {ok:false,error:'Initial Goal load failed'};}
       if(responder)return responder(value);
       if(value.action==='arm')composerState={id:'synthetic-arm-'+(++armCounter),phase:'armed',url:value.url,
         config:{rules:value.rules!,maxContinuations:value.maxContinuations!,maxMinutes:value.maxMinutes!}};
@@ -145,6 +146,39 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   const escape=new f.window.Event('keydown',{bubbles:true,cancelable:true});Object.defineProperty(escape,'key',{value:'Escape'});
   f.field('rules').dispatchEvent(escape);assert.equal(f.panel().hidden,true);assert.equal(escape.defaultPrevented,true);
   f.instance.dispose();assert.equal(f.nativeForm().isConnected,true);assert.equal(f.unsubscribed(),1);
+}
+
+// A failed initial read leaves an explicit retry path. Trusted retry reads
+// fresh state only, including an already-running Goal, without arming/stopping.
+{
+  const f=fixture('https://chatgpt.com/',false,false,false,true);await tick();
+  assert.equal(f.toggle().disabled,false);assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  assert.match(f.toggle().title,/Retry loading/);assert.equal(f.panel().hidden,false);
+  assert.match(f.panel().textContent!,/Initial Goal load failed/);
+  const count=f.calls.length;f.toggle().click();await tick();assert.equal(f.calls.length,count,'untrusted input cannot retry');
+  const pending=deferred<Result>();f.respond(()=>pending.promise);f.click(f.toggle());
+  assert.equal(f.calls.at(-1)!.action,'get');assert.equal(f.toggle().disabled,true);
+  f.click(f.toggle());assert.equal(f.calls.length,count+1,'retry is disabled while pending');
+  pending.resolve({ok:true,url:'https://chatgpt.com/',record:null,composer:null});await tick();
+  assert.equal(f.toggle().disabled,false);assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  assert.ok(f.calls.every(value=>value.action==='get'),'successful retry does not also arm');
+  f.respond(null);f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'arm');
+  assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);f.instance.dispose();
+  const g=fixture(chat,false,false,false,true);await tick();g.setRecord(goal());g.click(g.toggle());await tick();
+  assert.equal(g.toggle().getAttribute('aria-checked'),'true','retry reflects existing active Goal');
+  assert.ok(g.calls.every(value=>value.action==='get'),'unknown state never grants Stop or Arm');g.instance.dispose();
+}
+
+// Refused trusted mutations expose the status even when settings were closed.
+{
+  const f=fixture();await tick();assert.equal(f.document.querySelector('[data-chatgpt-goal-inline=panel]'),null);
+  f.respond(()=>({ok:false,error:'Synthetic arming refusal'}));f.click(f.toggle());await tick();
+  assert.equal(f.panel().hidden,false);assert.match(f.panel().textContent!,/Synthetic arming refusal/);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false');
+  f.respond(null);f.click(f.toggle());await tick();
+  f.element('[aria-label="Close Goal settings"]').click();f.respond(()=>({ok:false,error:'Synthetic disarm refusal'}));
+  f.click(f.toggle());await tick();assert.equal(f.panel().hidden,false);assert.match(f.panel().textContent!,/Synthetic disarm refusal/);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');f.instance.dispose();
 }
 
 // Shared DOM is not authority: page-created Arm/Disarm/Pause/Resume/Stop
@@ -298,7 +332,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
     config:{rules:'Only for chat A',maxContinuations:10,maxMinutes:1440}}});await tick();
   f.details().click();assert.equal(f.field('rules').value,'');assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   f.respond(()=>({ok:true,url:chat,record:goal()}));await f.instance.refresh();
-  assert.equal(f.toggle().disabled,true);assert.match(f.panel().textContent!,/another chat/);f.instance.dispose();
+  assert.equal(f.toggle().disabled,false);assert.match(f.toggle().title,/Retry loading/);assert.match(f.panel().textContent!,/another chat/);f.instance.dispose();
 }
 
 // A reserved operation is a known pre-click refusal, not an unknown send.

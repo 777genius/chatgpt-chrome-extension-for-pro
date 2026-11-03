@@ -35,6 +35,31 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false) {
   const firstUserSentAtMs=entryCount===1&&users.length===1&&userTimes.length===1?userTimes[0].sentAtMs:null;
   let goalText={};
   if(includeGoalText===true) {
+    let userVisibleText=null;
+    const unit=domUser?.closest('[data-chatgpt-search-unit-key$=":user"]');
+    const userIndex=(entry.turn?.items||[]).lastIndexOf(user);
+    const unitBound=unit?.getAttribute('data-chatgpt-search-unit-key')===`${entry.id}:${userIndex}:user`;
+    const messageIds=unit?.getAttribute('data-chatgpt-search-message-ids');
+    const ids=new Set((messageIds||'').split(/\s+/).filter(Boolean));
+    const idsBound=ids.size===1&&ids.has(user.messageId);
+    if((unitBound||idsBound)&&(messageIds==null||idsBound)) {
+      // Read only a concrete sent-message body after binding its unit or native
+      // message ID. A whole turn also contains speaker, file and toolbar text.
+      const candidates=Array.from(domUser.querySelectorAll('[data-user-message-bubble="true"] [data-search-result-target] > div > div.whitespace-pre-wrap[dir="auto"]'))
+        .filter(node=>node.isConnected&&visible(node)&&!node.closest('[aria-hidden="true"],[hidden],[inert],[data-app-shell-active-page="false"]'));
+      const body=candidates.find(node=>!candidates.some(parent=>parent!==node&&parent.contains(node)));
+      if(body&&candidates.every(node=>body.contains(node))) {
+        const copy=body.cloneNode(true);
+        copy.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],[hidden],.ProseMirror-widget,[data-composer-attachments],[data-testid*="attachment"],h4.sr-only[data-conversation-role="user"]').forEach(node=>node.remove());
+        function text(node) {
+          if(node.nodeType===3)return node.textContent||'';
+          if(node.nodeType!==1)return '';
+          if(node.tagName==='BR')return node.classList.contains('ProseMirror-trailingBreak')?'':'\n';
+          return Array.from(node.childNodes).map(text).join(['UL','OL'].includes(node.tagName)?'\n':'');
+        }
+        userVisibleText=copy.querySelector('p, div, br, li')?Array.from(copy.childNodes).map(text).join('\n'):text(copy);
+      }
+    }
     let goalResponse=typeof assistant?.content==='string'?assistant.content:'';
     // Native DIL answers may store only a content reference. Resolve complete
     // fallback Markdown only when that reference is the entire native body;
@@ -64,7 +89,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false) {
       }
     }
     const sentAtMs=userTimes.at(-1)?.sentAtMs;
-    goalText={userText:typeof user.message==='string'?user.message:'',userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
+    goalText={userText:typeof user.message==='string'?user.message:'',userVisibleText,userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
       goalResponse,goalRawExact};
   }
   return {ok:true,url,firstUserSentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,

@@ -442,7 +442,7 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
     return {ok:false,error:'Запрос отправлен в другой чат'};
   const result=await goalController.composerBind({tabId,armId,url:canonical,requestId:request.requestId,
     startedAt:request.startedAt,promptKey:native.promptKey,userId:native.userId,userText:native.userText,
-    userSentAtMs:native.userSentAtMs,firstTurn:native.firstTurn,nativeVerified:true});
+    userSentAtMs:native.userSentAtMs,userVisibleText:native.userVisibleText,firstTurn:native.firstTurn,nativeVerified:true});
   // The first answer may have completed before the root chat received its
   // permanent URL. Replay that exact native completion through the coordinator.
   if(result.ok&&native.turnStatus==='complete'&&native.generating===false&&!native.hasError&&
@@ -692,6 +692,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           promptKey:event.newPromptKey,attemptId:event.attemptId,goalHandoff:event.goalHandoff===true});
       sendResponse(result);
     }).catch(error=>sendResponse({ok:false,...(error.code==='RETRY_DUPLICATE'?{duplicate:true}:{}),error:String(error.message || error)}));
+    return true;
+  }
+  if (message?.type === 'CHATGPT_INSPECT_HANDOFF_SEED') {
+    const tabId=sender.tab?.id;
+    if(sender.frameId>0||typeof tabId!=='number'||typeof message.url!=='string'||typeof message.text!=='string') {
+      sendResponse?.({ok:false});return false;
+    }
+    (async()=>{
+      const live=(await chrome.tabs.get(tabId)).url;
+      const record=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
+      if(live!==message.url||sender.tab.url!==live||!live.startsWith('https://chatgpt.com/')||
+          !record||record.id!==message.id||!['navigating','preparing'].includes(record.stage)||
+          live===record.sourceUrl||typeof record.lastUserText!=='string'||!record.lastUserText||
+          record.targetUrl&&record.targetUrl!==live)return {ok:false};
+      const fileName=message.allowHistoryFile===true&&record.asFile?record.fileName:null;
+      const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+        args:[{action:'inspect-seed',url:live,text:message.text,nativeText:record.lastUserText,fileName}]});
+      const current=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
+      if((await chrome.tabs.get(tabId)).url!==live||current?.id!==record.id||
+          !['navigating','preparing'].includes(current.stage))return {ok:false};
+      return result?.result||{ok:false};
+    })().then(sendResponse).catch(()=>sendResponse({ok:false}));
     return true;
   }
   if (message?.type === 'CHATGPT_INSPECT_ATTACHMENT') {

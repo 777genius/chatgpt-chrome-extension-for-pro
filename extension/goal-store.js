@@ -63,8 +63,14 @@
           if(bound?.id!==previous.id||bound.operation||
               !['completed','stopped','moved'].includes(bound.phase))
             throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
-        } else if(previous?.phase==='intent')
-          throw Error('Ручная отправка Goal уже ожидает подтверждения; сначала явно выключите Goal');
+        } else if(previous?.phase==='intent') {
+          if(!canonical(previous.url)||previous.url===target)
+            throw Error('Ручная отправка Goal уже ожидает подтверждения; сначала явно выключите Goal');
+          // Explicit arming on a different page cancels only an unbound saved
+          // source intent. Root allocation and same-chat outcomes stay fenced.
+          await event('composer_superseded',previous,tabId,{oldArmId:previous.id,oldIntent:previous.intent,
+            targetUrl:target,reason:'Явное включение Goal в другом чате отменило непривязанное намерение'});
+        }
         if(previous?.phase==='armed'&&previous.url===target&&
             JSON.stringify(previous.config)===JSON.stringify(config))return {ok:true,record:previous};
         const record={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt:now()};
@@ -116,7 +122,7 @@
         return {ok:true,record};
       });
     }
-    async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userSentAtMs,firstTurn,nativeVerified}) {
+    async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,firstTurn,nativeVerified}) {
       requireTab(tabId);
       const target=requireUrl(url);
       return serialize(async()=>{
@@ -126,29 +132,35 @@
         if(nativeVerified!==true||typeof requestId!=='string'||!requestId||typeof userId!=='string'||!userId||
             !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
             !Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000||
-            userText!==intent.text||typeof promptKey!=='string'||promptKey===intent.baselineKey||
+            typeof userText!=='string'||!userText.trim()||userText.length>10000||
+            (userText!==intent.text&&userVisibleText!==intent.text)||
+            typeof promptKey!=='string'||promptKey===intent.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|'))
           throw Error('Нативная ручная отправка Goal не подтверждена точным запросом и текстом');
         if(current.url==='https://chatgpt.com/'?firstTurn!==true:current.url!==target)
           throw Error('Ручная отправка Goal относится к другому чату или не является первым сообщением');
-        const binding={url:target,requestId,startedAt,promptKey,userId,userSentAtMs};
+        // Native Markdown may retain link targets absent from the visible
+        // composer text. The worker proves the exact rendered submitted turn;
+        // keep both forms so a replay cannot substitute a different payload.
+        const binding={url:target,requestId,startedAt,promptKey,userId,userSentAtMs,
+          userText,userVisibleText:typeof userVisibleText==='string'?userVisibleText:null};
         const sameBinding=value=>value&&Object.keys(binding).every(name=>value[name]===binding[name]);
         const name=composerBindingKey(armId),prior=(await storage.get(name))[name];
         const previous=await read(target);
         if(current.phase==='bound') {
-          if(!sameBinding(current.binding)||!sameBinding(prior)||prior.tabId!==tabId||previous?.id!==armId)
+          if(!sameBinding(current.binding)||!sameBinding(prior)||prior.tabId!==tabId||previous?.id!==armId||previous.goal!==userText)
             throw Error('Разрешение Goal уже связано с другой отправкой или более новой целью');
           return {ok:true,record:current,goal:view(previous)};
         }
         if(prior)throw Error('Разрешение Goal уже связано с другим чатом');
         requireAvailable(previous);
         const record={...current,phase:'bound',binding};
-        const next={schema:1,id:armId,url:target,originUrl:target,goal:intent.text,rules:current.config.rules,
+        const next={schema:1,id:armId,url:target,originUrl:target,goal:userText,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
           startedAt,manualStartedAt:startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
           expectedPromptKey:promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
           handoffPending:false,handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
-        await event('manual_started',next,tabId,{text:intent.text,rules:next.rules,
+        await event('manual_started',next,tabId,{text:userText,intentText:intent.text,userVisibleText:binding.userVisibleText,rules:next.rules,
           maxContinuations:next.maxContinuations,maxMinutes:next.maxMinutes,deadlineAt:next.deadlineAt,
           requestId,startedAt,promptKey,userId,userSentAtMs,composerSourceUrl:current.url});
         await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId}});

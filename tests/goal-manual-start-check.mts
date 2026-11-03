@@ -113,6 +113,53 @@ function fixture() {
   assert.match(env.messages[0].message.text,/GOAL_COMPLETE/);
 }
 
+// An explicit switch-on in another chat supersedes an unbound intent from a
+// saved source. Keep its exact authorization history and fence its old binder.
+for(const target of [root,other]) {
+  const env=fixture(),oldArmId=await env.intent(7,saved);
+  const previous=structuredClone(env.data[composerKey(7)]);
+  const armed=await env.store.composerArm({tabId:7,url:target});
+  assert.equal(armed.record.phase,'armed');assert.equal(armed.record.url,target);
+  assert.notEqual(armed.record.id,oldArmId);
+  const cancelled=env.events.at(-1);
+  assert.equal(cancelled.kind,'goal.composer_superseded');
+  assert.equal(cancelled.oldArmId,oldArmId);assert.equal(cancelled.sourceUrl,saved);
+  assert.deepEqual(cancelled.oldIntent,previous.intent);
+  assert.equal(cancelled.targetUrl,target);assert.ok(cancelled.reason);
+  const fresh=structuredClone(env.data[composerKey(7)]);
+  await assert.rejects(()=>env.store.composerBind({...env.proof(oldArmId),firstTurn:false}));
+  assert.deepEqual(env.data[composerKey(7)],fresh,'late old proof cannot replace or alter the new authorization');
+  assert.equal(env.data[goalKey(saved)],undefined);assert.equal(env.data[goalKey(other)],undefined);
+  assert.equal(env.messages.length,0,'switching the arm never sends either objective');
+}
+
+// Same-route and unsaved-root allocation intents remain fenced until explicit
+// disarm; a pending root allocation is not an arbitrary cross-chat intent.
+{
+  const env=fixture();await env.intent(7,saved);
+  const before=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerArm({tabId:7,url:saved+'/?model=fixture'}));
+  assert.deepEqual(env.data,before);assert.equal(env.events.length,0);
+}
+{
+  const env=fixture();await env.intent();const before=structuredClone(env.data);
+  for(const url of [root,saved,other])await assert.rejects(()=>env.store.composerArm({tabId:7,url}));
+  assert.deepEqual(env.data,before);assert.equal(env.events.length,0);assert.equal(env.messages.length,0);
+}
+{
+  const env=fixture(),armId=await env.intent();await env.store.composerBind(env.proof(armId));
+  const before=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerArm({tabId:7,url:other}));
+  assert.deepEqual(env.data,before,'cross-route arming cannot supersede an already adopted active Goal');
+}
+{
+  const env=fixture();await env.intent(7,saved);const before=structuredClone(env.data);
+  env.failJournal(true);
+  await assert.rejects(()=>env.store.composerArm({tabId:7,url:other}),/journal failure/);
+  assert.deepEqual(env.data,before,'failed cancellation history cannot publish a replacement arm');
+  assert.equal(env.messages.length,0);
+}
+
 // Saved-chat manual start is bound to that same route. A later real manual
 // request retains priority; explicit disarming stops only the adopted Goal.
 {
@@ -125,6 +172,48 @@ function fixture() {
   assert.equal(env.data[goalKey(saved)].phase,'stopped');
   assert.equal(env.data[goalKey(saved)].goal,objective,'the durable objective remains available');
   assert.equal(env.messages.length,0);
+}
+
+// Native rich links serialize as Markdown after the user sends them. Their
+// request-bound rendered bubble proves the visible authorization; the Goal
+// retains the actual sent Markdown, including full link destinations.
+{
+  const visible='  Finish PR #681, #682 and #683.\n\nKeep exact text  ';
+  const raw='  Finish PR [#681](https://example.invalid/repo/pull/681?source=fixture), '+
+    '[#682](https://example.invalid/repo/pull/682) and [#683](https://example.invalid/repo/pull/683).\n\nKeep exact text  ';
+  const env=fixture(),armId=await env.intent(7,saved,visible);
+  const proof={...env.proof(armId),firstTurn:false,userText:raw,userVisibleText:visible};
+  const bound=await env.store.composerBind(proof);
+  assert.equal(bound.goal.goal,raw,'the objective preserves every actual native Markdown URL');
+  assert.equal(bound.record.intent.text,visible,'the explicit visible authorization remains exact');
+  assert.equal(bound.record.binding.userText,raw);
+  assert.equal(bound.record.binding.userVisibleText,visible);
+  assert.equal(env.events.at(-1).text,raw,'the durable event records what was actually submitted');
+  assert.equal(env.messages.length,0,'rich-link adoption does not send an initial message');
+  const before=structuredClone(env.data),events=env.events.length;
+  await env.fresh().composerBind(proof);
+  assert.deepEqual(env.data,before);assert.equal(env.events.length,events);
+  await assert.rejects(()=>env.store.composerBind({...proof,userText:raw.replace('/681?', '/999?')}),
+    'an identical visible label cannot change the historical native link target on replay');
+  await assert.rejects(()=>env.store.composerBind({...proof,userVisibleText:visible+' altered'}));
+  await assert.rejects(()=>env.store.composerBind({...proof,userVisibleText:undefined}));
+  assert.deepEqual(env.data,before);
+}
+
+// A rendered-text fallback remains exact and requires real native send proof;
+// it cannot adopt another visible message, a draft, or an invalid native text.
+{
+  const visible='Explicit PR #681',raw='Explicit PR [#681](https://example.invalid/pull/681)';
+  for(const changes of [
+    {userVisibleText:'Different PR #681'}, {userVisibleText:visible+' '}, {userVisibleText:undefined},
+    {nativeVerified:false}, {userText:''}, {userText:'x'.repeat(10001)},
+    {startedAt:999999}, {promptKey:'/c/wrong-chat|user'}
+  ]) {
+    const env=fixture(),armId=await env.intent(7,saved,visible);
+    const proof={...env.proof(armId),firstTurn:false,userText:raw,userVisibleText:visible,...changes};
+    await assert.rejects(()=>env.store.composerBind(proof));
+    assert.equal(env.data[goalKey(saved)],undefined);assert.equal(env.messages.length,0);
+  }
 }
 
 // Clearing the switch and binding the native request share one serialization

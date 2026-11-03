@@ -8,7 +8,7 @@
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
     const prefix='chatgpt-goal-inline-'+(++instance);
-    let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false;
+    let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false,loading=false;
     let busy=false,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
     const cleanups=[];
     let observer=null,binding=null,bindTimer=null,bindGeneration=0;
@@ -99,18 +99,18 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!valid())return;
       const on=(active()&&!record.stopRequested)||armed();
       toggle.setAttribute('aria-checked',String(on));
-      toggle.disabled=!route||!loaded||busy||(!on&&(!!record?.operation||record?.phase==='blocked'));
-      toggle.title=!route?'Goal is available on ChatGPT chat pages':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
+      toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&(!!record?.operation||record?.phase==='blocked'));
+      toggle.title=!route?'Goal is available on ChatGPT chat pages':!loaded&&error?'Retry loading Goal':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
-      const editable=!!route&&loaded&&!busy&&!active()&&!armed();
+      const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
       const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused';
       for(const input of Object.values(fields))input.disabled=!editable;
       buttons.pause.hidden=!active()||paused;
       buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
-      buttons.pause.disabled=busy||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
-      buttons.resume.disabled=busy||!loaded||!!record?.operation;
-      buttons.stop.disabled=busy||!loaded||!!record?.stopRequested;
+      buttons.pause.disabled=busy||loading||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
+      buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
+      buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
       objective.hidden=!record?.goal;
       objective.textContent=record?.goal?'Objective: '+record.goal:'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
@@ -146,13 +146,13 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       panel.style.left=Math.max(12,Math.min(rect.left,width-(box.width||360)-12))+'px';
       panel.style.top=Math.max(12,Math.min(rect.top-(box.height||400)-8,height-(box.height||400)-12))+'px';
     }
-    function show(value) {
+    function show(value,focus=true) {
       if(!valid()||(value&&!document.body))return;
       open=value;
       if(open) {
         if(!panel.isConnected)document.body.append(panel);
         panel.hidden=false;render();
-        (active()||armed()?close:route&&loaded?fields.rules:close).focus();
+        if(focus)(active()||armed()?close:route&&loaded?fields.rules:close).focus();
       } else {
         panel.hidden=true;render();
         if(details.isConnected)details.focus();
@@ -174,7 +174,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record&&policy.canonical(record.url)!==next)record=null;
         return true;
       }
-      stopBinding();record=null;composer=null;loaded=false;busy=false;pendingRefresh=false;error='';
+      stopBinding();record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';
       open=false;panel.hidden=true;resetFields();render();
       return true;
     }
@@ -320,6 +320,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!route){loaded=true;render();return;}
       if(busy){pendingRefresh=true;return;}
       const url=route,revision=epoch,serial=++sequence;
+      loading=true;render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'get',url});
         if(!accepts(url,revision,serial))return;
@@ -330,13 +331,16 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         apply(result);if(!keepError)error='';resumeBinding();render();
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
-        loaded=false;error='Goal: '+String(cause?.message||cause);render();
+        loaded=false;error='Goal: '+String(cause?.message||cause);
+        if(controls.isConnected)show(true,false);
+      } finally {
+        if(accepts(url,revision,serial)){loading=false;render();}
       }
     }
     async function act(action) {
       if(!valid())return;
       if(syncRoute()){void refresh();return;}
-      if(!route||!loaded||busy)return;
+      if(!route||!loaded||loading||busy)return;
       // Hidden/disabled actions fence stale events as well as duplicate clicks.
       if(buttons[action]&&(buttons[action].disabled||buttons[action].hidden))return;
       if(!buttons[action]&&!['arm','disarm'].includes(action))return;
@@ -364,6 +368,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
         error='Goal: '+String(cause?.message||cause);
+        if(controls.isConnected)show(true,false);
       } finally {
         if(accepts(url,revision,serial)) {
           busy=false;render();
@@ -380,7 +385,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       stopBinding();
       binding={id,origin:url,allocated:'',token:bindGeneration,persisted:false,inFlight:false,stopped:false,deadline:eventAt+BIND_WINDOW};
       const token=binding.token;
-      busy=true;error='';sequence++;render();
+      busy=true;loading=false;error='';sequence++;render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt});
         if(!contextMatches(token))return {ok:false};
@@ -406,6 +411,9 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!consent(event,toggle))return;
       if(syncRoute()){void refresh();return;}
       if(toggle.disabled)return;
+      // A click after a failed read retries that read only. Unknown state is
+      // never permission to arm, disarm or stop an existing Goal.
+      if(!loaded){void refresh();return;}
       void act(active()&&!record.stopRequested?'stop':armed()?'disarm':'arm');
     });
     listen(details,'click',()=>{if(syncRoute()||!loaded)void refresh();show(!open);});

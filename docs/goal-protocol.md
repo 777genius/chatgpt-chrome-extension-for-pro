@@ -47,3 +47,11 @@ A trusted enabled send action captures an intent, but is insufficient to start G
 
 The per-tab arm, intent and final binding are durable. Initial binding and Goal state are committed together; a missing acknowledgement never causes the user's message to be resent. Disarming during confirmation cancels adoption or stops that exact adopted Goal, without stopping the user's native request. Later manual sends retain priority. Existing popup-started Goals remain supported.
 The follow-up critical review adds synthetic regressions for untrusted inline actions, handoff Pause/Resume controls, retained composers, strict marker markup, and manual-request/retry races across worker restarts. These regressions do not replace a fresh live ChatGPT canary after the sender and marker changes.
+
+## Rich native messages and seeded recovery
+
+Native user messages may contain Markdown URLs while their composer and sent-message bubble show only link labels. Goal adoption accepts that representation only when the visible sent body is bound to the exact latest native user identity and matches the captured intent; the stored objective retains the full native text and URLs. Replayed bindings must retain both representations.
+
+A new-chat recovery seed is recognized by its exact native composer prompt matching the durable source message and its current plain text matching the visible editor. The worker derives the expected native text and optional history file from its own saved operation. It repeats this proof before replacement; changed URL targets, user edits, hidden prompt context and unrelated attachments still stop recovery. Failed historical transfers are not automatically resent after an update.
+
+Inline loading failures now permit an explicit trusted retry and expose errors visibly. An explicit new arm can supersede an unbound intent from a different saved source chat, preserving the cancelled intent in the journal; same-chat and new-root allocation protections remain unchanged.
