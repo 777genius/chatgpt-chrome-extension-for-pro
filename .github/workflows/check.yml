@@ -5,6 +5,7 @@ on:
       - main
       # Temporary draft-only opt-in CI lane; removed before merge.
       - refactor/typescript-bun-modular
+      - work/ts-migration-main-179-integration-20261103
   pull_request:
     types:
       - opened
@@ -40,7 +41,7 @@ jobs:
         if: github.event_name == 'push' && contains(github.event.head_commit.message, '[ci:test]')
         shell: bash
         run: |
-          tar --exclude=.git --exclude=dist --exclude=coverage \
+          tar --exclude=.git --exclude='./dist' --exclude='./coverage' \
             -czf "$RUNNER_TEMP/draft-toolchain.tar.gz" .
           # Preserve the exact upstream baseline and Bun runner tool for
           # independent local migration/parity diagnostics. No git credentials
