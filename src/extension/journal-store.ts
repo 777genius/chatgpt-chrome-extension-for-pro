@@ -121,7 +121,9 @@ interface JournalEvent extends Record<string, unknown> {
   initiator?: string;
 }
 interface JournalResult {
-  ok: true;
+  ok: boolean;
+  duplicate?:boolean;
+  superseded?:boolean;
   sequence: number;
   sourceUrl: string;
   record?: RetryDraft & { draft: string };
@@ -368,25 +370,32 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
     const active:Record<string,ActiveJournalOp> = { ...meta.active };
     const retrySendClaims: Record<string,RetrySendClaim> = { ...meta.retrySendClaims };
     const retryConsumedOperations: Record<string,number> = { ...meta.retryConsumedOperations };
+    const retryReleasedOperations:Record<string,number>={...meta.retryReleasedOperations};
     const retryPreparingByChat: Record<string,RetryPreparing> = { ...meta.retryPreparingByChat };
     const handoffSourceClaims: Record<string,HandoffSourceClaim> = { ...meta.handoffSourceClaims };
     const requests:Record<string,JournalRequestOp> = { ...meta.requests };
     let operationId: string | null = event.operationId || null;
     const savedDraft=meta.retryDraftByChat[retryDraftUrl(sourceUrl)||''];
     const retrySource=retryDraftUrl(sourceUrl);
+    const manualFence=meta.retryByChat?.[journalChatId(retrySource)||'']?.manualStartedAt;
+    const superseded=retryAttemptBefore(event.attemptId,manualFence);
+    const staleDraftSave=event.kind==='draft.saved'&&
+      (superseded||Boolean(operationId&&Object.hasOwn(retryReleasedOperations,operationId)));
     const owns=(claim: RetrySendClaim | RetryPreparing | HandoffSourceClaim | undefined): boolean =>
       claim?.operationId===operationId&&claim.tabId===tabId;
     const duplicate=()=>Object.assign(new Error('Автоповтор этого запроса уже запускался в другой вкладке или ранее'),
       {journalPolicy:true,code:'RETRY_DUPLICATE'});
     function reserveRetry(): void {
       if(!retrySource||!operationId||typeof event.promptKey!=='string'||!event.promptKey)return;
-      if(Object.hasOwn(retryConsumedOperations,operationId))throw duplicate();
+      if(retryAttemptBefore(event.attemptId,manualFence))throw duplicate();
+      if(Object.hasOwn(retryConsumedOperations,operationId)||
+          Object.hasOwn(retryReleasedOperations,operationId))throw duplicate();
       if(meta.retryDraftClaims?.[operationId])return;
       const key=JSON.stringify([retrySource,event.promptKey]);
       const claim=retrySendClaims[key],preparing=retryPreparingByChat[retrySource];
       if(claim&&(!owns(claim)||claim.phase!=='reserved')||preparing&&!owns(preparing))throw duplicate();
       retrySendClaims[key]={operationId,tabId,at:claim?.at||Date.now(),phase:'reserved'};
-      retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key};
+      retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key,attemptId:event.attemptId||preparing?.attemptId||''};
     }
     if(event.kind==='goal.started'&&retrySource&&(
         retryPreparingByChat[retrySource]||
@@ -431,7 +440,7 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
           (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl)))
         throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
       active[tabKey]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
-        ...(event.kind==='retry.send_intent'?{sourceUrl:retrySource,promptKey:event.promptKey}:{})};
+        ...(event.kind==='retry.send_intent'?{sourceUrl:retrySource,promptKey:event.promptKey,attemptId:event.attemptId||''}:{})};
     }
     if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
       const source=retryDraftUrl(sourceUrl),claim=source?handoffSourceClaims[source]:undefined;
@@ -477,9 +486,30 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
       if(retrySendClaims[preparation.claimKey]?.phase==='reserved')delete retrySendClaims[preparation.claimKey];
       delete retryPreparingByChat[retrySource];
     }
-    if(event.kind==='retry.preparation_superseded'&&preparation&&retrySource) {
-      if(retrySendClaims[preparation.claimKey]?.phase==='reserved')delete retrySendClaims[preparation.claimKey];
+    if(event.kind==='retry.preparation_superseded'&&preparation&&retrySource&&
+        !retryAttemptAtOrAfter(preparation.attemptId,event.startedAt)) {
+      retryReleasedOperations[preparation.operationId]=sequence;
+      if(retrySendClaims[preparation.claimKey]?.phase==='reserved')
+        delete retrySendClaims[preparation.claimKey];
       delete retryPreparingByChat[retrySource];
+    }
+    if(savedDraft?.operationId&&(event.kind==='retry.manual_reset'||
+        event.kind==='retry.preparation_superseded'&&
+        !retryAttemptAtOrAfter(savedDraft.attemptId,event.startedAt)))
+      retryReleasedOperations[savedDraft.operationId]=sequence;
+    if(event.kind==='retry.preparation_superseded') {
+      // Retire only older retries with proven timestamps. Unknown click
+      // outcomes remain consumed, never silently authorize another send.
+      for(const [owner,entry] of Object.entries(active)) {
+        const attempt=entry?.attemptId||
+          (preparation?.operationId===entry?.operationId?preparation.attemptId:'');
+        if(entry?.kind==='retry.send_intent'&&
+            (entry.chatUrl||entry.sourceUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===retrySource&&
+            retryAttemptBefore(attempt,event.startedAt)) {
+          if(entry.operationId)retryReleasedOperations[entry.operationId]=sequence;
+          delete active[owner];
+        }
+      }
     }
     const currentSend=active[tabKey];
     const exactGrant=Boolean(currentSend&&operationId&&currentSend.operationId===operationId);
@@ -501,13 +531,16 @@ function appendJournal(event: JournalEvent, tab: JournalTab = {}): Promise<Journ
       sourceUrl:requestSource || sourceUrl, sourceChatId:journalChatId(requestSource || sourceUrl), targetUrl, targetChatId: journalChatId(targetUrl),
       observedTabUrl: tab.url || '', observedChatId: journalChatId(tab.url) };
     if (event.kind === 'tab.closed') delete tabs[tabKey];
-    const retryDraftByChat=reduceRetryDraft(meta.retryDraftByChat,entry);
+    const retryDraftByChat=staleDraftSave?meta.retryDraftByChat:
+      reduceRetryDraft(meta.retryDraftByChat,entry,
+        meta.retryByChat?.[journalChatId(entry.sourceUrl)||'']?.manualStartedAt);
     await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
-      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryPreparingByChat, handoffSourceClaims, requests, tabs, lastAt: entry.recordedAt,
+      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, requests, tabs, lastAt: entry.recordedAt,
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId||'']:sequence}:meta.retryDraftClaims } });
     journalFailure = '';
-    return { ok: true as const, sequence, sourceUrl:entry.sourceUrl,
+    return {ok:!staleDraftSave,...(staleDraftSave?{duplicate:true}:{}),
+      ...(superseded?{superseded:true}:{}),sequence,sourceUrl:entry.sourceUrl,
       ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)||''],draft:claimedDraft!.draft}}:{}) };
   });
   journalQueue = write;
@@ -543,6 +576,8 @@ async function readRetryState(url: string): Promise<RetrySummary | null> {
     const chatId = journalChatId(url);
     const state = chatId && Object.hasOwn(meta.retryByChat || {}, chatId) ? meta.retryByChat[chatId] : null;
     if (!state) return null;
+    if(Object.keys(state).length===1&&typeof state.manualStartedAt==='number'&&
+        Number.isFinite(state.manualStartedAt))return null;
     const now = Date.now();
     return {...state, failures: (state.failures || []).filter((at: number) => Number.isFinite(at) && at <= now && now - at <= RETRY_STATE_WINDOW_MS),
       recentErrors: (state.recentErrors || []).filter((item: RetryError) => Number.isFinite(item.at) && item.at <= now && now - item.at <= RETRY_STATE_WINDOW_MS)};
