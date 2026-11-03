@@ -72,7 +72,7 @@ interface SWStorageDocument extends Record<string,unknown> {
   awaitingNotifiedAt?:number;active?:SWJournalMeta["active"];
   retrySchema?:number;goalId?:string;kind?:string;at?:number;consumed?:boolean;
   receipt?:SWReceipt;startedAt?:number;requestId?:string|null;notifications?:{id:string}[];
-  schema?:number;attemptId?:string;baselineKey?:string|null;promptKey?:string;httpCompleted?:boolean;
+  schema?:number;sequence?:number;recordedAt?:number;attemptId?:string;baselineKey?:string|null;promptKey?:string;httpCompleted?:boolean;
   requestFailedAt?:number;state?:string;
 }
 interface SWStorage {
@@ -289,6 +289,59 @@ async function latestRequestReceipt(tabId:number):Promise<SWReceiptRecord|null> 
   const saved=await readRequestReceipt(tabId);
   if(saved&&!manualRequestReceiptsByTab.has(tabId))manualRequestReceiptsByTab.set(tabId,saved);
   return manualRequestReceiptsByTab.get(tabId)||null;
+}
+
+async function reconcileFailedCompletionLoading(tabId:number,url:string) {
+  let record=await completionCheckpointRead(tabId);
+  const view=await readChatStatus(url),request=await latestRequestReceipt(tabId);
+  const matches=(current:SWStorageDocument|null,status:SWStatusView,known:SWReceiptRecord|null):boolean=>
+    !!current&&current.state==='active'&&current.url===url&&current.startedAt===record?.startedAt&&
+    current.requestId===record?.requestId&&current.baselineKey===record?.baselineKey&&
+    current.promptKey===record?.promptKey&&!!known&&
+    known.startedAt===record?.startedAt&&known.requestId===record?.requestId&&
+    (!known.url||ChatGPTHandoffTitle.chatUrl(known.url)===url)&&
+    typeof known.receipt?.epoch==='string'&&Number.isSafeInteger(known.receipt.order)&&known.receipt.order>0&&
+    status.status?.kind==='loading'&&status.status.eventAt===record?.startedAt&&
+    status.status.receipt?.epoch===known.receipt.epoch&&status.status.receipt?.order===known.receipt.order;
+  if(typeof record?.baselineKey!=='string'||!record.baselineKey||
+      typeof record.promptKey!=='string'||!record.promptKey||
+      typeof record.startedAt!=='number'||typeof record.requestId!=='string'||
+      !matches(record,view,request)||
+      ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)
+    return {changed:false};
+  const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+    func:inspectCompletedTurn,args:[url,false,record.promptKey]});
+  const native=result?.result;
+  // A pre-upgrade request may have no failure timestamp. After native proof,
+  // inspect only the most recent immutable journal tail, never whole history.
+  if(!record.requestFailedAt&&failedAttemptRollbackEvidence({...record,requestFailedAt:record.startedAt},native)) {
+    const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META],through=meta?.sequence||0;
+    const keys=Array.from({length:Math.min(300,through)},(_,i)=>
+      `${JOURNAL_PREFIX}${String(through-i).padStart(12,'0')}`);
+    const rows=await chrome.storage.local.get(keys);
+    const failure=Object.values(rows).find(row=>row?.kind==='request.failed'&&row.tabId===tabId&&
+      row.requestId===record?.requestId&&ChatGPTHandoffTitle.chatUrl(row.sourceUrl)===url&&
+      typeof row.recordedAt==='number'&&Number.isFinite(row.recordedAt)&&
+      row.recordedAt>=(record?.startedAt||0));
+    if(failure&&typeof failure.recordedAt==='number'&&
+       await completionCheckpointFailure(tabId,{startedAt:record.startedAt,requestId:record.requestId,
+         failedAt:failure.recordedAt}))record=await completionCheckpointRead(tabId);
+  }
+  if(!record||!failedAttemptRollbackEvidence(record,native))
+    return {changed:false,pending:Boolean(record?.requestFailedAt)};
+  const current=await completionCheckpointRead(tabId),
+    status=await readChatStatus(url),known=await latestRequestReceipt(tabId);
+  if(status.revision!==view.revision||!matches(current,status,known)||
+      ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {changed:false};
+  if(typeof record.startedAt!=='number'||typeof record.requestId!=='string'||!known)return {changed:false};
+  if(!await completionCheckpointFinish(tabId,record.startedAt,'failed',record.requestId))
+    return {changed:false};
+  const stopped=await stopChatLoading(url,record.startedAt,statusReceipt(),known.receipt);
+  await appendJournal({kind:'completion.failed_rollback',sourceUrl:url,
+    requestId:record.requestId,startedAt:record.startedAt,promptKey:record.promptKey,
+    baselineKey:record.baselineKey},{id:tabId});
+  void broadcastChatStatus(stopped).catch(()=>{});
+  return {changed:true,...stopped};
 }
 
 function normalizePathname(url:string):string {
