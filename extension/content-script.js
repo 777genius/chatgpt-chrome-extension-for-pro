@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.4';
+  const SCRIPT_VERSION = '1.7.5';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -521,28 +521,47 @@
     }
   }
 
-  async function ensureMaxReasoning(operationId) {
+  function reasoningEffort() {
+    const editor = composer();
+    const root = editor?.closest('form') || editor?.closest('[data-composer-body]');
+    const trigger = root && Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(isElementVisible);
+    return {trigger, value:trigger?.getAttribute('data-selected-reasoning-effort') || ''};
+  }
+
+  async function ensureSavedReasoning(operationId, expected) {
+    if (typeof expected !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(expected)) throw new Error('Исходный режим рассуждения не сохранён; передача остановлена');
     const url = location.href;
-    const trigger = () => Array.from(pageRoot().querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(isElementVisible);
-    const first = trigger();
-    if (!first) throw new Error('Не найден переключатель уровня рассуждения');
-    const previous = first.getAttribute('data-selected-reasoning-effort');
-    if (previous !== 'max') {
-      first.click();
+    const first = reasoningEffort();
+    if (!first.trigger) throw new Error('Не найден переключатель уровня рассуждения');
+    const previous = first.value;
+    if (previous !== expected) {
+      first.trigger.click();
       try {
-        for (let i = 0; i < 6 && trigger()?.getAttribute('data-selected-reasoning-effort') !== 'max'; i += 1) {
-          if (location.href !== url) throw new Error('Открыт другой чат');
+        const step = async key => {
+          if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
           const slider = await waitHandoff(() => Array.from(document.querySelectorAll('[data-reasoning-slider="true"]')).find(isElementVisible));
-          slider.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',code:'ArrowRight',bubbles:true,cancelable:true}));
+          if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
+          slider.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,bubbles:true,cancelable:true}));
           await sleepUntilNextCheck();
+          if (!runtimeAvailable() || location.href !== url || !reasoningEffort().value) throw new Error('Режим рассуждения недоступен');
+        };
+        for (let i = 0; i < 16 && reasoningEffort().value !== expected; i += 1) {
+          const before = reasoningEffort().value;
+          await step('ArrowLeft');
+          if (reasoningEffort().value === before) break;
+        }
+        for (let i = 0; i < 16 && reasoningEffort().value !== expected; i += 1) {
+          const before = reasoningEffort().value;
+          await step('ArrowRight');
+          if (reasoningEffort().value === before) break;
         }
       } finally {
         const menu = Array.from(document.querySelectorAll('[role="menu"]')).find(isElementVisible);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));
       }
     }
-    if (location.href !== url || trigger()?.getAttribute('data-selected-reasoning-effort') !== 'max') throw new Error('Уровень «Очень высокий» не подтверждён; отправка остановлена');
-    await audit('reasoning.selected',{operationId,previous,selected:'max'},true);
+    if (location.href !== url || reasoningEffort().value !== expected) throw new Error('Исходный режим рассуждения недоступен; передача остановлена');
+    await audit('reasoning.selected',{operationId,previous,expected,selected:reasoningEffort().value},true);
   }
 
   async function retryAfterError(error, attempt, path, promptKey, state, requestId) {
@@ -913,7 +932,7 @@
       }
       await updateHandoff('preparing', { targetUrl: location.href });
       verifyPreparation();
-      await ensureMaxReasoning(record.id);
+      await ensureSavedReasoning(record.id, record.reasoningEffort);
       verifyPreparation();
       if (record.asFile) {
         const input = Array.from(pageRoot().querySelectorAll('input[type="file"]')).find((node) => !node.accept || /text|\.txt/.test(node.accept));
@@ -969,7 +988,7 @@
       rememberCompletionSendIntent();
       clicked = true;
       manualSendIntent=null;
-      const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,requireMax:true,fileName:record.asFile?record.fileName:null});
+      const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,expectedEffort:record.reasoningEffort,fileName:record.asFile?record.fileName:null});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка истории не подтверждена');
       void audit('handoff.clicked',{operationId:record.id,sourceUrl:record.sourceUrl,targetUrl:location.href});
@@ -1002,12 +1021,14 @@
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
     const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там два последних сообщения пользователя и два ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
+    const sourceEffort = reasoningEffort().value;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sourceEffort)) throw new Error('Не удалось сохранить исходный режим рассуждения');
     const sourceEditor = composer();
     const draft = sourceEditor ? rawEditorText(sourceEditor) : '';
     if (sourceEditor && composerHasAttachments(sourceEditor)) throw new Error('В исходном чате есть пользовательское вложение; переход отменён');
     const record = {
       id: crypto.randomUUID(), createdAt: Date.now(), sourceUrl, sourceTitle:document.title, text, prompt, asFile, fileName,
-      draft,
+      draft, reasoningEffort:sourceEffort,
       lastUserText: info.messages.filter((item) => item.role === 'user').at(-1)?.text || ''
     };
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_BEGIN', record });
@@ -1017,7 +1038,7 @@
     try {
       button = alert.querySelector('button');
       if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
-      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor ||
+      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || reasoningEffort().value !== sourceEffort ||
           sourceEditor && (rawEditorText(sourceEditor) !== draft || composerHasAttachments(sourceEditor))) {
         throw new Error('Исходный чат или черновик изменились; переход отменён');
       }

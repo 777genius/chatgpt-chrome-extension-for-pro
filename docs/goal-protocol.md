@@ -55,3 +55,9 @@ Native user messages may contain Markdown URLs while their composer and sent-mes
 A new-chat recovery seed is recognized by its exact native composer prompt matching the durable source message and its current plain text matching the visible editor. The worker derives the expected native text and optional history file from its own saved operation. It repeats this proof before replacement; changed URL targets, user edits, hidden prompt context and unrelated attachments still stop recovery. Failed historical transfers are not automatically resent after an update.
 
 Inline loading failures now permit an explicit trusted retry and expose errors visibly. An explicit new arm can supersede an unbound intent from a different saved source chat, preserving the cancelled intent in the journal; same-chat and new-root allocation protections remain unchanged.
+
+## Reasoning mode across handoff
+
+New handoffs persist the source composer's native reasoning token before navigation and recheck it before leaving the source. The destination restores that exact token through the native slider, without localized labels or fixed level positions. The worker authorizes only the saved token; the native sender verifies the current token again immediately before its one click.
+
+Unavailable modes, concurrent source-mode changes and legacy pending records without a saved mode stop before sending rather than choosing Extra High or downgrading Pro. Already-clicked historical transfers remain fenced and can still reconcile their existing native receipt.

@@ -6,7 +6,7 @@
 <img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
-Version **1.7.4** · Chrome / Chromium **116+** · No build required
+Version **1.7.5** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -20,7 +20,7 @@ Version **1.7.4** · Chrome / Chromium **116+** · No build required
 | **Goal auto-continue** | Turn on Goal beside reasoning effort, type the objective in ChatGPT’s normal composer, and send it yourself; each fully completed non-marker answer triggers one guarded continuation. The exact entire answer `GOAL_COMPLETE` stops the goal. Durable pause/resume/stop, continuation/time limits, unknown-send fencing, and confirmed-chat handoff. |
 | **Automatic retries** | Sends `доделай е2е` (“finish end-to-end”) up to **4 times within 2 minutes**. `Unknown error` follows the native action: retry here or transfer context when ChatGPT offers a new chat. Stops interrupted generation before retrying. Stops on exhausted limits or an unconfirmed send. A durable per-chat claim prevents duplicate retries from multiple tabs. Only a request-confirmed manual send resets the retry state. |
 | **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. Native rich-link labels are matched to their submitted URLs without treating unrelated drafts as recovery text. Hidden native prompt context also blocks automatic sending. Concurrent edits and user attachments cancel handoff preparation; cancelled transfers do not resume later. |
-| **New-chat handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Requires the **max reasoning setting**. A shared source-chat claim prevents duplicate handoffs from multiple tabs. |
+| **New-chat handoff** | Opens a new chat in the same tab, transfers the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Preserves the **source chat’s reasoning mode**, including Pro when available; refuses to send if that mode cannot be restored. A shared source-chat claim prevents duplicate handoffs from multiple tabs. |
 | **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the first response to finish and rename controls to become ready. |
 | **Reload recovery** | Saves request/response bindings and elapsed-time metadata locally. Reattaches to existing tabs after an extension reload; restores safe draft backups without repeating uncertain sends. Follows a new chat from its initial page to its permanent URL using native first-message evidence. |
 | **Persistent activity log** | Records chat IDs, source/destination URLs, send intents, sent text, confirmations, retry counts, and stop reasons. Preserves recovery copies across extension updates. |

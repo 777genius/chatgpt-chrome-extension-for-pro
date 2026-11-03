@@ -25,7 +25,7 @@ function harness(dropReply=false) {
   (document.querySelector('form') as unknown as RecordValue).__reactFiber$test={memoizedProps:{composerController:controller,entries},return:null};
   const location={href:'https://chatgpt.com/'};
   const storage:RecordValue={
-    'chatgpt-handoff:7':{id:'handoff',stage:'sending',sourceUrl,targetUrl:'https://chatgpt.com/',prompt:payload,text:payload,draft:'Owner draft',naming:{version:1,sourceUrl,baseTitle:'Fixture task',part:1,title:'Fixture task (1)'}},
+    'chatgpt-handoff:7':{id:'handoff',reasoningEffort:'max',stage:'sending',sourceUrl,targetUrl:'https://chatgpt.com/',prompt:payload,text:payload,draft:'Owner draft',naming:{version:1,sourceUrl,baseTitle:'Fixture task',part:1,title:'Fixture task (1)'}},
     meta:{active:{7:{operationId:'handoff',kind:'handoff.sending',at:100000}}}
   };
   const journal:RecordValue[]=[];
@@ -59,7 +59,7 @@ function harness(dropReply=false) {
   }
   return {document,storage,location,entries,nativeHeader,editor,journal,restart,message,
     navigateAfterProof:(url:string)=>{routeAfterProof=url;},
-    send:()=>message({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:location.href,text:payload,requireMax:true,operationId:'handoff'}}),
+    send:(extra:RecordValue={})=>message({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:location.href,text:payload,expectedEffort:'max',operationId:'handoff',...extra}}),
     reconcile:()=>message({type:'CHATGPT_HANDOFF_RECONCILE',id:'handoff'}),
     get clicks(){return clicks;},get record(){return storage['chatgpt-handoff:7'];}};
 }
@@ -116,3 +116,5 @@ for(const ownEffort of ['medium',null]) {
   assert.equal((await h.send()).ok,false);assert.equal(h.clicks,1);
 }
 console.log('PASS: own-composer Max enforcement, durable exact native click receipt, late permanent-route reconciliation, wrong payload/alias refusal, worker restart, no resend, one draft claim, unknown reply preservation');
+
+{const h=harness();assert.equal((await h.send({expectedEffort:'medium'})).ok,false);assert.equal(h.clicks,0);assert.equal((await h.send({expectedEffort:undefined})).ok,false);assert.equal(h.clicks,0);assert.equal((await h.send()).clicked,true,'only the durably saved effort authorizes the handoff');}

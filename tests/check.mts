@@ -293,7 +293,7 @@ async function workerCheck() {
   assert.ok(injections.at(-1).files.includes('status-indicator.js'));
   assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===125000).length,2,'start is redelivered only after the missing receiver is installed');
   assert.ok(notifications.every(n => !/click to return/i.test(n.contextMessage)));
-  const record={id:'handoff-test',sourceUrl:'https://chatgpt.com/c/source',sourceTitle:'Original name',text:'complete history'};
+  const record={reasoningEffort:'max',id:'handoff-test',sourceUrl:'https://chatgpt.com/c/source',sourceTitle:'Original name',text:'complete history'};
   Object.assign(workerContext,{record});
   const begun=await runInContext("handleHandoffMessage({type:'CHATGPT_HANDOFF_BEGIN',record},7)",workerContext);
   assert.equal(begun.record.stage,'navigating');

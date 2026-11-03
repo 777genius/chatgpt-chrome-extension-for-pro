@@ -314,7 +314,7 @@ async function handleHandoffMessage(message, tabId) {
     if (message.type === 'CHATGPT_HANDOFF_BEGIN') {
       if(['sending','awaiting-confirmation'].includes(current?.stage))throw new Error('Предыдущая передача ещё ожидает подтверждения');
       let record = message.record;
-      if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string') throw new Error('Invalid handoff');
+      if (!record || typeof record.id !== 'string' || !record.sourceUrl?.startsWith('https://chatgpt.com/c/') || typeof record.text !== 'string' || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort)) throw new Error('Invalid handoff');
       const marker = `${key}:source:${record.sourceUrl}`;
       if ((await chrome.storage.local.get(marker))[marker]) return { ok: false, error: 'Передача этого чата уже запускалась' };
       const lineageKey=`chatgpt-handoff-title:${ChatGPTHandoffTitle.chatUrl(record.sourceUrl)}`;
@@ -326,7 +326,7 @@ async function handleHandoffMessage(message, tabId) {
       // strand the Goal waiting on a transfer that never started.
       await appendJournal({kind:'handoff.navigating', operationId:record.id, sourceUrl:record.sourceUrl,
         text:record.text, prompt:record.prompt, asFile:record.asFile, fileName:record.fileName,
-        draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,naming}, {id:tabId});
+        draftChars:record.draft?.length || 0,sourceTitle:record.sourceTitle,reasoningEffort:record.reasoningEffort,naming}, {id:tabId});
       // Save the full text BEFORE navigating away from the source page.
       await chrome.storage.local.set({ [key]: { ...record, stage: 'navigating' }, [marker]: record.id });
       try {
@@ -626,18 +626,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const active = meta?.active?.[sender.tab.id];
         if (!active || active.operationId !== options.operationId || Date.now() - active.at > 15000) throw new Error('Нет сохранённого разрешения на эту автоматическую отправку');
         if (active.kind === 'retry.send_intent') {
-          if (options.text !== 'доделай е2е' || options.fileName) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
+          if (options.text !== 'доделай е2е' || options.fileName || options.requireMax || options.expectedEffort !== undefined) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
           if(!active.sourceUrl||active.sourceUrl!==retryDraftUrl(options.url)||typeof active.promptKey!=='string'||!active.promptKey)throw new Error('Исходный запрос автоповтора не подтверждён');
           retryBinding={sourceUrl:active.sourceUrl,promptKey:active.promptKey};
         } else if (active.kind === 'goal.send_intent') {
-          if(options.requireMax||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
+          if(options.requireMax||options.expectedEffort!==undefined||options.fileName)throw new Error('Goal не разрешает вложения или смену уровня модели');
           const grant=await goalController.authorize({url:options.url,tabId:sender.tab.id,
             id:active.goalId,operationId:options.operationId,text:options.text});
           if(!grant?.ok)throw new Error('Goal более не разрешает отправку');
         } else if (active.kind === 'handoff.sending') {
           const key = handoffKey(sender.tab.id);
           const record = (await chrome.storage.local.get(key))[key];
-          if (!record || record.stage !== 'sending' || record.id !== options.operationId || record.prompt !== options.text || !options.requireMax ||
+          if (!record || record.stage !== 'sending' || record.id !== options.operationId || record.prompt !== options.text || typeof record.reasoningEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(record.reasoningEffort) || options.expectedEffort !== record.reasoningEffort || options.requireMax ||
               (options.fileName || null) !== (record.asFile ? record.fileName : null)) throw new Error('Текст не совпадает с сохранённой передачей');
         } else throw new Error('Отправка пользовательского черновика запрещена');
         await appendJournal({kind:'send.authorized',operationId:options.operationId,text:options.text,sourceUrl:options.url},sender.tab);

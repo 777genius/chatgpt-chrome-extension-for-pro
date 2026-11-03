@@ -275,7 +275,7 @@ function controlChatComposer(options) {
   const effort = Array.from(composer.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
   if (options.action === 'inspect' && !options.fileName) return inspection;
-  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max'))) {
+  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || (options.expectedEffort !== undefined && (typeof options.expectedEffort !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.expectedEffort) || effort !== options.expectedEffort)))) {
     return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort};
   }
   const attachments = composer.querySelector('[data-composer-attachments]');

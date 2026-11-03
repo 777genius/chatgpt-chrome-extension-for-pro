@@ -52,8 +52,8 @@ async function append(tabId:number,kind:string,operationId:string,extra:Value={}
 function message(tabId:number,value:Value) {
   return new Promise<Value>(resolve=>listener(value,{tab:{id:tabId,url:pages.get(tabId)!.url},frameId:0},resolve));
 }
-function send(tabId:number,operationId:string) {
-  return message(tabId,{type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:pages.get(tabId)!.url,text:'доделай е2е',operationId}});
+function send(tabId:number,operationId:string,extra:Value={}) {
+  return message(tabId,{type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:pages.get(tabId)!.url,text:'доделай е2е',operationId,...extra}});
 }
 const intent=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>append(tabId,'retry.send_intent',id,{promptKey});
 const plan=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>message(tabId,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.planned',operationId:id,sourceUrl:pages.get(tabId)!.url,promptKey}});
@@ -69,6 +69,7 @@ const beforeDuplicate=structuredClone(storage['chatgpt-journal:meta'].retryDraft
 assert.equal((await plan(loser,'different-prompt-while-preparing','/c/shared-source|user-turn-2')).duplicate,true,'a different prompt cannot replace another active preparation backup');
 assert.deepEqual(storage['chatgpt-journal:meta'].retryDraftByChat,beforeDuplicate);
 await intent(winner,winnerId);
+assert.equal((await send(winner,winnerId,{expectedEffort:'max'})).ok,false,'retry cannot inject a handoff effort constraint');
 const results=await Promise.all([send(winner,winnerId),send(loser,'retry-loser')]);
 assert.equal(results.filter(result=>result.clicked).length,1,'only the reserved preparation reaches an actual click');
 assert.equal(clicks.length,1);
@@ -134,7 +135,7 @@ await runInContext('rememberRequestReceipt(13,receipt)',worker);
 assert.equal((await message(13,manual)).ok,true,'only the consumed real request receipt supersedes the old preparation');
 assert.equal((await plan(13,'after-real-send','/c/manual-fixture|new-turn')).ok,true);
 
-const handoff=(tabId:number,id:string,source=sourceUrl)=>message(tabId,{type:'CHATGPT_HANDOFF_BEGIN',record:{id,sourceUrl:source,sourceTitle:'Fixture task',text:'Full synthetic handoff history',prompt:'Synthetic handoff payload'}});
+const handoff=(tabId:number,id:string,source=sourceUrl)=>message(tabId,{type:'CHATGPT_HANDOFF_BEGIN',record:{reasoningEffort:'max',id,sourceUrl:source,sourceTitle:'Fixture task',text:'Full synthetic handoff history',prompt:'Synthetic handoff payload'}});
 const begun=await Promise.all([handoff(7,'handoff-a'),handoff(8,'handoff-b',sourceUrl+'/')]);
 assert.equal(begun.filter(result=>result.ok).length,1,'parallel BEGIN in two tabs claims one canonical source chat');
 const handoffRecords=[storage['chatgpt-handoff:7'],storage['chatgpt-handoff:8']].filter(Boolean);
@@ -190,3 +191,5 @@ assert.equal(initializedImports.length,2,'multiple old recovery copies of the sa
 assert.deepEqual(initializedImports.map(event=>event.text).sort(),['Legacy recovery copy A','Legacy recovery copy B']);
 for(const [key,value] of Object.entries(originalCopies))assert.deepEqual(storage[key],value,'initialization never replaces an original saved recovery copy');
 console.log('PASS: cross-tab one-click retry/handoff claims, canonical URLs, durable unknown/reload refusal, later turn/source allowance, exact histories and atomic write failure');
+
+assert.equal((await message(9,{type:'CHATGPT_HANDOFF_BEGIN',record:{id:'invalid-effort',sourceUrl:'https://chatgpt.com/c/invalid-effort',text:'History',reasoningEffort:''}})).ok,false,'new handoff must persist an explicit syntactically valid source mode');

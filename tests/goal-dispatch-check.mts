@@ -12,7 +12,7 @@ function section(from:string,to:string) {
   return source.slice(start,end);
 }
 const editorFunctions=section('  function rawEditorText(editor) {','  async function restoreDraft(');
-const dispatchFunctions=section('  async function sleepUntilNextCheck() {','  async function ensureMaxReasoning(');
+const dispatchFunctions=section('  async function sleepUntilNextCheck() {','  function reasoningEffort() {');
 const url='https://chatgpt.com/c/goal-dispatch-fixture';
 const text='First synthetic goal paragraph.\n\nSecond synthetic paragraph.';
 const ownerEdit='  Owner edit\n\nKeep exact spacing  ';

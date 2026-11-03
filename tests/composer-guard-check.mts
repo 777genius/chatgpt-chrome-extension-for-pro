@@ -100,3 +100,18 @@ richController.getChatGptPrompt=()=>({prompt:serialized,systemHints:[]});
 editor.textContent='USER DRAFT';
 assert.equal(control({text:literal}).ok,false);assert.equal(clicks,before,'draft never clicked after serialization fix');
 console.log('PASS: literal native Markdown regression, altered URL targets, rich nodes, hints, stale serialization and draft race');
+
+// Handoff effort is the saved raw source token, including lower and Pro modes.
+richController.getChatGptPrompt=()=>({prompt:'Prepared history',systemHints:[]});
+richController.getPlainText=()=> 'Prepared history';editor.textContent='Prepared history';
+const effortControl=document.querySelector('[data-selected-reasoning-effort]')!;
+for(const expected of ['medium','max','pro']){
+ effortControl.setAttribute('data-selected-reasoning-effort',expected);
+ const clicksBefore:number=clicks;
+ assert.equal(control({text:'Prepared history',expectedEffort:expected}).clicked,true,'exact saved '+expected+' mode allows one click');
+ assert.equal(clicks,clicksBefore+1);
+ effortControl.setAttribute('data-selected-reasoning-effort',expected==='medium'?'max':'medium');
+ assert.equal(control({text:'Prepared history',expectedEffort:expected}).ok,false,'a changed mode must fail immediately before clicking');
+ assert.equal(clicks,clicksBefore+1);
+}
+assert.equal(control({text:'Prepared history',expectedEffort:''}).ok,false,'missing/invalid saved mode cannot authorize a native click');

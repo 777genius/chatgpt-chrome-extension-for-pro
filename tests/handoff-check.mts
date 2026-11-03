@@ -105,8 +105,8 @@ function probeCheck(){
  assert.equal(runInContext('inspectChatError(1,true).action',ctx),'unknown','unrelated status must not authorize a retry');
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
-type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment';
-async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference=''){
+type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort';
+async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{source?:string;destination?:string;available?:string[]}={}){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
@@ -117,6 +117,9 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  let stored:any=null;
  const storage:Record<string,any>={};
  const clock=testClock();
+ const sourceEffort=effortOptions.source||'max',destinationEffort=effortOptions.destination||'max';
+ const availableEfforts=effortOptions.available||['medium','max','pro'];
+ let effortOpens=0;
  const rich=interference.startsWith('rich-');
  const richVisible='Continue PR #123';
  const richOriginal='Continue PR [#123](https://example.test/pull/123)';
@@ -144,7 +147,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     return {ok:true,text:await runInContext('goalController.context(goalContextUrl)',context)};
    }
    if(m.type==='CHATGPT_WAIT'){await new Promise<void>(resolve=>clock.setTimeout(resolve,m.delayMs));return {ok:true};}
-   if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='inspect'&&m.options.fileName&&document.querySelector('[data-composer-attachments]')?.textContent?.includes('owner-private.txt'))return {ok:false,reason:'Owner attachment alongside history'};if(m.options.action==='send'){const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
+   if(m.type==='CHATGPT_COMPOSER_CONTROL'){if(m.options.action==='inspect'&&m.options.fileName&&document.querySelector('[data-composer-attachments]')?.textContent?.includes('owner-private.txt'))return {ok:false,reason:'Owner attachment alongside history'};if(m.options.action==='send'){assert.equal(m.options.expectedEffort,stored.reasoningEffort);assert.equal(effort.getAttribute('data-selected-reasoning-effort'),stored.reasoningEffort);const submittedText=m.options.text;document.querySelector('button[type=submit]')!.dispatchEvent(new window.Event('click'));(context as any).receiptMessage={type:'HANDOFF_CLICK_RECEIPT',id:stored.id,receipt:{operationId:stored.id,submittedText,clickedAt:clock.now()}};await runInContext('handleHandoffMessage(receiptMessage,7)',context);return {ok:true,clicked:true,effort:'max',submittedText,clickedAt:clock.now()};}return {ok:true,matches:true,ready:true,effort:'max'};}
    if(m.type==='CHATGPT_LOG_EVENT'){
     logs.push(m.event);
     if(m.event.kind==='reasoning.selected'){
@@ -168,6 +171,8 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     (context as any).handoffMessage=m;
     const result=await runInContext('handleHandoffMessage(handoffMessage,7)',context);
     if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='source-edit')activeEditor().textContent=ownerEdit;
+    if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='source-mode-change')effort.setAttribute('data-selected-reasoning-effort','pro');
+    if(m.type==='CHATGPT_HANDOFF_BEGIN'&&interference==='legacy-effort'){delete result.record.reasoningEffort;delete stored.reasoningEffort;}
     return result;
    }
    notices.push(m);return {};
@@ -176,6 +181,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
   getChatGptPrompt:()=>({prompt:activeEditor().textContent===richVisible?richNative:activeEditor().textContent}),submitReady:true,pendingSubmit:null};
  (document.querySelector('[data-app-shell-active-page="true"] form') as any).__reactFiber$seed={memoizedProps:{composerController:seedController}};
  const context=createContext({URL,window,document,location:loc,chrome:{runtime,storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>{Object.assign(storage,structuredClone(value));stored=storage['chatgpt-handoff:7'];}}},tabs:{get:async()=>({id:7,url:loc.href})},scripting:{executeScript:async({func,args}:any)=>[{result:func(...args)}]}},appendJournal:async()=>({ok:true}),MutationObserver:window.MutationObserver,Node:window.Node,Element:window.Element,Event:window.Event,
+ KeyboardEvent:class extends window.Event{key:string;code:string;constructor(type:string,init:any){super(type,init);this.key=init.key;this.code=init.code;}},
  HTMLTextAreaElement:window.HTMLTextAreaElement,AbortController,crypto:globalThis.crypto,File,DataTransfer:Transfer,
  Date:class extends Date{static now(){return clock.now();}},performance:{now:clock.now},setTimeout:clock.setTimeout,clearTimeout:clock.clearTimeout,setInterval:clock.setInterval,clearInterval:clock.clearInterval});
  document.querySelector('input')!.addEventListener('change',()=>{
@@ -205,12 +211,24 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    assert.ok(stored.text.includes('Earlier answer'),'source copy must be durable');
    loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';
    document.querySelector('[data-app-shell-active-page="true"] [contenteditable]')!.textContent=interference==='whitespace'?'  \n  ':rich?richVisible:'Last request';
+   effort.setAttribute('data-selected-reasoning-effort',destinationEffort);
    if(interference==='rich-native-mismatch')richNative='Continue PR [#123](https://example.test/pull/456)';
  });
- const effort=document.createElement('button');effort.type='button';effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort','max');document.querySelector('[data-app-shell-active-page="true"] form')!.append(effort);
+ const effort=document.createElement('button');effort.type='button';effort.setAttribute('data-composer-navigation-target','reasoning');effort.setAttribute('data-selected-reasoning-effort',sourceEffort);document.querySelector('[data-app-shell-active-page="true"] form')!.append(effort);
+ effort.addEventListener('click',()=>{
+   effortOpens++;
+   const menu=document.createElement('div');menu.setAttribute('role','menu');
+   const slider=document.createElement('div');slider.setAttribute('data-reasoning-slider','true');menu.append(slider);document.body.append(menu);
+   slider.addEventListener('keydown',(event:any)=>{
+     const index=availableEfforts.indexOf(effort.getAttribute('data-selected-reasoning-effort')!);
+     const next=Math.max(0,Math.min(availableEfforts.length-1,index+(event.key==='ArrowLeft'?-1:1)));
+     effort.setAttribute('data-selected-reasoning-effort',availableEfforts[next]!);
+   });
+   menu.addEventListener('keydown',(event:any)=>{if(event.key==='Escape')menu.remove();});
+ });
  document.querySelector('main')!.append(alert);
  if(interference&&interference!=='rich-seed'){
-   const sourceBlocked=interference==='source-attachment'||interference==='source-edit';
+   const sourceBlocked=interference==='source-attachment'||interference==='source-edit'||interference==='source-mode-change';
    await clock.until(()=>sourceBlocked?notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'):stored?.stage==='failed',`handoff preserves ${interference}`);
    assert.equal(sends.length,0,'manual interaction must cancel automatic history sending');
    if(sourceBlocked)assert.equal(loc.href,originalURL,'source draft/attachment must prevent native new-chat navigation');
@@ -222,7 +240,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    if(interference==='destination-attachment-during-upload')assert.equal(activeEditor().textContent,'Last request','unexpected attachment must stop before replacing the original composer text');
    if(interference!=='upload-edit'&&interference!=='destination-attachment-during-upload'&&!rich)assert.equal((document.querySelector('input') as any).files?.length||0,0,'private history must not attach after conflicting user interaction or navigation');
    assert.ok(notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'),'stopped handoff explains retained recovery copy');
-   if(interference==='source-edit'){
+   if(interference==='source-edit'||interference==='source-mode-change'){
      assert.equal(stored.stage,'failed','pre-navigation cancellation must persist a terminal handoff state');
      loc.href='https://chatgpt.com/';loc.pathname='/';document.querySelector('main')!.innerHTML='';activeEditor().textContent='';
      (context as any).__chatgptNotifierDispose();runInContext(source,context);await clock.advance(1000);
@@ -252,6 +270,9 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  }
  assert.equal(notices.filter(n=>n.type==='CHATGPT_RESPONSE_ERROR').length,1,'only the source response error may set terminal error status');
  assert.equal(notices.filter(n=>n.type==='CHATGPT_OPERATION_WARNING').length,ambiguous||lateTarget?1:0,'uncertain transfer notifies once as operational metadata, never as a failed response');
+ assert.equal(stored.reasoningEffort,sourceEffort,'the exact source mode is durably preserved');
+ assert.equal(effort.getAttribute('data-selected-reasoning-effort'),sourceEffort,'destination mode matches the source before clicking');
+ assert.equal(effortOpens,sourceEffort===destinationEffort?0:1,'matching destination mode never opens or changes its selector');
  assert.equal(sends.length,1,'handoff sends once');assert.notEqual(sends[0],'доделай е2е');
  if(restoredUnknown){
    assert.equal(begins,1,'a restored failed prompt with exhausted retry budget starts one existing protected handoff');
@@ -291,3 +312,10 @@ for(const interference of ['reasoning-edit','upload-edit','whitespace','route-be
 await transferCheck(false,false,false,false,false,false,'rich-seed');
 await transferCheck(true,false,false,false,false,false,'rich-seed');
 for(const interference of ['rich-native-mismatch','rich-native-edited','rich-owner-edit','rich-owner-attachment'] as const)await transferCheck(true,false,false,false,false,false,interference);
+
+for(const [source,destination] of [['medium','max'],['max','medium'],['pro','medium'],['pro','pro'],['medium','medium']] as const)await transferCheck(false,false,false,false,false,false,'',{source,destination});
+await transferCheck(false,false,false,false,false,false,'source-mode-change');
+await transferCheck(false,false,false,false,false,false,'unavailable-effort',{source:'pro',destination:'medium',available:['medium','max']});
+await transferCheck(false,false,false,false,false,false,'legacy-effort');
+
+await transferCheck(false,false,false,false,false,false,'',{source:'pro-tier-2',destination:'medium',available:['medium','max','pro-tier-2']});
