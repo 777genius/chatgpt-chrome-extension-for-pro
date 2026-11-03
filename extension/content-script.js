@@ -1,12 +1,13 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.0';
+  const SCRIPT_VERSION = '1.7.9';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
   let statusIndicator = null;
+  let inlineGoal = null;
   let deferredTaskObserver = null;
   let deferredObservedStart = 0;
   let manualSendIntent = null;
@@ -28,6 +29,7 @@
   function stopContext() {
     contextAlive = false;
     statusIndicator?.dispose();
+    inlineGoal?.dispose();
     deferredTaskObserver?.dispose();
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
     manualSendIntent = null;
@@ -98,6 +100,17 @@
     load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:isGenerating(),startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
 
 
+  inlineGoal=globalThis.ChatGPTGoalInline?.create({document,getUrl:()=>location.href,request:runtimeMessage,alive:runtimeAvailable,
+    subscribe:changed=>{
+      const listener=(changes,area)=>{
+        const url=globalThis.ChatGPTGoalPolicy?.canonical(location.href);
+        if(area==='local'&&(url&&Object.hasOwn(changes,'chatgpt-goal:'+url)||Object.keys(changes).some(key=>key.startsWith('chatgpt-goal-composer:'))))changed();
+      };
+      try{chrome.storage.onChanged?.addListener(listener);}catch{}
+      return ()=>{try{chrome.storage.onChanged?.removeListener(listener);}catch{}};
+    }})||null;
+
+
   function notifyPageReturned(event) {
     if((event&&event.isTrusted===false)||!pageIsActive()||returnedPageUrl===location.href)return;
     const url=location.href;
@@ -150,14 +163,15 @@
     const roleNode=turn.matches?.('[data-message-author-role="assistant"]')?turn:
       turn.querySelector('[data-message-author-role="assistant"]')||turn;
     const rendered=roleNode.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
-    // Examine the actual rendered answer, not ChatGPT's surrounding Copy,
-    // Share and feedback controls. Marker inside a code block, link or styled
-    // passage is not a plain final answer. Any other assistant content still
-    // disqualifies the marker, even when it is outside the first Markdown node.
-    if(!rendered||rendered.textContent!=='GOAL_COMPLETE'||
-        rendered.querySelector('code,pre,strong,em,a,blockquote,ul,ol,table,button,svg,img'))return false;
+    const unit=roleNode.closest?.('[data-chatgpt-search-unit-key$=":assistant"]')||
+      (roleNode.matches?.('[data-chatgpt-search-unit-key$=":assistant"]')?roleNode:null);
+    const ids=new Set((unit?.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
+    const sourceMessageId=ids.size===1?Array.from(ids)[0]:'';
+    if(!plainGoalMarkerDOM(rendered,sourceMessageId))return false;
     const semantic=roleNode.cloneNode(true);
-    semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"]').forEach(node=>node.remove());
+    // Fallback turns expose the speaker label as a screen reader heading,
+    // outside the answer itself. It is interface text in every locale.
+    semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
     return semantic.textContent.trim()==='GOAL_COMPLETE';
   }
 
@@ -237,13 +251,17 @@
   }
 
   function isElementVisible(node) {
-    if (!node) return false;
+    if (!node?.isConnected) return false;
     try {
-      // A stop button kept mounted but display:none must not count as
-      // "generating", otherwise completion would never be detected.
-      return typeof node.getClientRects !== 'function' || node.getClientRects().length > 0;
+      // SPA navigation and native dialogs can retain old composers with layout
+      // boxes. They must not participate in preparation or button selection.
+      if(node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'))return false;
+      const computed=document.defaultView?.getComputedStyle?.(node);
+      if(computed?.display==='none'||['hidden','collapse'].includes(computed?.visibility))return false;
+      const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
+      return rects.some(rect=>rect.width>0&&rect.height>0);
     } catch {
-      return true;
+      return false;
     }
   }
 
@@ -444,6 +462,10 @@
       if(!sameChat()||composer()!==editor||isGenerating())throw Error('Чат изменён до подготовки');
       replaceEditorText(editor,text);
       inserted=true;
+      // Native paragraph normalization is asynchronous after insertText. Let
+      // it settle before exact comparison; any concurrent user edit still
+      // fails the unchanged checks below and is never overwritten.
+      await sleepUntilNextCheck();
       await waitForExactComposer(text,()=>sameChat()&&composer()===editor&&
         rawEditorText(editor)===text&&!isGenerating()&&!composerHasAttachments(editor));
       grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
@@ -458,6 +480,7 @@
       // Treat a lost click acknowledgement as an UNKNOWN outcome.
       rememberCompletionSendIntent();
       clicked=true;
+      manualSendIntent=null;
       const sent=await inspectComposer(text,'send',{operationId});
       if(sent?.ok===false&&!sent.unknown)clicked=false;
       if(!sent?.ok||!sent.clicked)throw Error(sent?.reason||'Нет подтверждения единственного клика');
@@ -493,35 +516,72 @@
     }
   }
 
-  async function ensureMaxReasoning(operationId) {
+  function reasoningEffort() {
+    const editor = composer();
+    const root = editor?.closest('form') || editor?.closest('[data-composer-body]');
+    const trigger = root && Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(isElementVisible);
+    const value=trigger?.getAttribute('data-selected-reasoning-effort') || '';
+    return {trigger,value};
+  }
+
+  async function reasoningMode() {
+    const url=location.href,editor=composer(),before=reasoningEffort();
+    const result=await runtimeMessage({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'inspect-mode',url}});
+    const after=reasoningEffort();
+    if(!result?.ok||location.href!==url||composer()!==editor||before.trigger!==after.trigger||
+        before.value!==after.value||result.effort!==after.value||typeof result.model!=='string')
+      throw Error('Нативный режим модели изменился или недоступен');
+    return {...after,model:result.model};
+  }
+
+  async function ensureSavedReasoning(operationId, expected, expectedModel) {
+    if (typeof expected !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(expected) ||
+        typeof expectedModel !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(expectedModel)) throw new Error('Исходный режим рассуждения и модель не сохранены; передача остановлена');
     const url = location.href;
-    const trigger = () => Array.from(pageRoot().querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(isElementVisible);
-    const first = trigger();
-    if (!first) throw new Error('Не найден переключатель уровня рассуждения');
-    const previous = first.getAttribute('data-selected-reasoning-effort');
-    if (previous !== 'max') {
-      first.click();
+    const first = await reasoningMode();
+    if (!first.trigger || !first.model) throw new Error('Не найден переключатель уровня рассуждения и модели');
+    const previous = first.value,previousModel=first.model;
+    let current=first;
+    const matches=()=>current.value===expected&&current.model===expectedModel;
+    const selection=()=>JSON.stringify([current.value,current.model]);
+    if (!matches()) {
+      first.trigger.click();
       try {
-        for (let i = 0; i < 6 && trigger()?.getAttribute('data-selected-reasoning-effort') !== 'max'; i += 1) {
-          if (location.href !== url) throw new Error('Открыт другой чат');
+        const step = async key => {
+          if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
           const slider = await waitHandoff(() => Array.from(document.querySelectorAll('[data-reasoning-slider="true"]')).find(isElementVisible));
-          slider.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',code:'ArrowRight',bubbles:true,cancelable:true}));
+          if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
+          slider.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,bubbles:true,cancelable:true}));
           await sleepUntilNextCheck();
+          current=await reasoningMode();
+          if (!runtimeAvailable() || location.href !== url || !current.value || !current.model) throw new Error('Режим рассуждения недоступен');
+        };
+        for (let i = 0; i < 16 && !matches(); i += 1) {
+          const before = selection();
+          await step('ArrowLeft');
+          if (selection() === before) break;
+        }
+        for (let i = 0; i < 16 && !matches(); i += 1) {
+          const before = selection();
+          await step('ArrowRight');
+          if (selection() === before) break;
         }
       } finally {
         const menu = Array.from(document.querySelectorAll('[role="menu"]')).find(isElementVisible);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true}));
       }
     }
-    if (location.href !== url || trigger()?.getAttribute('data-selected-reasoning-effort') !== 'max') throw new Error('Уровень «Очень высокий» не подтверждён; отправка остановлена');
-    await audit('reasoning.selected',{operationId,previous,selected:'max'},true);
+    current=await reasoningMode();
+    if (location.href !== url || !matches()) throw new Error('Исходный режим рассуждения недоступен; передача остановлена');
+    const selected=current;
+    await audit('reasoning.selected',{operationId,previous,previousModel,expected,expectedModel,selected:selected.value,selectedModel:selected.model},true);
   }
 
   async function retryAfterError(error, attempt, path, promptKey, state, requestId) {
     manualSendIntent = null;
     const operationId = crypto.randomUUID();
     const sourceUrl = new URL(path, 'https://chatgpt.com').href;
-    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, title:error.sessionTitle, ...details}, required);
+    const logRetry = (kind, details = {}, required = false) => audit(kind, {operationId, sourceUrl, attemptId:attempt, requestId, title:error.sessionTitle, ...details}, required);
     let clicked = false;
     let confirmed = false;
     const expectedToken = watchToken;
@@ -565,7 +625,7 @@
       // The native stop can clear its banner before the composer becomes
       // writable. Share one bounded budget across stop settling, button and
       // actual editor readiness; never extend it after another failed check.
-      const readinessMs=recoveryStopped||recoveryVerifiedIdle?60000:10000;
+      const readinessMs=60000;
       const deadline = Date.now() + readinessMs;
       await readiness('generation-idle',{timeoutMs:readinessMs,deadlineAt:deadline,recoveryStopped,recoveryVerifiedIdle});
       while (isGenerating()) {
@@ -629,6 +689,7 @@
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true; // A lost reply may still mean the page received the click.
+      manualSendIntent=null;
       const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (sent?.duplicate) {
@@ -724,6 +785,9 @@
   function rememberManualStatusIntent() {
     const button=sendButton();
     if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return;
+    const editor=composer();
+    if(editor)void inlineGoal?.manualIntent({text:rawEditorText(editor),
+      baselineKey:latestPromptSnapshot()?.promptKey||'',eventAt:Date.now()});
     rememberCompletionSendIntent();
     manualSendIntent={url:ChatGPTHandoffTitle.chatUrl(location.href),at:Date.now(),attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
   }
@@ -736,7 +800,16 @@
     if(startedAt-intent.at>10000){manualSendIntent=null;return;}
     if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
     manualSendIntent=null;
-    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{if(result?.ok)statusIndicator?.accept(result);});
+    const path=location.pathname;
+    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{
+      if(!result?.ok)return;
+      // The worker owns receipt validation. A rejected or delayed ACK must not
+      // unlock this page's durable block or discard a newer local retry state.
+      if(location.pathname===path&&ChatGPTHandoffTitle.chatUrl(location.href)===intent.url&&
+          globalThis.__chatgptNotifierRequestStartedAt===startedAt&&
+          (globalThis.__chatgptNotifierRequestId||null)===(requestId||null))retryStates.delete(path);
+      statusIndicator?.accept(result);
+    });
   }
 
   // Reset the indicator only after a trusted send intent produces a request.
@@ -744,19 +817,13 @@
   document.addEventListener('click', (event) => {
     if (event.isTrusted && event.target instanceof Element &&
         event.target.closest('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')) {
-      retryStates.delete(location.pathname);
-      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       rememberManualStatusIntent();
-      void audit('retry.manual_reset',{input:'send-button'});
     }
   }, { capture: true, signal: listeners.signal });
   document.addEventListener('keydown', (event) => {
     if (event.isTrusted && event.key === 'Enter' && !event.shiftKey && !event.isComposing &&
         event.target instanceof Element && event.target.closest('#prompt-textarea, [data-composer-markdown]')) {
-      retryStates.delete(location.pathname);
-      void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       rememberManualStatusIntent();
-      void audit('retry.manual_reset',{input:'enter'});
     }
   }, { capture: true, signal: listeners.signal });
 
@@ -771,7 +838,7 @@
     const history = messages.map((item, index) =>
       `--- Сообщение ${index + 1}. ${item.role === 'user' ? 'Пользователь' : 'ChatGPT'} ---\n${item.text}`
     ).join('\n\n');
-    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние два сообщения пользователя и два ответа ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
+    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние доступные сообщения: не более двух сообщений пользователя и двух ответов ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
   }
 
   async function updateHandoff(stage, extra = {}) {
@@ -870,14 +937,22 @@
           throw new Error('Чат или черновик изменились во время подготовки передачи');
         }
       };
-      // The built-in new-chat action can seed the last prompt. Anything else
-      // may be a new draft and must not be silently overwritten.
+      let nativeSeed = false;
+      const verifyNativeSeed = async (allowHistoryFile = false) => {
+        const proof = await runtimeMessage({type:'CHATGPT_INSPECT_HANDOFF_SEED',id:record.id,url:initialUrl,
+          text:existing,allowHistoryFile});
+        verifyPreparation();
+        if (!proof?.ok || !proof.matches || !proof.ready) throw new Error('В новом чате уже есть другой черновик');
+      };
+      // Native new-chat can render saved Markdown links as visible labels.
+      // Accept that seed only when the actual native prompt is still exact.
       if (existing !== '' && existing !== record.lastUserText && existing !== record.draft && existing !== record.prompt) {
-        throw new Error('В новом чате уже есть другой черновик');
+        await verifyNativeSeed(record.asFile && composerHasAttachments(editor));
+        nativeSeed = true;
       }
       await updateHandoff('preparing', { targetUrl: location.href });
       verifyPreparation();
-      await ensureMaxReasoning(record.id);
+      await ensureSavedReasoning(record.id, record.reasoningEffort, record.reasoningModel);
       verifyPreparation();
       if (record.asFile) {
         const input = Array.from(pageRoot().querySelectorAll('input[type="file"]')).find((node) => !node.accept || /text|\.txt/.test(node.accept));
@@ -902,10 +977,13 @@
           if (file?.status === 'error') throw new Error('Ошибка загрузки файла истории');
           return file?.ok && file.status === 'ready';
         }, 60000);
-        const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
-        verifyPreparation();
-        if (!attachments?.ok || !attachments.matches) throw new Error(attachments?.reason || 'Не подтверждено единственное вложение истории');
+        if (!nativeSeed) {
+          const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
+          verifyPreparation();
+          if (!attachments?.ok || !attachments.matches) throw new Error(attachments?.reason || 'Не подтверждено единственное вложение истории');
+        }
       }
+      if (nativeSeed) await verifyNativeSeed(record.asFile);
       verifyPreparation();
       if (!record.asFile && composerHasAttachments(editor)) throw new Error('В новом чате есть пользовательское вложение');
       replaceEditorText(editor, record.prompt);
@@ -929,7 +1007,8 @@
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true;
-      const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,requireMax:true,fileName:record.asFile?record.fileName:null});
+      manualSendIntent=null;
+      const sent = await inspectComposer(record.prompt,'send',{operationId:record.id,expectedEffort:record.reasoningEffort,expectedModel:record.reasoningModel,fileName:record.asFile?record.fileName:null});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка истории не подтверждена');
       void audit('handoff.clicked',{operationId:record.id,sourceUrl:record.sourceUrl,targetUrl:location.href});
@@ -950,6 +1029,26 @@
   async function beginHandoff(error, info, alert) {
     if (handoffBusy) return;
     const sourceUrl = location.href;
+    const sourcePromptKey = latestPromptSnapshot()?.promptKey || location.pathname;
+    const sourceAttempt = globalThis.__chatgptNotifierAttemptId || '';
+    const sourceRequest = globalThis.__chatgptNotifierRequestId || null;
+    const sameSource = () => location.href === sourceUrl && alert.isConnected &&
+      (latestPromptSnapshot()?.promptKey || location.pathname) === sourcePromptKey &&
+      (globalThis.__chatgptNotifierAttemptId || '') === sourceAttempt &&
+      (globalThis.__chatgptNotifierRequestId || null) === sourceRequest;
+    // A terminal banner can render before the native history finishes loading.
+    // Wait only in this unchanged source; never retry a click or invent answers.
+    for (let checks = 0; info?.incomplete && checks < 80; checks += 1) {
+      await sleepUntilNextCheck();
+      if (!sameSource()) {
+        throw new Error('Исходный чат или запрос изменился во время загрузки истории');
+      }
+      const fresh = await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
+        alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
+      if (!sameSource()) throw new Error('Исходный запрос изменился во время проверки истории');
+      if (fresh?.action !== 'new-chat') throw new Error('Действие нового чата больше не подтверждено');
+      info = fresh;
+    }
     if (!/\/c\/[^/]+/.test(location.pathname) || info.incomplete || !info.messages?.length) {
       throw new Error('Не удалось получить полные последние сообщения; исходный чат сохранён');
     }
@@ -962,12 +1061,14 @@
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
     const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там два последних сообщения пользователя и два ответа ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
+    const sourceReasoning = await reasoningMode(),sourceEffort=sourceReasoning.value,sourceModel=sourceReasoning.model;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sourceEffort) || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(sourceModel)) throw new Error('Не удалось сохранить исходный режим рассуждения');
     const sourceEditor = composer();
     const draft = sourceEditor ? rawEditorText(sourceEditor) : '';
     if (sourceEditor && composerHasAttachments(sourceEditor)) throw new Error('В исходном чате есть пользовательское вложение; переход отменён');
     const record = {
       id: crypto.randomUUID(), createdAt: Date.now(), sourceUrl, sourceTitle:document.title, text, prompt, asFile, fileName,
-      draft,
+      draft, reasoningEffort:sourceEffort, reasoningModel:sourceModel,
       lastUserText: info.messages.filter((item) => item.role === 'user').at(-1)?.text || ''
     };
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_BEGIN', record });
@@ -977,7 +1078,8 @@
     try {
       button = alert.querySelector('button');
       if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
-      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor ||
+      const liveMode=await reasoningMode();
+      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || (liveMode.value !== sourceEffort || liveMode.model !== sourceModel) ||
           sourceEditor && (rawEditorText(sourceEditor) !== draft || composerHasAttachments(sourceEditor))) {
         throw new Error('Исходный чат или черновик изменились; переход отменён');
       }
@@ -1415,10 +1517,31 @@
     if(runtimeAvailable()&&result?.changed)statusIndicator?.accept(result);
   }
 
+  async function reconcileFailedCompletionLoading() {
+    const path=location.pathname,id=globalThis.__chatgptNotifierAttemptId,requestId=globalThis.__chatgptNotifierRequestId||null;
+    for(let check=0;check<8;check++) {
+      if(!runtimeAvailable()||path!==location.pathname||id!==globalThis.__chatgptNotifierAttemptId||requestId!==(globalThis.__chatgptNotifierRequestId||null))return;
+      const result=await runtimeMessage({type:'CHATGPT_RECONCILE_FAILED_COMPLETION',url:location.href});
+      if(!runtimeAvailable()||path!==location.pathname||id!==globalThis.__chatgptNotifierAttemptId||requestId!==(globalThis.__chatgptNotifierRequestId||null))return;
+      if(result?.changed){
+        statusIndicator?.accept(result);
+        if(completionAttempt?.id===id&&completionAttempt.requestId===requestId){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;}
+        return;
+      }
+      if(!result?.pending)return;
+      await sleepUntilNextCheck();
+    }
+  }
+
   async function restoreCompletionCheckpoint() {
     const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
     const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
     if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||initial!==globalThis.__chatgptNotifierAttemptId||initialRequestId!==globalThis.__chatgptNotifierRequestId)return;
+    if(result?.rollback?.changed){
+      statusIndicator?.accept(result.rollback);
+      if(completionAttempt){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;}
+      return true;
+    }
     if(result?.pending)return 'pending';
     const record=result?.ok&&result.record;
     if(!record||record.url!==(ChatGPTHandoffTitle.chatUrl(location.href)||location.origin+'/')||record.state!=='active'||typeof record.baselineKey!=='string'||
@@ -1519,9 +1642,9 @@
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
     const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&currentRequest){deferredObservedStart=0;deferredTaskObserver?.requestStarted(message.startedAt);armForCurrentPrompt();}
-    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
+    if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){void inlineGoal?.refresh();scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
-    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest)armForCurrentPrompt();
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest){armForCurrentPrompt();void reconcileFailedCompletionLoading().catch(()=>{});}
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }

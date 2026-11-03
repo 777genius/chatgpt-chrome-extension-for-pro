@@ -1,0 +1,213 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {createContext,runInContext,type Context} from 'node:vm';
+
+// Actual worker broker, journal and Goal coordinator. No native messages are
+// sent: tab delivery acknowledges the persisted reservation only.
+const url='https://chatgpt.com/c/manual-retry-fence';
+const meta='chatgpt-journal:meta';
+const goalKey='chatgpt-goal:'+url;
+const worker=readFileSync('extension/service-worker.js','utf8');
+const listenerSource=worker.slice(worker.indexOf('chrome.runtime.onMessage.addListener'),
+  worker.indexOf('chrome.tabs.onRemoved.addListener'));
+type Value=Record<string,any>;
+function fixture() {
+  const data:Value={},dispatches:Value[]=[];
+  let clock=1000000,sequence=0,context:Context;
+  let listener:(message:Value,sender:Value,respond:(value:Value)=>void)=>unknown;
+  const boot=()=>{
+    const chrome={runtime:{getManifest:()=>({version:'fixture'}),
+      onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},
+      storage:{local:{
+        get:async(keys:string|string[])=>structuredClone(Object.fromEntries(
+          (Array.isArray(keys)?keys:[keys]).map(key=>[key,data[key]]))),
+        set:async(values:Value)=>Object.assign(data,structuredClone(values))
+      }},
+      tabs:{get:async(id:number)=>({id,url}),sendMessage:async(_id:number,message:Value)=>{
+        if(message.type==='CHATGPT_GOAL_READINESS')return {ok:true,idle:true};
+        dispatches.push(message);return {ok:true};
+      }}
+    };
+    context=createContext({chrome,URL,console,setTimeout,clearTimeout,
+      crypto:{randomUUID:()=>`fence-operation-${++sequence}`},
+      Date:class extends Date {static now(){return clock;}},
+      messageChatUrl:(message:Value)=>message.url,
+      statusReceipt:()=>({epoch:'fixture',order:1}),
+      visitChatNotifications:async()=>({}),broadcastChatStatus:async()=>{}});
+    for(const name of ['journal-store','request-receipts','handoff-title','goal-policy','goal-store'])
+      runInContext(readFileSync(`extension/${name}.js`,'utf8'),context);
+    runInContext('const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});',context);
+    runInContext(listenerSource,context);
+  };
+  boot();
+  const evaluate=(code:string,values:Value={})=>{Object.assign(context,values);return runInContext(code,context);};
+  const message=(value:Value,tabId=7)=>new Promise<Value>(resolve=>
+    listener(value,{tab:{id:tabId,url},frameId:0},resolve));
+  const append=(event:Value,tabId=7)=>evaluate('appendJournal(event,tab)',{
+    event:{sourceUrl:url,...event},tab:{id:tabId,url}});
+  const log=(event:Value,tabId=7)=>message({type:'CHATGPT_LOG_EVENT',event:{sourceUrl:url,...event}},tabId);
+  const manual=async(startedAt:number,confirmed=true,tabId=7)=>{
+    const requestId='manual-'+startedAt;
+    if(confirmed)await evaluate('rememberRequestReceipt(tabId,request)',{
+      tabId,request:{startedAt,requestId,url,receipt:{epoch:'fixture',order:startedAt}}});
+    return message({type:'CHATGPT_MANUAL_SEND',url,requestId,startedAt},tabId);
+  };
+  const waitingGoal=async()=>{
+    await evaluate('goalController.start(options)',{options:{url,tabId:7,goal:'Synthetic request fence',
+      rules:'',maxContinuations:3,maxMinutes:60}});
+    const record=data[goalKey],operation=record.operation;
+    const options={url,tabId:7,id:record.id,operationId:operation.id,text:operation.text};
+    await evaluate('goalController.intent(options)',{options});
+    await evaluate('goalController.report(options)',{options:{...options,status:'confirmed',
+      newPromptKey:'/c/manual-retry-fence|goal-'+record.id}});
+  };
+  const retryIntent=async(operationId:string,attemptId:string,promptKey:string,tabId=7)=>{
+    const event={operationId,attemptId,promptKey};
+    await append({kind:'retry.planned',...event},tabId);
+    await append({kind:'retry.send_intent',...event},tabId);
+    await append({kind:'send.authorized',operationId},tabId);
+  };
+  return {data,dispatches,boot,evaluate,message,append,log,manual,waitingGoal,retryIntent,
+    active:(tabId=7)=>data[meta].active[tabId],
+    clock:(value:number)=>{clock=value;}};
+}
+
+// A real newer manual request supersedes only the old retry's chat slot.
+// Its operation/turn remain consumed even after restart and late callbacks.
+{
+  const env=fixture(),oldPrompt='/c/manual-retry-fence|old-user',newPrompt='/c/manual-retry-fence|manual-user';
+  await env.retryIntent('old-retry','1000010',oldPrompt);
+  assert.equal((await env.manual(1000020,false)).ok,false);
+  assert.equal(env.data[meta].active[7].operationId,'old-retry','unconfirmed input cannot release a grant');
+  env.boot();
+  assert.equal((await env.manual(1000020)).ok,true);
+  assert.equal(env.data[meta].active[7],undefined);
+  assert.ok(env.data[meta].retryConsumedOperations['old-retry']);
+  assert.equal(env.data[meta].retrySendClaims[JSON.stringify([url,oldPrompt])].phase,'consumed');
+  env.boot();
+  await assert.rejects(()=>env.append({kind:'send.authorized',operationId:'old-retry'}));
+  await assert.rejects(()=>env.append({kind:'retry.send_intent',operationId:'old-retry',
+    attemptId:'1000010',promptKey:oldPrompt}));
+  await assert.rejects(()=>env.append({kind:'retry.planned',operationId:'old-turn-new-id',
+    attemptId:'1000020',promptKey:oldPrompt}),'manual intervention never rearms the consumed old turn');
+  await env.retryIntent('new-retry','1000020',newPrompt);
+  await env.log({kind:'retry.failed',operationId:'old-retry',attemptId:'1000010',clicked:true});
+  assert.equal(env.active().operationId,'new-retry','late old outcome cannot clear the new grant');
+  await assert.rejects(()=>env.append({kind:'send.authorized',operationId:'new-retry'}),
+    'a new-turn retry is still authorized only once');
+}
+
+// A delayed acknowledgement cannot lift automation for a newer request, and
+// a manual request in another tab can retire only an older shared-chat retry.
+{
+  const env=fixture();
+  await env.retryIntent('newer-retry','1000030','/c/manual-retry-fence|newer',8);
+  await env.manual(1000020);
+  assert.equal(env.data[meta].active[8].operationId,'newer-retry');
+  await env.manual(1000040);
+  assert.equal(env.data[meta].active[8],undefined);
+  assert.ok(env.data[meta].retryConsumedOperations['newer-retry']);
+}
+
+// Legacy retry grants need a provable attempt binding. A legacy reservation
+// supplies it; a grant without either timestamp remains safely unresolved.
+{
+  const env=fixture();
+  await env.retryIntent('legacy-with-preparation','1000010','/c/manual-retry-fence|legacy');
+  delete env.active().attemptId;
+  await env.manual(1000020);
+  assert.equal(env.data[meta].active[7],undefined);
+  await env.retryIntent('legacy-unknown','1000030','/c/manual-retry-fence|unknown');
+  delete env.active().attemptId;
+  delete env.data[meta].retryPreparingByChat[url].attemptId;
+  await env.manual(1000040);
+  assert.equal(env.active().operationId,'legacy-unknown');
+}
+
+// Goal unknown operations must never be released by the retry reset branch.
+{
+  const env=fixture();
+  await env.evaluate('goalController.start(options)',{options:{url,tabId:7,goal:'Unknown Goal fixture',
+    rules:'',maxContinuations:3,maxMinutes:60}});
+  const record=env.data[goalKey],operation=record.operation;
+  await env.evaluate('goalController.intent(options)',{options:{url,tabId:7,id:record.id,
+    operationId:operation.id,text:operation.text}});
+  await env.append({kind:'send.authorized',operationId:operation.id});
+  await env.manual(1000020);
+  assert.equal(env.data[meta].active[7].operationId,operation.id);
+  assert.equal(env.data[meta].active[7].consumed,true);
+  assert.equal(env.data[goalKey].operation.id,operation.id);
+  assert.equal(env.data[goalKey].phase,'sending');
+}
+
+// Handoff grants share the same chat slot but have their own reconciliation;
+// acknowledging a manual request must not claim their unknown send outcome.
+{
+  const env=fixture();
+  await env.append({kind:'handoff.sending',operationId:'unknown-handoff',
+    sourceUrl:'https://chatgpt.com/c/handoff-source',targetUrl:url},8);
+  await env.append({kind:'send.authorized',operationId:'unknown-handoff'},8);
+  await env.manual(1000020);
+  assert.equal(env.active(8).operationId,'unknown-handoff');
+  assert.equal(env.active(8).consumed,true);
+}
+
+// The journal's stale-event decision must also fence downstream Goal changes.
+{
+  const env=fixture();await env.waitingGoal();
+  await env.log({kind:'retry.planned',operationId:'earlier-retry',attemptId:'1000010',
+    promptKey:env.data[goalKey].expectedPromptKey});
+  assert.equal(env.data[goalKey].phase,'recovering');
+  await env.manual(1000020);env.boot();
+  const before=structuredClone(env.data[goalKey]);
+  for(const kind of ['retry.failed','retry.blocked','retry.confirmed']) {
+    const result=await env.log({kind,operationId:'earlier-retry',attemptId:'1000010',
+      newPromptKey:'/c/manual-retry-fence|stale',reason:'stale outcome'});
+    assert.equal(result.superseded,true);
+    assert.deepEqual(env.data[goalKey],before,kind+' cannot alter the manually paused Goal');
+  }
+  assert.equal((await env.log({kind:'retry.planned',operationId:'stale-plan',attemptId:'1000010',
+    promptKey:'/c/manual-retry-fence|stale'})).duplicate,true);
+  assert.equal(await env.evaluate('readRetryState(url)',{url}),null);
+  assert.equal(env.dispatches.length,1);
+}
+
+// A callback may already have passed the journal before manual() reaches its
+// own writer. Queue both transitions without awaiting; the Goal fence must be
+// checked after serialization, and must persist after worker restart.
+{
+  const env=fixture();await env.waitingGoal();
+  const accepted=await env.append({kind:'retry.failed',operationId:'already-journaled',
+    attemptId:'1000010',reason:'old failure'});
+  assert.equal(accepted.superseded,undefined);
+  const manual=env.evaluate('goalController.manual(options)',{options:{url,tabId:7,startedAt:1000020}});
+  const callback=env.evaluate('goalController.retry(options)',{options:{url,tabId:7,kind:'retry.failed',attemptId:'1000010'}});
+  await Promise.all([manual,callback]);
+  assert.equal(env.data[goalKey].phase,'paused');
+  env.boot();
+  await env.evaluate('goalController.retry(options)',{options:{url,tabId:7,kind:'retry.confirmed',
+    attemptId:'1000010',promptKey:'/c/manual-retry-fence|wrong'}});
+  assert.equal(env.data[goalKey].phase,'paused');
+  assert.notEqual(env.data[goalKey].expectedPromptKey,'/c/manual-retry-fence|wrong');
+  await env.evaluate('goalController.retry(options)',{options:{url,tabId:7,kind:'retry.failed'}});
+  assert.equal(env.data[goalKey].phase,'paused','an unbound legacy callback cannot bypass the manual fence');
+}
+
+// A delayed callback from the previous Goal is older than the new Goal even
+// when no manual-request fence was installed between Stop and Start.
+{
+  const env=fixture();await env.waitingGoal();
+  await env.evaluate('goalController.control(options)',{options:{action:'stop',url,tabId:7}});
+  env.clock(1000100);await env.waitingGoal();env.boot();
+  const before=structuredClone(env.data[goalKey]);
+  await env.log({kind:'retry.failed',operationId:'prior-goal-retry',attemptId:'1000010'});
+  assert.deepEqual(env.data[goalKey],before);
+  // Stop/Start is an automatic Goal send, not a confirmed manual request:
+  // it must not reset the independently bounded recovery policy.
+  assert.equal((await env.evaluate('readRetryState(url)',{url})).blocked,true);
+  await env.log({kind:'retry.planned',operationId:'current-goal-retry',attemptId:'1000101',
+    promptKey:env.data[goalKey].expectedPromptKey});
+  assert.equal(env.data[goalKey].phase,'recovering','current request recovery remains enabled');
+}
+
+console.log('Goal/retry fences: confirmed manual supersession, stale callbacks, restart, exact consumed grants and new Goal binding passed.');

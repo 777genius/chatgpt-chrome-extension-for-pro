@@ -69,3 +69,21 @@ function completionAllocationEvidence(record,url,native){
     native.assistantPhase==='final_answer'&&native.assistantId&&native.assistantKey;
   return progress||final?{url,promptKey:native.promptKey}:null;
 }
+
+// An observed transport failure alone is not terminal: ChatGPT may keep polling.
+function completionCheckpointFailure(tabId,{startedAt,requestId,failedAt}) {
+  if(!Number.isFinite(failedAt)||failedAt<startedAt)return Promise.resolve(false);
+  return completionCheckpointChange(tabId,current=>{
+    if(!current||current.state!=='active'||current.startedAt!==startedAt||!requestId||current.requestId!==requestId)return {value:false};
+    return {record:{...current,requestFailedAt:failedAt},value:true};
+  });
+}
+function failedAttemptRollbackEvidence(record,native) {
+  if(record?.state!=='active'||!record.requestId||!Number.isFinite(record.requestFailedAt)||record.requestFailedAt<record.startedAt||
+      !record.baselineKey||!record.promptKey||record.baselineKey===record.promptKey||!native?.ok||native.url!==record.url||
+      native.promptKey!==record.baselineKey||native.absentPromptKey!==record.promptKey||native.composerIdle!==true||
+      native.isLatest!==true||native.isReadOnly!==false||native.generating!==false||native.hasError!==false||
+      native.turnStatus!=='complete'||native.assistantPhase!=='final_answer'||native.assistantCompleted!==true||
+      !native.assistantId||!native.assistantKey)return null;
+  return {startedAt:record.startedAt,requestId:record.requestId};
+}

@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-const source=['memory-maintenance.js','handoff-title.js','content-script.js'].map(name=>readFileSync(`extension/${name}`,'utf8')).join('\n');
+const source=['memory-maintenance.js','handoff-title.js','completion-state.js','content-script.js'].map(name=>readFileSync(`extension/${name}`,'utf8')).join('\n');
 type Mode='delayed'|'timeout'|'manual-edit'|'generation-resumed'|'missing-stop'|'selector-miss'|'assistant-idle';
 type Message=Record<string,any>;
 const originalDraft='Owner draft\n  exact whitespace';
@@ -11,7 +11,7 @@ const originalDraft='Owner draft\n  exact whitespace';
 async function check(mode:Mode) {
   const {document,window}=parseHTML('<html><head><title>Recovery fixture</title></head><body><main><article data-testid="conversation-turn-source" data-turn="user">Request</article><article data-testid="conversation-turn-partial" data-turn="assistant"><div class="markdown">Partial answer before interrupted connection</div></article></main><form data-composer-body><div id="prompt-textarea" contenteditable="true"></div><button data-testid="send-button" type="button" disabled>Send</button><button data-testid="stop-button" type="button">Stop</button></form></body></html>');
   Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   Object.assign(document,{visibilityState:'hidden',createRange:()=>({selectNodeContents(){}}),execCommand:(_command:string,_show:boolean,text:string)=>{editor.textContent=text;return true;}});
   Object.assign(window,{getSelection:()=>({removeAllRanges(){},addRange(){}})});
   const editor=document.querySelector('#prompt-textarea')!;editor.textContent=originalDraft;

@@ -5,7 +5,7 @@ import {parseHTML} from 'linkedom';
 const url='https://chatgpt.com/c/reload',tabUrl=url+'/?view=test#fragment';
 const storage:Record<string,any>={'chatgpt-status:migration':{schema:1}};
 const {document,window}=parseHTML('<html><body><main></main><form><div id="prompt-textarea" contenteditable="true">KEEP PRIVATE DRAFT</div><button data-testid="send-button">Send</button></form></body></html>');
-Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
 let clock=Date.now(),finished=false,worker:Context;
 let content!:Context;
 let restoreRace=false;

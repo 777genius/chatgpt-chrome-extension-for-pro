@@ -8,7 +8,7 @@ type Mode='confirmed'|'no-click'|'stopped'|'unknown'|'saved-only'|'marker'|'conc
 async function check(mode:Mode) {
   const data:Record<string,any>={'chatgpt-status:migration':{schema:1}};
   const {document,window}=parseHTML('<html><body><main></main><form><div id="prompt-textarea" contenteditable="true"></div><button data-testid="send-button">Send</button></form></body></html>');
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   const editor=document.querySelector('#prompt-textarea')!;
   if(['marker','unknown'].includes(mode))editor.textContent='доделай е2е';
   if(mode==='concurrent')editor.textContent='Owner concurrent text';

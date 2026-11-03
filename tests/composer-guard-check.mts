@@ -3,11 +3,11 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 const {document,window}=parseHTML('<html><body><div data-app-shell-active-page="true"><div data-composer-body><div id="editor-wrap"><div data-composer-markdown contenteditable="true">доделай е2е</div></div><button type="submit">Send</button><button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="medium">Medium</button></div></div></body></html>');
-Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return [{}];}});
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return [{width:240,height:32}];}});
 const editor=document.querySelector('[contenteditable]')!,button=document.querySelector('[type=submit]')!;
-let prompt='USER DRAFT',pending:any=null,ready=true,clicks=0;
+let prompt='USER DRAFT',pending:any=null,ready=true,clicks=0,systemHints:any=undefined;
 button.addEventListener('click',()=>clicks++);
-const controller={view:{dom:editor},getChatGptPrompt:()=>({prompt}),getPlainText:()=>prompt,
+const controller={view:{dom:editor},getChatGptPrompt:()=>({prompt,systemHints}),getPlainText:()=>prompt,
  get pendingSubmit(){return pending;},get submitReady(){return ready;},cancelPendingSubmit(){pending=null;}};
 (document.querySelector('#editor-wrap') as any).__reactFiber$test={memoizedProps:{composerController:controller}};
 const ctx=createContext({document,location:{href:'https://chatgpt.com/c/test'}});
@@ -18,6 +18,14 @@ prompt='доделай е2е';editor.textContent='New user draft';assert.equal(c
 pending=null;ready=false;assert.equal(control().ok,false,'not ready must block automation');
 ready=true;assert.equal(control({requireMax:true}).ok,false,'handoff must not send with medium reasoning');
 document.querySelector('[data-selected-reasoning-effort]')!.setAttribute('data-selected-reasoning-effort','max');
+for(const hiddenHints of [['Owner hidden context'],{context:'Owner hidden context'},'Owner hidden context',null]) {
+ systemHints=hiddenHints;
+ assert.equal(control({requireMax:true}).ok,false,'exact native/visible text must not authorize hidden or unknown native hints');
+ assert.equal(clicks,0,'hidden native context must never reach the send click');
+}
+systemHints=[];
+assert.equal(control({action:'inspect'}).matches,true,'an explicitly empty native hint array remains valid');
+systemHints=undefined;
 assert.equal(control({requireMax:true}).clicked,true);assert.equal(clicks,1);
 prompt='USER DRAFT';assert.equal(control().ok,false);assert.equal(clicks,1,'draft must never get an automatic click');
 prompt='доделай е2е';assert.equal(control({url:'https://chatgpt.com/c/other'}).ok,false);
@@ -43,6 +51,30 @@ assert.equal(clicks,1,'read-only attachment checks never click');
 extra.remove();historyFile.status='uploading';
 assert.equal(control({action:'inspect',text:'',fileName:'history.txt'}).ok,false,'inspection requires the one history file to finish uploading');
 attachment.remove();ready=true;
+const savedSeed='Continue PR [#123](https://example.test/pull/123)';
+const visibleSeed='Continue PR #123';
+let nativeSeed=savedSeed,seedHints:string[]=[];
+controller.getChatGptPrompt=()=>({prompt:nativeSeed,systemHints:seedHints});
+controller.getPlainText=()=>visibleSeed;
+editor.innerHTML='<p>Continue PR <a href="https://example.test/pull/123">#123</a></p>';
+const inspectSeed=(extra:Record<string,any>={})=>control({action:'inspect-seed',text:visibleSeed,nativeText:savedSeed,...extra});
+assert.equal(inspectSeed().matches,true,'native new-chat seed can render an exact saved Markdown URL as its visible label');
+assert.equal(clicks,1,'seed recognition is read-only');
+nativeSeed='Continue PR [#123](https://example.test/pull/456)';
+assert.equal(inspectSeed().matches,false,'same labels with a different native URL never authorize replacing a user draft');
+nativeSeed=savedSeed;seedHints=['Hidden owner context'];
+assert.equal(inspectSeed().matches,false,'exact native seed still rejects hidden context');seedHints=[];
+editor.textContent='Owner edited label';assert.equal(inspectSeed().matches,false,'native and visible editor must both match');editor.textContent=visibleSeed;
+assert.equal(inspectSeed({url:'https://chatgpt.com/c/other'}).ok,false,'seed proof remains bound to the exact route');
+ready=false;assert.equal(inspectSeed().ready,false,'pending/not-ready composer cannot prove a replaceable seed');ready=true;
+historyFile.status='ready';attachment.innerHTML='<span>history.txt</span>';
+(attachment.firstElementChild as any).__reactFiber$seedHistory={memoizedProps:{attachment:historyFile}};
+document.querySelector('[data-composer-body]')!.append(attachment);
+assert.equal(inspectSeed().ok,false,'seed inspection must reject attachments without the persisted history-file allowance');
+assert.equal(inspectSeed({fileName:'history.txt'}).matches,true,'an exact saved seed can retain its one ready history attachment');
+attachment.append(extra);
+assert.equal(inspectSeed({fileName:'history.txt'}).ok,false,'owner attachment alongside history blocks seed replacement');
+assert.equal(clicks,1,'no seed inspection clicks the composer');attachment.remove();
 const literal='--- History ---\nhttps://example.com/path';
 editor.innerHTML='<p>--- History ---</p><p><span text-link-href="https://example.com/path" data-rich-text-generated-autolink>https://example.com/path</span></p>';
 let doc:any={type:'doc',content:[{type:'paragraph',content:[{type:'text',text:'--- History ---'}]},
@@ -68,3 +100,29 @@ richController.getChatGptPrompt=()=>({prompt:serialized,systemHints:[]});
 editor.textContent='USER DRAFT';
 assert.equal(control({text:literal}).ok,false);assert.equal(clicks,before,'draft never clicked after serialization fix');
 console.log('PASS: literal native Markdown regression, altered URL targets, rich nodes, hints, stale serialization and draft race');
+
+// Handoff power preserves the saved native effort and model combination.
+richController.getChatGptPrompt=()=>({prompt:'Prepared history',systemHints:[]});
+richController.getPlainText=()=> 'Prepared history';editor.textContent='Prepared history';
+const effortControl=document.querySelector('[data-selected-reasoning-effort]')!;
+for(const expected of ['medium','max','pro']){
+ effortControl.setAttribute('data-selected-reasoning-effort',expected);
+ (effortControl as any).__reactFiber$reasoning={memoizedProps:{selectedLabelCandidate:{model:'gpt-6-thinking',reasoningEffort:expected}},return:null};
+ const clicksBefore:number=clicks;
+ assert.equal(control({text:'Prepared history',expectedEffort:expected,expectedModel:'gpt-6-thinking'}).clicked,true,'exact saved '+expected+' mode allows one click');
+ assert.equal(clicks,clicksBefore+1);
+ effortControl.setAttribute('data-selected-reasoning-effort',expected==='medium'?'max':'medium');
+ assert.equal(control({text:'Prepared history',expectedEffort:expected,expectedModel:'gpt-6-thinking'}).ok,false,'a changed mode must fail immediately before clicking');
+ assert.equal(clicks,clicksBefore+1);
+}
+assert.equal(control({text:'Prepared history',expectedEffort:''}).ok,false,'missing/invalid saved mode cannot authorize a native click');
+
+// Actual native Pro is a different model with the SAME medium effort token.
+effortControl.setAttribute('data-selected-reasoning-effort','medium');
+(effortControl as any).__reactFiber$reasoning={memoizedProps:{selectedLabelCandidate:{model:'gpt-6-pro',reasoningEffort:'medium'}},return:null};
+const beforeModelGuard=clicks;
+assert.equal(control({text:'Prepared history',expectedEffort:'medium',expectedModel:'gpt-6-thinking'}).ok,false);
+assert.equal(control({text:'Prepared history',expectedEffort:'medium'}).ok,false,'legacy effort alone cannot distinguish Pro from Thinking');
+assert.equal(clicks,beforeModelGuard);
+assert.equal(control({text:'Prepared history',expectedEffort:'medium',expectedModel:'gpt-6-pro'}).clicked,true);
+assert.equal(clicks,beforeModelGuard+1);
