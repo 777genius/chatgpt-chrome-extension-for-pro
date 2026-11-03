@@ -42,12 +42,21 @@ jobs:
         run: |
           tar --exclude=.git --exclude=dist --exclude=coverage \
             -czf "$RUNNER_TEMP/draft-toolchain.tar.gz" .
+          # Preserve the exact upstream baseline and Bun runner tool for
+          # independent local migration/parity diagnostics. No git credentials
+          # or developer profile files enter these archives.
+          git fetch --no-tags --depth=1 origin main
+          git archive FETCH_HEAD | gzip -9 > "$RUNNER_TEMP/main-source.tar.gz"
+          cp "$(command -v bun)" "$RUNNER_TEMP/bun-linux-x64"
       - name: Upload draft offline candidate
         if: github.event_name == 'push' && contains(github.event.head_commit.message, '[ci:test]')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: draft-toolchain-${{ github.sha }}
-          path: ${{ runner.temp }}/draft-toolchain.tar.gz
+          path: |
+            ${{ runner.temp }}/draft-toolchain.tar.gz
+            ${{ runner.temp }}/main-source.tar.gz
+            ${{ runner.temp }}/bun-linux-x64
           if-no-files-found: error
           retention-days: 1
       - run: bun run check
