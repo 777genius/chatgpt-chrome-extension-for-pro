@@ -38,6 +38,7 @@ interface RenameOutcome {
   title?: string;
 }
 interface RenamePageResult {
+  pending?:boolean;
   ok: boolean;
   ready?: boolean;
   streaming?: boolean;
@@ -138,7 +139,7 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{
   if (pending) pending.failure=details.error||'request-failed';
 },TITLE_REQUEST_FILTER);
 
-function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=false}: { recoverTemporaryTarget?: boolean }={}): Promise<RenameOutcome> {
+function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=false,goalOperationId=null}: { recoverTemporaryTarget?: boolean;goalOperationId?:string|null }={}): Promise<RenameOutcome> {
   const activeTitleJob=titleJobs.get(tabId);
   if (activeTitleJob) {
     if (activeTitleJob.id===id) return activeTitleJob.promise;
@@ -154,6 +155,15 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
     let record: RenameRecord = original;
     if (record.titleStatus==='saving') return {ok:false,reason:'Предыдущая попытка переименования не подтверждена; повторная запись отключена'};
     let url=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
+    // A native rename modal cannot interrupt the worker-owned Goal sender.
+    const goalUrl=ChatGPTHandoffTitle.chatUrl(record.targetUrl);
+    const goalKey=goalUrl&&'chatgpt-goal:'+goalUrl;
+    const goalRaw=goalKey?(await chrome.storage.local.get(goalKey))[goalKey]:null;
+    const goal=goalRaw as unknown as {phase?:string;operation?:{id:string;status:string}|null}|null;
+    const goalPreparing=goal?.phase==='preparing'&&goal.operation?.status==='reserved';
+    if(goalOperationId&&(!goalPreparing||goal.operation?.id!==goalOperationId)||
+        !goalOperationId&&goal?.operation&&['preparing','sending','clicked'].includes(goal.phase||''))
+      return {ok:true,waiting:true,retryable:true};
     // Old versions could persist a temporary route. Never infer its server
     // destination from a title or the currently open tab alone.
     let targetAlias='';
@@ -273,7 +283,14 @@ function renameSavedHandoff(tabId: number,id: string,{recoverTemporaryTarget=fal
       await update('failed',{titleReason:renameErrorMessage(error)});
       return {ok:false,reason:renameErrorMessage(error)};
     } finally {
-      try {await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,args:[{action:'cancel',operationId:id}]});}catch{}
+      try {
+        for(let cleanup=0;cleanup<8;cleanup++) {
+          const result=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
+            args:[{action:'cancel',operationId:id,finalCleanup:cleanup===7}]});
+          if(!result[0]?.result?.pending)break;
+          await wait(250);
+        }
+      }catch{}
       pendingTitles.delete(tabId);
       for(const [requestId,value]of titleRequests)if(value===pending)titleRequests.delete(requestId);
     }
