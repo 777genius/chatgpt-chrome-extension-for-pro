@@ -15,17 +15,18 @@ const payload='Exact handoff payload\nKeep whitespace  unchanged';
 type RecordValue=Record<string,any>;
 
 function harness(dropReply=false) {
-  const {document,window}=parseHTML('<html><body><section data-app-shell-active-page="true"><header><button>Share</button></header><main></main><form data-composer-body><div id="prompt-textarea" contenteditable="true"></div><button type="submit">Send</button></form><button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></button></section></body></html>');
-  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{}],configurable:true});
+  const {document,window}=parseHTML('<html><body><section data-app-shell-active-page="true"><header><button>Share</button></header><main></main><form data-composer-body><div id="prompt-textarea" contenteditable="true"></div><button type="submit">Send</button><button type="button" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max"></button></form></section></body></html>');
+  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   const editor=document.querySelector('[contenteditable]')!;editor.textContent=payload;
   const nativeHeader={conversationId:alias,isReady:true};
   (document.querySelector('header button') as unknown as RecordValue).__reactFiber$test={memoizedProps:nativeHeader,return:null};
   const entries=[{id:'accepted-turn',turn:{items:[] as {type:string;messageId:string;message:string}[]}}];
   const controller={view:{dom:editor},getPlainText:()=>editor.textContent,getChatGptPrompt:()=>({prompt:editor.textContent}),submitReady:true,pendingSubmit:null};
   (document.querySelector('form') as unknown as RecordValue).__reactFiber$test={memoizedProps:{composerController:controller,entries},return:null};
+  (document.querySelector('[data-selected-reasoning-effort]') as unknown as RecordValue).__reactFiber$reasoning={memoizedProps:{selectedLabelCandidate:{model:'gpt-6-thinking',reasoningEffort:'max'}},return:null};
   const location={href:'https://chatgpt.com/'};
   const storage:RecordValue={
-    'chatgpt-handoff:7':{id:'handoff',stage:'sending',sourceUrl,targetUrl:'https://chatgpt.com/',prompt:payload,text:payload,draft:'Owner draft',naming:{version:1,sourceUrl,baseTitle:'Fixture task',part:1,title:'Fixture task (1)'}},
+    'chatgpt-handoff:7':{id:'handoff',reasoningEffort:'max',reasoningModel:'gpt-6-thinking',stage:'sending',sourceUrl,targetUrl:'https://chatgpt.com/',prompt:payload,text:payload,draft:'Owner draft',naming:{version:1,sourceUrl,baseTitle:'Fixture task',part:1,title:'Fixture task (1)'}},
     meta:{active:{7:{operationId:'handoff',kind:'handoff.sending',at:100000}}}
   };
   const journal:RecordValue[]=[];
@@ -48,17 +49,34 @@ function harness(dropReply=false) {
           if(routeAfterProof&&func.name==='inspectHandoffAcceptance'){location.href=routeAfterProof;routeAfterProof='';}
           return [{result}];
         }}}});
-    runInContext(pageCode+'\n'+titleCode+'\n'+stateCode+'\n'+listenerCode,context);
+    runInContext(pageCode+'\n'+titleCode+'\n'+readFileSync('extension/goal-policy.js','utf8')+'\n'+
+      readFileSync('extension/goal-store.js','utf8')+'\n'+
+      'const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal});\n'+
+      stateCode+'\n'+listenerCode,context);
   }
   restart();
   function message(value:RecordValue) {
     return new Promise<RecordValue>(resolve=>listener(value,{tab:{id:7,url:location.href},frameId:0},resolve));
   }
-  return {storage,location,entries,nativeHeader,editor,journal,restart,message,
+  return {document,storage,location,entries,nativeHeader,editor,journal,restart,message,
     navigateAfterProof:(url:string)=>{routeAfterProof=url;},
-    send:()=>message({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:location.href,text:payload,requireMax:true,operationId:'handoff'}}),
+    send:(extra:RecordValue={})=>message({type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:location.href,text:payload,expectedEffort:'max',expectedModel:'gpt-6-thinking',operationId:'handoff',...extra}}),
     reconcile:()=>message({type:'CHATGPT_HANDOFF_RECONCILE',id:'handoff'}),
     get clicks(){return clicks;},get record(){return storage['chatgpt-handoff:7'];}};
+}
+
+for(const ownEffort of ['medium',null]) {
+  const h=harness();
+  const own=h.document.querySelector('form [data-selected-reasoning-effort]')!;
+  if(ownEffort)own.setAttribute('data-selected-reasoning-effort',ownEffort);else own.remove();
+  const unrelated=h.document.createElement('form');
+  unrelated.innerHTML='<button type="button" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max">Other composer Max</button>';
+  h.document.querySelector('form')!.before(unrelated);
+  const result=await h.send();
+  assert.equal(result.ok,false,'another composer Max cannot authorize an editor with '+(ownEffort||'missing')+' effort');
+  assert.equal(h.clicks,0,'wrong-form effort must not reach the native send click');
+  assert.equal(h.editor.textContent,payload,'refusing wrong-form effort preserves the exact prepared payload');
+  assert.equal(h.record.sendReceipt,undefined,'no native send receipt exists for a refused effort check');
 }
 
 {
@@ -98,4 +116,8 @@ function harness(dropReply=false) {
   assert.equal((await h.reconcile()).record.stage,'sending','native text alone cannot invent a missing guarded click receipt');
   assert.equal((await h.send()).ok,false);assert.equal(h.clicks,1);
 }
-console.log('PASS: durable exact native click receipt, late permanent-route reconciliation, wrong payload/alias refusal, worker restart, no resend, one draft claim, unknown reply preservation');
+console.log('PASS: own-composer Max enforcement, durable exact native click receipt, late permanent-route reconciliation, wrong payload/alias refusal, worker restart, no resend, one draft claim, unknown reply preservation');
+
+{const h=harness();assert.equal((await h.send({expectedEffort:'medium'})).ok,false);assert.equal(h.clicks,0);assert.equal((await h.send({expectedEffort:undefined})).ok,false);assert.equal(h.clicks,0);assert.equal((await h.send()).clicked,true,'only the durably saved effort authorizes the handoff');}
+
+{const h=harness();assert.equal((await h.send({expectedModel:'gpt-6-pro'})).ok,false);assert.equal(h.clicks,0);assert.equal((await h.send({expectedModel:undefined})).ok,false);assert.equal(h.clicks,0);assert.equal((await h.send()).clicked,true,'handoff caller must match its durable model and effort pair');}

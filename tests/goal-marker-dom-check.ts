@@ -11,15 +11,20 @@ const until=source.indexOf('\n  function assistantText(turn) {',from);
 assert.ok(from>0&&until>from,'production marker function is present');
 const markerReader=source.slice(from,until);
 
+function matchTurn(turn:string) {
+  const {document}=parseHTML(`<html><body>${turn}</body></html>`);
+  const context=createContext({document});
+  runInContext(readFileSync('extension/completion-state.js','utf8'),context);
+  runInContext(markerReader,context);
+  return runInContext('assistantGoalMarker(document.querySelector("article"))',context)===true;
+}
+
 function match(content:string,extra='') {
-  const {document}=parseHTML(`<html><body><article data-turn="assistant">
+  return matchTurn(`<article data-turn="assistant">
     <div data-message-author-role="assistant">
       <div class="markdown">${content}</div>${extra}
     </div>
-  </article></body></html>`);
-  const context=createContext({document});
-  runInContext(markerReader,context);
-  return runInContext('assistantGoalMarker(document.querySelector("article"))',context)===true;
+  </article>`);
 }
 
 assert.equal(match('<p>GOAL_COMPLETE</p>'),true,'exact plain response');
@@ -36,9 +41,49 @@ assert.equal(match('<p>GOAL_COMPLETE</p>','<div class="markdown">another output<
 assert.equal(match('<p><code>GOAL_COMPLETE</code></p>'),false,'code is not the marker');
 assert.equal(match('<p><strong>GOAL_COMPLETE</strong></p>'),false,'strong markup is not the marker');
 assert.equal(match('<p><a href="#">GOAL_COMPLETE</a></p>'),false,'link is not the marker');
+for(const tag of ['h1','h2','h3','h4','h5','h6','pre','blockquote','div','span'])
+  assert.equal(match(`<${tag}>GOAL_COMPLETE</${tag}>`),false,`${tag} is not a plain paragraph`);
+for(const tag of ['del','s','b','i','u','mark','small','sup','sub','span','unknown-rich-node'])
+  assert.equal(match(`<p><${tag}>GOAL_COMPLETE</${tag}></p>`),false,`${tag} markup is not the marker`);
+assert.equal(match('<p>GOAL_COMPLETE<br></p>'),false,'a line break is additional answer content');
+assert.equal(match('<p>GOAL_COMPLETE</p><p></p>'),false,'a second empty paragraph is not the exact marker');
+assert.equal(match('<p>GOAL_COMPLETE<!--extra node--></p>'),false,'unknown paragraph nodes fail closed');
 assert.equal(match('<p>Done: GOAL_COMPLETE</p>'),false,'substring is not the marker');
 assert.equal(match('<p>goal_complete</p>'),false,'marker is case-sensitive');
 assert.equal(match('<p>GOAL_COMPLETE</p><button>Click me</button>'),false,
   'interactive content inside the rendered answer disqualifies the marker');
+
+function fallback(content:string,extra='',headingClass='sr-only') {
+  return matchTurn(`<article data-chatgpt-search-unit-key="fallback-turn-fixture:assistant">
+    <h4 class="${headingClass}" data-conversation-role="assistant"><span>ChatGPT сказал:</span><span aria-hidden="true">ChatGPT</span></h4>
+    <div><div data-markdown-text-style="assistant-message"><div class="markdown">${content}</div></div></div>
+    ${extra}
+    <div><button aria-label="Copy"><svg></svg><span>Copy</span></button><button aria-label="Good response">Good response</button></div>
+  </article>`);
+}
+assert.equal(fallback('<p>GOAL_COMPLETE</p>'),true,
+  'fallback turn screen reader role heading and feedback are interface labels');
+assert.equal(fallback('<p>GOAL_COMPLETE</p>','<p>Still working</p>'),false,
+  'real assistant text outside fallback markdown still disqualifies the marker');
+assert.equal(fallback('<p><code>GOAL_COMPLETE</code></p>'),false,'fallback code is not a plain marker');
+assert.equal(fallback('<p><strong>GOAL_COMPLETE</strong></p>'),false,'fallback styled marker is not plain');
+assert.equal(fallback('<h1>GOAL_COMPLETE</h1>'),false,'fallback Markdown heading is not plain');
+assert.equal(fallback('<p><del>GOAL_COMPLETE</del></p>'),false,'fallback strikethrough is not plain');
+assert.equal(fallback('<p>GOAL_COMPLETE</p>','',''),false,'visible assistant headings are still content');
+
+const dil=JSON.parse(readFileSync('tests/fixtures/goal-marker-dil.json','utf8')) as {messageId:string;html:string};
+const dilTurn=(html:string,ids=dil.messageId)=>`<article data-chatgpt-search-unit-key="native-turn:1:assistant" data-chatgpt-search-message-ids="${ids}"><h4 class="sr-only" data-conversation-role="assistant">Assistant</h4><div data-markdown-text-style="assistant-message">${html}</div></article>`;
+assert.equal(matchTurn(dilTurn(dil.html)),true,'native neutral DIL run is a plain marker');
+assert.equal(matchTurn(dilTurn(dil.html,dil.messageId+' '+dil.messageId)),true,'duplicate identical native IDs remain one identity');
+for(const html of [dil.html.replace('<p ','<h1 ').replace('</p>','</h1>'),
+ dil.html.replace('GOAL_COMPLETE','<strong>GOAL_COMPLETE</strong>'),dil.html.replace('GOAL_COMPLETE','<a href="#">GOAL_COMPLETE</a>'),
+ dil.html.replace('GOAL_COMPLETE','<code>GOAL_COMPLETE</code>'),dil.html.replace('GOAL_COMPLETE','<del>GOAL_COMPLETE</del>'),
+ dil.html.replace('GOAL_COMPLETE','GOAL_COMPLETE '),dil.html.replace('</p>','</p><p>More</p>'),
+ dil.html.replace('<span data-d-stream-run','<span style="font-weight:bold" data-d-stream-run'),
+ dil.html.replace('<span data-d-stream-run','<span hidden data-d-stream-run'),
+ dil.html.replace('<p class=','<p style="display:none" class='),dil.html.replace('<div hidden=""></div>','<div hidden="">Hidden meaning</div>'),
+ dil.html.replace('data-dil-message-id="'+dil.messageId+'"','data-dil-message-id="other"')])
+ assert.equal(matchTurn(dilTurn(html)),false,'DIL markup, hidden meaning, rich spans and extra content fail closed');
+assert.equal(matchTurn(dilTurn(dil.html,'other')),false,'DIL source requires the rendered assistant native identity');
 
 console.log('Exact Goal marker DOM, visible extra content and Copy/Share toolbar passed.');
