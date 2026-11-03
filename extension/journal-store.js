@@ -313,7 +313,9 @@ function appendJournal(event, tab = {}) {
       active[tabId] = {...active[tabId],consumed:true};
     }
     if(event.kind==='send.not_clicked') {
-      const claim=JSON.stringify([retryDraftUrl(sourceUrl),event.promptKey]);
+      const preparation=retryPreparingByChat[retrySource];
+      const claim=owns(preparation)?preparation.claimKey:
+        JSON.stringify([retrySource,event.promptKey]);
       if(retrySendClaims[claim]?.operationId===operationId&&retrySendClaims[claim].tabId===tabId)delete retrySendClaims[claim];
       // The old operation stays consumed: only a new intent may try again after
       // MAIN positively refused the click. Unknown/missing results never release.

@@ -69,3 +69,16 @@ storage['chatgpt-journal:meta'].retrySendClaims={};
 ctx=boot();
 await assert.rejects(()=>claimNativeUser('native-duplicate','user-1','/c/stable-user|fallback-turn-9:0:user'),
  /Автоповтор этого запроса уже запускался/);
+
+// A positive no-click receipt releases the stable-user claim, not merely the
+// transient DOM key. A fresh operation may retry, while the old one stays spent.
+const noClickPrompt='/c/stable-user|fallback-turn-3:0:user';
+await append({kind:'retry.planned',operationId:'native-refused',retryUserId:'user-refused',promptKey:noClickPrompt,sourceUrl:stableTab.url},stableTab);
+await append({kind:'retry.send_intent',operationId:'native-refused',promptKey:noClickPrompt,sourceUrl:stableTab.url},stableTab);
+await append({kind:'send.authorized',operationId:'native-refused',sourceUrl:stableTab.url},stableTab);
+await append({kind:'send.not_clicked',operationId:'native-refused',promptKey:noClickPrompt,sourceUrl:stableTab.url},stableTab);
+await append({kind:'retry.failed',operationId:'native-refused',clicked:false,sourceUrl:stableTab.url},stableTab);
+await append({kind:'retry.finished',operationId:'native-refused',clicked:false,confirmed:false,sourceUrl:stableTab.url},stableTab);
+ctx=boot();
+await assert.rejects(()=>claimNativeUser('native-refused','user-refused',noClickPrompt),/Автоповтор этого запроса уже запускался/);
+await claimNativeUser('native-refused-fresh','user-refused',noClickPrompt);
