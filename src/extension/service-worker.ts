@@ -947,7 +947,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(!checkpoint&&native.ok&&native.turnStatus==='in_progress'&&native.generating===true&&native.isLatest===true&&native.isReadOnly===false&&!native.hasError&&native.promptKey){
         const view=await readChatStatus(url),request=manualRequestReceiptsByTab.get(sender.tab!.id);
         if(view.status?.kind==='loading'&&view.status.eventAt===message.startedAt&&request&&request.startedAt===message.startedAt){
-          await completionCheckpointChange(sender.tab!.id,current=>current?{value:false}:{record:{schema:1,state:'active',url,startedAt:message.startedAt!,attemptId:String(message.startedAt),requestId:request.requestId||null,baselineKey:'',promptKey:native.promptKey,httpCompleted:false},value:true});
+          await completionCheckpointChange(sender.tab!.id,current=>current?{value:false}:{record:{schema:1,state:'active',url,startedAt:message.startedAt!,attemptId:String(message.startedAt),requestId:request.requestId||null,baselineKey:'',promptKey:typeof native.promptKey==='string'?native.promptKey:'',httpCompleted:false},value:true});
         }
       }
       return native;
