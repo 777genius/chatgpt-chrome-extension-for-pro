@@ -192,14 +192,53 @@ function controlChatTitle(options: TitleOptions): TitleProbeResult {
     return { ok: false, reason: "title-operation-changed" };
   }
   if (options.action === "select") {
-    const menu = Array.from(document.querySelectorAll('[role="menu"]')).find((node) =>
-      visible(node) && node.getAttribute("aria-labelledby") === state.triggerId);
+    let menu: Element | null | undefined = Array.from(document.querySelectorAll('[role="menu"]')).find((node) =>
+      Boolean(state.triggerId) && visible(node) && node.getAttribute("aria-labelledby") === state.triggerId);
     const rename = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') || [])
       .find((node) => Array.from(node.querySelectorAll<HTMLElement>("[style]")).some((icon) => {
-        try {
-          return decodeURIComponent(icon.style.maskImage || "").includes("M11.7313 4.20472");
-        } catch { return false; }
+        try { return decodeURIComponent(icon.style.maskImage || "").includes("M11.7313 4.20472"); }
+        catch { return false; }
       }));
+    if (!rename && !state.selected) {
+      // The server-bound sidebar can expose Rename before the header does.
+      // Never use translated text or a different chat's sidebar menu.
+      if (document.title !== state.previousTitle ||
+          Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) {
+        return { ok: false, reason: "title-or-form-changed" };
+      }
+      const link = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[aria-current="page"][href]'))
+        .find((node) => visible(node) && chatUrl(node.href) === state.url);
+      const row = link?.closest('[data-sidebar-cycle-item]');
+      const toggle = Array.from(document.querySelectorAll<HTMLButtonElement>('header button'))
+        .find((node) => visible(node) && !node.disabled &&
+          node.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
+      if (!state.sidebarFallback && (row || toggle)) {
+        menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+        state.sidebarFallback = true;
+        state.triggerId = null;
+        menu = null;
+      }
+      if (state.sidebarFallback && !state.triggerId) {
+        if (Array.from(document.querySelectorAll('[role="menu"]')).some(visible)) {
+          return { ok: false, retryable: true, reason: "another-menu-open" };
+        }
+        if (!row && toggle && !state.sidebarToggle) {
+          state.sidebarToggle = toggle;
+          toggle.click();
+          return { ok: false, retryable: true, reason: "sidebar-opening" };
+        }
+        const trigger = Array.from(row?.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]') || [])
+          .find((node) => visible(node) && !node.disabled && !!node.id &&
+            !!node.querySelector('use[href*="ellipsis-horizontal"]'));
+        if (trigger) {
+          state.triggerId = trigger.id;
+          trigger.dispatchEvent(new PointerEvent("pointerdown",
+            { bubbles: true, button: 0, pointerType: "mouse", ctrlKey: false }));
+          trigger.click();
+        }
+      }
+      return { ok: false, retryable: true, reason: "rename-menu-not-ready" };
+    }
     if (!rename || rename.getAttribute("aria-disabled") === "true") {
       return { ok: false, retryable: true, reason: "rename-menu-not-ready" };
     }
