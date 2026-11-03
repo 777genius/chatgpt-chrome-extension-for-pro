@@ -57,8 +57,8 @@ interface GoalStore {
  intent(input:GoalOperationRef & {text:string;baselineKey?:string}):Promise<unknown>;
  authorize(input:GoalOperationRef & {text:string}):Promise<unknown>;
  report(input:GoalOperationRef & {status:string;reason?:string;newPromptKey?:string}):Promise<unknown>;
- completion(input:GoalCompletion):Promise<unknown>;manual(input:{url:string;tabId:number}):Promise<unknown>;
- retry(input:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;goalHandoff?:boolean}):Promise<unknown>;
+ completion(input:GoalCompletion):Promise<unknown>;manual(input:{url:string;tabId:number;startedAt?:number}):Promise<unknown>;
+ retry(input:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;attemptId?:string;goalHandoff?:boolean}):Promise<unknown>;
  handoffBegin(input:{sourceUrl:string;handoffId:string;tabId:number}):Promise<unknown>;
  handoffFailed(input:{sourceUrl:string;handoffId:string;tabId:number;reason?:string}):Promise<unknown>;
  handoffConfirm(input:{sourceUrl:string;targetUrl:string;handoffId:string;tabId:number;acceptedUserId:string}):Promise<unknown>;
@@ -541,17 +541,23 @@ declare const module:undefined|{exports:unknown};
       if('dispatch' in result&&result.dispatch&&'record' in result&&result.record)await deliver(result.record);
       return {ok:result.ok,record:view(await getRaw(target))};
     }
-    async function manual({url,tabId}:{url:string;tabId:number}) {
+    async function manual({url,tabId,startedAt}:{url:string;tabId:number;startedAt?:number}) {
       const target=canonical(url);
       if(!target)return {ok:false};
       return serialize(async()=>{
         const record=await read(target);
+        if(record&&typeof startedAt==='number'&&Number.isFinite(startedAt)&&
+            Math.max(record.startedAt||0,record.manualStartedAt||0)>startedAt)return {ok:false};
+        if(record&&typeof startedAt==='number'&&Number.isFinite(startedAt)&&
+            record.manualStart?.startedAt===startedAt)return {ok:false};
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))
           return {ok:false};
         const inFlight=['sending','clicked'].includes(record.phase);
         const reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
         const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,
           manualOverride:!inFlight,
+          ...(typeof startedAt==='number'&&Number.isFinite(startedAt)&&startedAt>0?
+            {manualStartedAt:Math.max(record.manualStartedAt||0,startedAt)}:{}),
           ...(reserved?{pendingSendKind:record.operation?.kind,operation:null}:{}),
           reason:inFlight?'Ожидается исход отправки; ручное действие имеет приоритет':'Пауза: ручная отправка пользователя'};
         await event('manual_pause',next,tabId);
@@ -559,12 +565,17 @@ declare const module:undefined|{exports:unknown};
         return {ok:true};
       });
     }
-    async function retry({url,tabId,kind,promptKey,sourcePromptKey,operationId,goalHandoff=false}:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;goalHandoff?:boolean}) {
+    async function retry({url,tabId,kind,promptKey,sourcePromptKey,operationId,attemptId,goalHandoff=false}:{url:string;tabId:number;kind:string;promptKey?:string;sourcePromptKey?:string;operationId?:string;attemptId?:string;goalHandoff?:boolean}) {
       const target=canonical(url);
       if(!target)return;
       await serialize(async()=>{
         const record=await read(target);
         if(!record||!['waiting','recovering','paused'].includes(record.phase))return;
+        // Recheck manual start fence after serialization: another worker task
+        // may have verified a newer manual user turn since this retry arrived.
+        const attempt=Number(attemptId),knownAttempt=Number.isFinite(attempt)&&attempt>0;
+        if((knownAttempt&&attempt<Math.max(record.startedAt||0,record.manualStartedAt||0))||
+           (!knownAttempt&&typeof record.manualStartedAt==='number'&&record.manualStartedAt>0))return;
         if(kind==='retry.blocked'&&goalHandoff)return; // new-chat recovery is not a failed Goal
         if(typeof record.lastSendTabId==='number'&&record.lastSendTabId!==tabId)return;
         let next=record;
@@ -608,11 +619,29 @@ declare const module:undefined|{exports:unknown};
         if(!record||['completed','stopped','blocked','moved'].includes(record.phase))return;
         // The handoff record is persisted before the Goal phase. A worker can
         // stop in between; GET must be able to replay this exact transition.
-        if(record.phase==='handoff'&&record.handoffId===handoffId)return;
+        if(record.phase==='handoff'&&record.handoffId===handoffId) {
+          if(record.handoffTabId===undefined&&Number.isInteger(tabId)&&tabId>=0)
+            await save({...record,handoffTabId:tabId});
+          return;
+        }
         if(!['waiting','paused','recovering'].includes(record.phase))throw Error('Goal отправляет сообщение; handoff остановлен');
-        const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId};
+        const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId,handoffTabId:tabId};
         await event('handoff_begin',next,tabId,{handoffId});
         await save(next);
+      });
+    }
+    async function handoffFailed({sourceUrl,handoffId,tabId,reason}:{sourceUrl:string;handoffId:string;tabId:number;reason?:string}) {
+      const source=canonical(sourceUrl);
+      if(!source||typeof handoffId!=='string'||!handoffId)return {ok:false};
+      return serialize(async()=>{
+        const record=await read(source);
+        if(!record||record.phase!=='handoff'||record.handoffId!==handoffId||
+            record.handoffTabId!==tabId)return {ok:false};
+        const next={...record,phase:'blocked',
+          reason:('Передача Goal остановлена: '+String(reason||'Не удалось подтвердить перенос')).slice(0,500)};
+        await event('handoff_failed',next,tabId,{handoffId});
+        await save(next);
+        return {ok:true,record:view(next)};
       });
     }
     async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}:GoalCompletion & {sourceUrl:string;targetUrl:string;handoffId:string}) {
@@ -676,7 +705,7 @@ declare const module:undefined|{exports:unknown};
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
       context:async (url:string)=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
