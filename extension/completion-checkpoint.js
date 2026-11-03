@@ -87,3 +87,17 @@ function failedAttemptRollbackEvidence(record,native) {
       !native.assistantId||!native.assistantKey)return null;
   return {startedAt:record.startedAt,requestId:record.requestId};
 }
+
+
+// Temporary DOM turn positions can shift when ChatGPT reconciles its local
+// history. Native user timing binds the observed request independently.
+function completionPromptRebindEvidence(record,url,native) {
+  if(record?.state!=='active'||record.url!==url||!Number.isFinite(record.startedAt)||!native?.ok||native.url!==url||
+      native.isLatest!==true||native.isReadOnly!==false||!native.userId||
+      !Number.isFinite(native.lastUserSentAtMs)||Math.abs(native.lastUserSentAtMs-record.startedAt)>10000||
+      typeof record.promptKey!=='string'||typeof native.promptKey!=='string'||
+      record.promptKey===native.promptKey||native.promptKey===record.baselineKey)return null;
+  const prefix=new URL(url).pathname+'|fallback-turn-';
+  if(!record.promptKey.startsWith(prefix)||!native.promptKey.startsWith(prefix))return null;
+  return {promptKey:native.promptKey};
+}

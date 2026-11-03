@@ -33,3 +33,18 @@ for(const patch of [{baselineKey:'/|old'},{baselineKey:null},{state:'stopped'},{
  context.allocating={...allocating,...patch};assert.equal(await run('completionAllocationEvidence(allocating,native.url,native)'),null);
 }
 console.log('New-chat allocation: first native user timing, empty baseline, completed evidence and route fences passed.');
+
+Object.assign(context,{URL});
+context.rebindRecord={state:'active',url:'https://chatgpt.com/c/a',startedAt:1000,
+ baselineKey:'/c/a|fallback-turn-0:0:user',promptKey:'/c/a|fallback-turn-2:0:user'};
+context.rebindNative={ok:true,url:'https://chatgpt.com/c/a',isLatest:true,isReadOnly:false,
+ userId:'native-user',lastUserSentAtMs:1001,promptKey:'/c/a|fallback-turn-1:0:user'};
+assert.equal((await run("completionPromptRebindEvidence(rebindRecord,rebindRecord.url,rebindNative)")).promptKey,
+ '/c/a|fallback-turn-1:0:user','native user timing survives temporary turn renumbering');
+for(const change of [{lastUserSentAtMs:20000},{isLatest:false},{isReadOnly:true},
+ {promptKey:'/c/a|fallback-turn-0:0:user'},{userId:''},{url:'https://chatgpt.com/c/b'}]) {
+ context.changed={...context.rebindNative,...change};
+ assert.equal(await run('completionPromptRebindEvidence(rebindRecord,rebindRecord.url,changed)'),null);
+}
+context.stopped={...context.rebindRecord,state:'stopped'};
+assert.equal(await run('completionPromptRebindEvidence(stopped,stopped.url,rebindNative)'),null);

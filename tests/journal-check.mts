@@ -6,7 +6,7 @@ const storage:Record<string,any>={};
 let fail=false;
 function boot(){
  const ctx=createContext({URL,console,chrome:{runtime:{getManifest:()=>({version:'1.2.0'})},storage:{local:{
-  get:async(key:string|null)=>structuredClone(key===null?storage:{[key]:storage[key]}),
+  get:async(key:string|string[]|null)=>structuredClone(key===null?storage:Array.isArray(key)?Object.fromEntries(key.map(k=>[k,storage[k]])):{[key]:storage[key]}),
   set:async(value:any)=>{if(fail)throw new Error('Disk full'); await new Promise(r=>setTimeout(r,1));Object.assign(storage,structuredClone(value));}
  }}}});
  runInContext(source,ctx);return ctx;
@@ -52,3 +52,20 @@ assert.equal((await runInContext('readRetryState(repeatUrl)',ctx)).sameErrorCoun
 await append({kind:'error.detected',action:'retry',sourceUrl:repeatTab.url,
  promptKey:'different',attemptId:String(Date.now()+5),error:'Another failure'},repeatTab);
 assert.equal((await runInContext('readRetryState(repeatUrl)',ctx)).sameErrorCount,1);
+
+// Temporary fallback turn keys can be reused for a different native user.
+const stableTab={id:92,url:'https://chatgpt.com/c/stable-user',title:'Test'};
+async function claimNativeUser(operationId:string,retryUserId:string,promptKey:string) {
+ await append({kind:'retry.planned',operationId,retryUserId,promptKey,sourceUrl:stableTab.url},stableTab);
+ await append({kind:'retry.send_intent',operationId,promptKey,sourceUrl:stableTab.url,text:'доделай е2е'},stableTab);
+ await append({kind:'send.authorized',operationId,sourceUrl:stableTab.url,text:'доделай е2е'},stableTab);
+ await append({kind:'retry.confirmed',operationId,sourceUrl:stableTab.url},stableTab);
+}
+await claimNativeUser('native-first','user-1','/c/stable-user|fallback-turn-1:0:user');
+ctx=boot();
+await claimNativeUser('native-second','user-2','/c/stable-user|fallback-turn-1:0:user');
+delete storage['chatgpt-journal:meta'].retrySendClaimSchema;
+storage['chatgpt-journal:meta'].retrySendClaims={};
+ctx=boot();
+await assert.rejects(()=>claimNativeUser('native-duplicate','user-1','/c/stable-user|fallback-turn-9:0:user'),
+ /Автоповтор этого запроса уже запускался/);

@@ -174,11 +174,12 @@ async function retryMetadata(meta) {
       if(replaySends&&event.operationId) {
         const source=retryDraftUrl(event.sourceUrl);
         if(['retry.planned','retry.send_intent'].includes(event.kind)&&source&&typeof event.promptKey==='string'&&event.promptKey) {
-          retryIntents.set(event.operationId,{sourceUrl:source,promptKey:event.promptKey,tabId:event.tabId});
+          retryIntents.set(event.operationId,{sourceUrl:source,promptKey:event.promptKey,tabId:event.tabId,
+            retryUserId:event.retryUserId||retryIntents.get(event.operationId)?.retryUserId||null});
         }
         const intent=retryIntents.get(event.operationId);
         if(intent&&intent.tabId===event.tabId) {
-          const claim=JSON.stringify([intent.sourceUrl,intent.promptKey]);
+          const claim=JSON.stringify([intent.sourceUrl,intent.retryUserId?'native-user:'+intent.retryUserId:intent.promptKey]);
           if(event.kind==='send.authorized'&&source===intent.sourceUrl) {
             retrySendClaims[claim]={operationId:event.operationId,tabId:event.tabId,at:event.recordedAt,phase:'consumed'};
             retryConsumedOperations[event.operationId]=event.sequence;
@@ -227,11 +228,15 @@ function appendJournal(event, tab = {}) {
       if(retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt))throw duplicate();
       if(Object.hasOwn(retryConsumedOperations,operationId)||Object.hasOwn(retryReleasedOperations,operationId))throw duplicate();
       if(meta.retryDraftClaims?.[operationId])return;
-      const key=JSON.stringify([retrySource,event.promptKey]);
-      const claim=retrySendClaims[key],preparing=retryPreparingByChat[retrySource];
+      const preparing=retryPreparingByChat[retrySource];
+      const key=owns(preparing)?preparing.claimKey:
+        JSON.stringify([retrySource,event.retryUserId?'native-user:'+event.retryUserId:event.promptKey]);
+      const claim=retrySendClaims[key];
       if(claim&&(!owns(claim)||claim.phase!=='reserved')||preparing&&!owns(preparing))throw duplicate();
       retrySendClaims[key]={operationId,tabId,at:claim?.at||Date.now(),phase:'reserved'};
-      retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key,attemptId:event.attemptId||preparing?.attemptId||''};
+      retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key,attemptId:event.attemptId||preparing?.attemptId||'',
+        retryUserId:event.retryUserId||preparing?.retryUserId||null};
+      if(retryPreparingByChat[retrySource].retryUserId)event={...event,retryUserId:retryPreparingByChat[retrySource].retryUserId};
     }
     if(event.kind==='goal.started'&&retrySource&&(
         retryPreparingByChat[retrySource]||
@@ -298,7 +303,7 @@ function appendJournal(event, tab = {}) {
       if(active[tabId].kind==='retry.send_intent') {
         const intent=active[tabId];
         if(!intent.sourceUrl||intent.sourceUrl!==retryDraftUrl(sourceUrl)||typeof intent.promptKey!=='string'||!intent.promptKey)throw Object.assign(new Error('Исходный запрос автоповтора не подтверждён'),{journalPolicy:true});
-        const claim=JSON.stringify([intent.sourceUrl,intent.promptKey]);
+        const claim=retryPreparingByChat[intent.sourceUrl]?.claimKey||JSON.stringify([intent.sourceUrl,intent.promptKey]);
         if(!owns(retrySendClaims[claim])||retrySendClaims[claim].phase!=='reserved'||!owns(retryPreparingByChat[intent.sourceUrl]))throw duplicate();
         // Keep the claim after failure/unknown and worker restart. A different
         // native user turn receives its own claim; tab IDs cannot duplicate it.

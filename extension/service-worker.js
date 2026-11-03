@@ -46,6 +46,22 @@ async function latestRequestReceipt(tabId) {
   if(manualRequestReceiptsByTab.has(tabId))return manualRequestReceiptsByTab.get(tabId);
   const saved=await readRequestReceipt(tabId);
   if(saved&&!manualRequestReceiptsByTab.has(tabId))manualRequestReceiptsByTab.set(tabId,saved);
+  if(!saved&&!manualRequestReceiptsByTab.has(tabId)) {
+    // Extension reload clears the session cache. An unfinished journal request
+    // plus its exact durable loading generation preserves observation only.
+    const checkpoint=await completionCheckpointRead(tabId);
+    if(checkpoint?.state==='active'&&checkpoint.requestId&&Number.isFinite(checkpoint.startedAt)) {
+      const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+      const observed=meta?.requests?.[checkpoint.requestId],url=ChatGPTHandoffTitle.chatUrl(observed?.sourceUrl);
+      if(url&&ChatGPTHandoffTitle.chatUrl(meta.tabs?.[tabId]?.url)===url) {
+        const view=await readChatStatus(url),current=await completionCheckpointRead(tabId);
+        if(view.status?.kind==='loading'&&view.status.eventAt===checkpoint.startedAt&&
+            JSON.stringify(current)===JSON.stringify(checkpoint)&&!manualRequestReceiptsByTab.has(tabId))
+          manualRequestReceiptsByTab.set(tabId,{startedAt:checkpoint.startedAt,requestId:checkpoint.requestId,
+            receipt:view.status.receipt,url,consumed:true,operationId:observed.operationId||null});
+      }
+    }
+  }
   return manualRequestReceiptsByTab.get(tabId)||null;
 }
 
@@ -804,7 +820,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if(['retry.manual_reset','retry.preparation_superseded'].includes(event.kind)) {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
-    appendJournal(event,sender.tab).then(async result=>{
+    const prepareEvent=async()=>{
+      if(event.kind!=='retry.planned'||!chrome.scripting?.executeScript||typeof inspectCompletedTurn!=='function')return event;
+      const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl||sender.tab.url);
+      const [checked]=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',
+        func:inspectCompletedTurn,args:[url]});
+      const native=checked?.result;
+      if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||
+          !native.userId||native.promptKey!==event.promptKey||
+          ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(sender.tab.id)).url)!==url)
+        return event; // Legacy/temporarily unavailable native data retains the existing guarded claim.
+      return {...event,retryUserId:native.userId};
+    };
+    prepareEvent().then(verified=>appendJournal(verified,sender.tab)).then(async result=>{
       if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind)) {
         const observed=event.kind==='retry.confirmed'?await latestRequestReceipt(sender.tab.id):null;
         const confirmedAttempt=observed?.operationId===event.operationId&&Number.isFinite(observed.startedAt)
@@ -890,6 +918,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const rollback=await reconcileFailedCompletionLoading(tabId,url);
       if(rollback.changed)return {ok:false,rollback};
       let record=await completionCheckpointRead(tabId);
+      if(record?.state==='active'&&record.baselineKey===null) {
+        const view=await readChatStatus(url),known=await latestRequestReceipt(tabId);
+        if(view.status?.kind!=='loading'||view.status.eventAt!==record.startedAt||
+            !known||known.startedAt!==record.startedAt||known.requestId!==record.requestId||
+            completionCheckpointUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+        const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+          func:inspectCompletedTurn,args:[url]});
+        const native=checked?.result;
+        if(!native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||
+            native.turnStatus!=='in_progress'||native.generating!==true||native.hasError||
+            !native.promptKey||!native.userId)return {ok:false};
+        const fresh=await latestRequestReceipt(tabId),status=await readChatStatus(url);
+        if(fresh?.requestId!==known.requestId||fresh.startedAt!==known.startedAt||
+            status.status?.kind!=='loading'||status.status.eventAt!==record.startedAt||
+            completionCheckpointUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+        const rebound={...record,url,baselineKey:'',promptKey:native.promptKey};
+        if(!await completionCheckpointChange(tabId,current=>JSON.stringify(current)===JSON.stringify(record)?
+            {record:rebound,value:true}:{value:false}))return {ok:false};
+        record=rebound;
+      }
       if(!record||record.state!=='active'||typeof record.baselineKey!=='string')return {ok:false};
       const view=await readChatStatus(url),tab=await chrome.tabs.get(tabId);
       const request=await latestRequestReceipt(tabId);
@@ -907,6 +955,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if(!await completionCheckpointUpdate(tabId,{...allocation,startedAt:record.startedAt,requestId:record.requestId}))return {ok:false};
         record={...record,...allocation};
         journalInBackground({kind:'completion.url_allocated',sourceUrl:url,requestId:record.requestId,attemptId:record.attemptId,promptKey:record.promptKey},{id:tabId,url});
+      }
+      if(record.promptKey?.includes('|fallback-turn-')) {
+        const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+          func:inspectCompletedTurn,args:[url]});
+        const rebound=completionPromptRebindEvidence(record,url,checked?.result);
+        if(rebound) {
+          const latest=await latestRequestReceipt(tabId),live=await readChatStatus(url);
+          if(latest&&(latest.startedAt!==record.startedAt||latest.requestId!==record.requestId)||
+              live.status?.kind!=='loading'||live.status.eventAt!==record.startedAt||
+              completionCheckpointUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+          const changed=await completionCheckpointChange(tabId,current=>
+            JSON.stringify(current)===JSON.stringify(record)?
+              {record:{...current,...rebound},value:true}:{value:false});
+          if(!changed)return {ok:false};
+          record={...record,...rebound};
+          journalInBackground({kind:'completion.prompt_rebound',sourceUrl:url,attemptId:record.attemptId,
+            promptKey:record.promptKey,proof:'native-user-time'}, {id:tabId,url});
+        }
       }
       const current=await completionCheckpointRead(tabId);
       if(current?.state!=='active'||current.startedAt!==record.startedAt||current.requestId!==record.requestId||current.url!==url)return {ok:false};

@@ -186,7 +186,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
       }
     }
   }
-  return {ok:true,url,firstUserSentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
+  return {ok:true,url,firstUserSentAtMs,lastUserSentAtMs:userTimes.at(-1)?.sentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
     assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
     reasoningFailed:entry.turn.status==='cancelled'&&
       entry.turn.items.some(item=>item.type==='chatgpt-reasoning-group')&&

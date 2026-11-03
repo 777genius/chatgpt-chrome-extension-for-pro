@@ -46,6 +46,8 @@ try{
  assert.equal(storage[key].state,'active');assert.equal(storage[key].promptKey,'/c/reload/|conversation-turn-1');assert.equal(storage[key].requestId,'actual-request-1');
  assert.equal(JSON.stringify(storage[key]).includes('KEEP PRIVATE DRAFT'),false,'checkpoint never stores draft text');
  runInContext('globalThis.__chatgptNotifierDispose()',content);
+ const originalReceipts=structuredClone(storage['chatgpt-request-receipts']);
+ delete storage['chatgpt-request-receipts']; // Full extension reload also loses the session receipt cache.
  bootWorker();bootContent(startedAt-100);await pause();
  assert.equal(notifications,0,'an in-flight reload keeps observing without producing an early completion');
  assert.equal(storage[key].state,'active');
@@ -72,12 +74,21 @@ try{
  const allocation=await restore();
  assert.equal(allocation.ok,true,'a completed first prompt adopts its allocated chat URL after reload');
  assert.equal(storage[key].url,url);assert.equal(storage[key].promptKey,native().promptKey);
- const receipts=storage['chatgpt-request-receipts'];
+ const receipts=storage['chatgpt-request-receipts']||originalReceipts;
  assert.ok(receipts?.some((item:any)=>item.requestId==='actual-request-1'));
  storage['chatgpt-request-receipts']=receipts.map((item:any)=>({...item,url:'https://chatgpt.com/'}));
  bootWorker();bootContent();await pause();await pause();
  assert.equal(storage[key].state,'complete','the existing completion pipeline finalizes the allocated request');
  assert.equal(notifications,2,'allocated completion is reported once');
  assert.equal(document.querySelector('#prompt-textarea')!.textContent,'KEEP PRIVATE DRAFT');
+ runInContext('globalThis.__chatgptNotifierDispose()',content);
+ finished=false;document.body.append(stop);
+ storage[key]={...storage[key],url:'https://chatgpt.com/',state:'active',baselineKey:null,promptKey:''};
+ storage['chatgpt-status:'+url].status={kind:'loading',eventAt:startedAt,receipt:{epoch:'fixture',order:3}};
+ bootWorker();bootContent();await pause();await pause();
+ assert.equal(storage[key].url,url,'an observed live retry without documentUrl binds to the exact live chat');
+ assert.equal(storage[key].baselineKey,'');
+ assert.equal(storage[key].promptKey,native().promptKey);
+ assert.equal(notifications,2,'progress recovery never reports an old completed answer');
  console.log('Durable checkpoint: full content/worker reload, downtime completion, timing, draft preservation and terminal dedupe passed.');
 }finally{if(content)runInContext('globalThis.__chatgptNotifierDispose?.()',content);for(const id of timers)clearInterval(id);}
