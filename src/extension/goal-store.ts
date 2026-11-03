@@ -313,8 +313,8 @@ declare const module:undefined|{exports:unknown};
       const replay='replay' in result&&result.replay?result.replay:null;
       if(replay)await completion(replay);
       const recorded='record' in result?result.record:undefined;
-      const reason='reason' in result?result.reason:undefined;
-      return {ok:result.ok,record:replay?await get(url):recorded,reason};
+      const resultReason='reason' in result?result.reason:undefined;
+      return {ok:result.ok,record:replay?await get(url):recorded,reason:resultReason};
     }
     async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}:GoalCompletion) {
       const target=canonical(url);
