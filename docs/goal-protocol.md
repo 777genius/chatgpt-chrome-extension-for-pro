@@ -87,3 +87,11 @@ Recoverable retries have one bounded 60-second preparation deadline, retaining t
 The exact completion marker also supports the native DIL text-run paragraph after binding its source/message IDs to the completed assistant turn. Rich formatting, extra or hidden meaningful text, wrong IDs and non-marker answers remain non-exact.
 
 Final 1.7.9 real Chrome canary: a trusted Goal opt-in and real observed send received one scoped terminal-error response. The confirmed destination retained the same Goal ID, exact original objective, deadline and continuation budget. The model returned the native DIL `GOAL_COMPLETE`; Goal became `completed` with zero extra continuations. One handoff send and one rename save were recorded, with title status `confirmed` and the source title plus `(1)`. The controlled response substitution does not prove actual server-side limit exhaustion.
+
+## Manual follow-ups (1.8.0)
+
+A trusted manual send during an active Goal adds a verified supplemental instruction instead of pausing the Goal. The original objective is immutable; native sent-message text and identity are stored in chronological supplements after request-receipt and native turn verification. Unsaved drafts are never adopted. Continuations and handoffs include the objective plus supplements, with the same Goal ID, remaining budget and deadline. Explicit Pause/Stop and unknown-click fences retain priority; already paused Goals stay paused.
+
+Interrupted-response recovery waits up to 60 seconds for positively verified native Stop/idle readiness, retrying only explicit no-click transient refusals every two seconds. Missing acknowledgements, changed request/prompt/draft and hard ownership refusals never authorize a second click.
+
+Real Chrome validation for 1.8.0: in an isolated chat, a trusted sent follow-up was appended exactly once while an explicitly paused Goal retained its original ID, objective, deadline and budget. Resume sent a continuation containing both texts; its exact native request/message proof confirmed the collapsed long bubble. The model returned GOAL_COMPLETE and the Goal became completed without a pending operation. Active unpaused follow-ups and receipt races have deterministic integration coverage.

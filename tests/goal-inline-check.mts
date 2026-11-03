@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string};
+type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
 type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
@@ -449,4 +449,12 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
   assert.equal(disposed.unsubscribed(),1);
 }
 
+{
+ const f=fixture();await tick();const original='Original objective\n  Preserve exact spacing';
+ f.setRecord({...goal(),goal:original,supplements:[{userText:'First follow-up\nwith URL https://example.test/item'},{userText:'Second follow-up'}]});
+ await f.instance.refresh();f.details().click();
+ const objective=f.document.querySelector('[data-goal-objective]')!;
+ assert.equal(objective.textContent,'Objective: '+original+'\n\nFollow-up 1: First follow-up\nwith URL https://example.test/item\n\nFollow-up 2: Second follow-up');
+ assert.equal(objective.localName,'p');assert.equal(f.state.nativeSends,0);f.instance.dispose();
+}
 console.log('Inline Goal native arming, explicit intent, bounded confirmation, draft isolation, route fences, layout and disposal passed.');

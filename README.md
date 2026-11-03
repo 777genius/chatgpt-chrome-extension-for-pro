@@ -6,7 +6,7 @@
 <img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
-Version **1.7.9** · Chrome / Chromium **116+** · No build required
+Version **1.8.0** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -28,7 +28,7 @@ Version **1.7.9** · Chrome / Chromium **116+** · No build required
 
 **Automatic retries and handoffs are enabled.** The extension can send continuation commands and create chats. Logs and recovery copies are stored locally and may contain messages and drafts.
 
-**Turn on Goal beside the reasoning selector**, write the objective in ChatGPT’s normal message field, then send it yourself. This also works on a new, unsaved chat: the extension binds the submitted message only after verifying its native turn, request and permanent conversation URL. The first message is unchanged; the completion protocol is included in subsequent automatic continuations. **⋯** contains optional completion criteria and limits. Defaults are **10 continuations and 24 hours** (1440 minutes). The extension popup retains its separate explicit Start Goal action for saved chats. Pause/resume/stop are persisted across extension reloads. A user's draft, attachments and manual sends take precedence; automation stops rather than replacing them. If the outcome of a click is unknown, the goal is blocked rather than retried.
+**Turn on Goal beside the reasoning selector**, write the objective in ChatGPT’s normal message field, then send it yourself. This also works on a new, unsaved chat: the extension binds the submitted message only after verifying its native turn, request and permanent conversation URL. The first message is unchanged; the completion protocol is included in subsequent automatic continuations. **⋯** contains optional completion criteria and limits. Defaults are **10 continuations and 24 hours** (1440 minutes). The extension popup retains its separate explicit Start Goal action for saved chats. Pause/resume/stop are persisted across extension reloads. A user's draft and attachments take precedence. Sent manual follow-ups extend the active Goal without resetting its original objective, deadline or budget; explicit Pause/Stop remain in effect. If the outcome of a click is unknown, the goal is blocked rather than retried.
 
 `GOAL_COMPLETE` must be the **only content** of a fully completed assistant response, confirmed by the native turn state. An appearance inside a longer answer, Markdown or an incomplete/streaming answer does not count. **The marker is the model's declaration; the extension does not independently check CI, merge or GitHub state.** Goal messages and stop rules are stored locally and retained when a native handoff to a new chat is confirmed.
 

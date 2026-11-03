@@ -112,7 +112,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
       objective.hidden=!record?.goal;
-      objective.textContent=record?.goal?'Objective: '+record.goal:'';
+      objective.textContent=record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
       if(record) {
         message=(phases[record.phase]||record.phase)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';

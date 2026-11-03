@@ -81,7 +81,8 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         !alert.querySelector('.text-chatgpt-recovery') || !messageIds.has('errors.network.reconnecting_fallback')) {
       return {ok:false,reason:'Статус прерванного соединения не подтверждён'};
     }
-    const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).at(-1);
+    const visibleRecoveryNode=node=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
+    const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).filter(visibleRecoveryNode).at(-1);
     const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
     const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&['kind','url','entryId','assistantId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key]));
     const assistantOnly=sameRecovery&&recoveryBinding.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
@@ -113,7 +114,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         }
       }
       if(sameRecovery&&voice&&nativeVoiceIdle&&controller&&controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')return {ok:true,stopped:false,idle:true,proof:'native-voice-idle',recoveryBinding};
-      return {ok:false,stopped:false,reason:'Нативная остановка или свободный редактор не подтверждены; автопродолжение отменено'};
+      return {ok:false,stopped:false,retryable:true,reason:'Нативная остановка или свободный редактор пока не подтверждены'};
     }
     if(recoveryAction==='inspect-recovery')return {ok:true,stopped:false,idle:false,needsStop:true,recoveryBinding};
     if (stop.disabled || stop.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Остановка временно недоступна'};

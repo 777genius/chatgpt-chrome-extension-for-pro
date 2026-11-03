@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import { parseHTML } from 'linkedom';
+import {setImmediate as nextTurn} from 'node:timers/promises';
 const content = readFileSync('extension/memory-maintenance.js', 'utf8') + '\n' + readFileSync('extension/handoff-title.js', 'utf8') + '\n' +
   readFileSync('extension/content-script.js', 'utf8');
 const worker = readFileSync('extension/service-worker.js', 'utf8');
@@ -14,7 +15,7 @@ async function waitFor(predicate:()=>boolean) {
 const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><div aria-hidden="true">decorative</div><div>${text}</div><button>Повторить</button></aside>`;
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
 async function domCheck() {
-  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0) {
+  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0, recoveryWait: 'none'|'transient'|'permanent'|'hard'|'lost' = 'none') {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
     Object.defineProperty(window.Node, 'DOCUMENT_POSITION_FOLLOWING', { value: 4, configurable: true });
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
@@ -22,7 +23,7 @@ async function domCheck() {
     }});
     const messages: any[] = [], sends: string[] = [], logs: any[] = [];
     const draftStorage:Record<string,any>={};
-    let failJournal = false;let stopCalls=0;
+    let failJournal = false;let stopCalls=0,stopChecks=0;
     let now = 1000000, sequence = 0;
     const editor = document.querySelector('#prompt-textarea');
     const main = document.querySelector('main')!;
@@ -35,7 +36,7 @@ async function domCheck() {
     const clock = class extends Date { static now() { return now; } };
     const context = createContext({ document, window, Node: window.Node, Element: window.Element,
       URL, AbortController, crypto: globalThis.crypto, Event: window.Event, HTMLTextAreaElement: window.HTMLTextAreaElement,
-      MutationObserver: window.MutationObserver, location: { pathname: '/c/example',href:'https://chatgpt.com/c/example' }, performance,
+      MutationObserver: window.MutationObserver, location: { pathname: '/c/example',href:'https://chatgpt.com/c/example' }, performance:{now:()=>now},
       Date: clock, setTimeout, clearTimeout, setInterval, clearInterval,
       chrome: { storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime: {id:'test-extension',getManifest:()=>({version:'fixture'}),sendMessage:async(message:any)=>{
         if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
@@ -45,8 +46,19 @@ async function domCheck() {
         if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:''};
         if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
         if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
-        if(message.type==='CHATGPT_WAIT'){await new Promise(r=>setTimeout(r,message.delayMs));return {ok:true};}
-        if(message.type==='CHATGPT_STOP_RECOVERY'){stopCalls++;assert.equal(editor!.textContent,draft,'stop must precede replacing the draft');editor!.textContent='';document.querySelector('[data-test-modern-stop]')?.remove();if(!keepRecovery)document.querySelector('[role=status]')?.remove();return {ok:true,stopped:true};}
+        if(message.type==='CHATGPT_WAIT'){
+          // Keep the user-visible recovery grace observable until advance(),
+          // while retry/settling budgets use only this fixture's virtual clock.
+          if(message.delayMs>=3000&&!logs.some(e=>e.kind==='retry.planned'))await new Promise(r=>setTimeout(r,message.delayMs));
+          else {now+=message.delayMs;await nextTurn();}
+          return {ok:true};
+        }
+        if(message.type==='CHATGPT_STOP_RECOVERY'){
+          stopChecks++;
+          if(recoveryWait==='hard')return {ok:false,stopped:false,reason:'Changed native prompt'};
+          if(recoveryWait==='lost')return null;
+          if(recoveryWait==='permanent'||recoveryWait==='transient'&&stopChecks===1){now+=recoveryWait==='permanent'?61000:15000;return {ok:false,stopped:false,retryable:true,reason:'Native idle proof pending'};}
+          stopCalls++;assert.equal(editor!.textContent,draft,'stop must precede replacing the draft');editor!.textContent='';document.querySelector('[data-test-modern-stop]')?.remove();if(!keepRecovery)document.querySelector('[role=status]')?.remove();return {ok:true,stopped:true};}
         if(message.type==='CHATGPT_COMPOSER_CONTROL'){
           if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
           return {ok:true,matches:true,ready:true};
@@ -67,7 +79,7 @@ async function domCheck() {
     });
     runInContext(readFileSync('extension/journal-store.js','utf8'),context);
     runInContext(content, context);
-    return { messages, sends, document, context, logs, getStopCalls(){return stopCalls;}, breakJournal(){failJournal=true;},
+    return { messages, sends, document, context, logs, getStopCalls(){return stopCalls;},getStopChecks(){return stopChecks;}, breakJournal(){failJournal=true;},
       advance(ms: number) { now += ms; },
       async fail(text: string) {
         main.insertAdjacentHTML('beforeend', alertHTML(text));
@@ -89,6 +101,20 @@ async function domCheck() {
   assert.equal(expiredReadiness.logs.some(e=>e.kind==='retry.send_intent'),false);
   assert.equal(expiredReadiness.logs.find(e=>e.kind==='retry.failed')?.clicked,false);
   assert.equal(expiredReadiness.document.querySelector('#prompt-textarea')!.textContent,'Never send this owner draft');
+  for(const mode of ['transient','permanent','hard','lost'] as const) {
+    const f=setup('Recovery owner draft',true,true,'',null,false,false,0,mode);
+    f.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div role="status"><span class="text-chatgpt-recovery">Recovery surface</span></div>');
+    await pause();f.advance(3500);
+    await waitFor(()=>f.logs.some(e=>e.kind==='retry.finished'));
+    if(mode==='transient') {
+      assert.deepEqual(f.sends,['доделай е2е']);assert.equal(f.getStopChecks(),2);assert.equal(f.getStopCalls(),1,'an explicit no-click refusal may be retried, then Stop is clicked once');
+      assert.equal(f.logs.filter(e=>e.kind==='retry.readiness'&&e.phase==='recovery-idle').length,1);
+    } else {
+      assert.equal(f.sends.length,0);assert.equal(f.getStopChecks(),1,'hard refusal, missing ACK or expired budget never replays a possible Stop');assert.equal(f.getStopCalls(),0);
+      assert.equal(f.logs.some(e=>e.kind==='retry.send_intent'),false);
+    }
+    assert.equal(f.document.querySelector('#prompt-textarea')!.textContent,'Recovery owner draft');
+  }
   if(process.argv[2]==='retry-deadline'){console.log('PASS: bounded slow retry readiness, one confirmed send, over-budget zero click and exact draft restoration');return;}
   const duplicate = setup('Keep this owner draft',true,true,'',null,false,true);
   await duplicate.fail('Failed request already owned by another tab');
@@ -133,24 +159,26 @@ async function domCheck() {
   await run.fail('Ошибка первая');
   assert.deepEqual(run.sends, ['доделай е2е']);
   assert.equal(run.messages.length, 0, 'first error retries silently');
-  run.advance(30000);
+  // Keep the five failures within 120s, including virtual worker readiness time.
+  run.advance(25000);
   await run.fail('Ошибка с другим текстом');
   assert.equal(run.sends.length, 2);
   assert.equal(run.messages.length, 0, 'second error retries silently');
-  run.advance(30000);
+  run.advance(25000);
   await run.fail('Третья ошибка');
   assert.equal(run.sends.length,3,'third error gets the third automatic retry');
   assert.equal(run.messages.length,0);
-  run.advance(30000);
+  run.advance(25000);
   await run.fail('Четвёртая ошибка');
   assert.equal(run.sends.length,4,'fourth error gets the fourth automatic retry');
   assert.equal(run.messages.length,0);
-  run.advance(30000);
+  run.advance(25000);
+  const fifthRequestStartedAt=run.context.__chatgptNotifierRequestStartedAt;
   await run.fail('Пятая ошибка');
   assert.equal(run.sends.length, 4, 'fifth error must not send');
   assert.equal(run.messages.length, 1, 'only threshold error notifies');
   assert.equal(run.messages[0].response, 'Пятая ошибка');
-  assert.equal(run.messages[0].durationMs, 30000);
+  assert.equal(run.messages[0].durationMs,run.logs.find(e=>e.kind==='error.detected'&&e.error==='Пятая ошибка').eventAt-fifthRequestStartedAt,'elapsed duration follows the virtual request and actual error observation');
   assert.match(run.messages[0].retryReason, /4 автоповтора за 2 минуты/);
   run.document.querySelector('aside div:not([aria-hidden])')!.textContent = 'Updated wording';
   await pause();
@@ -254,7 +282,7 @@ async function workerCheck() {
   const notifications: any[] = [], injections: any[] = [];
   let soundCalls = 0;
   let activeTab={id:7,url:'https://chatgpt.com/c/example'};
-  let handoffProof:any=null;
+  let handoffProof:any=null,nativeGoalProof:any=null;
   let missingWatcher=false;const requestSignals:any[]=[];
   const storage: Record<string, any> = {};
   const chrome = {
@@ -263,7 +291,7 @@ async function workerCheck() {
       getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
     tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}if(message.type==='CHATGPT_GOAL_DISPATCH')return {ok:true};} },
-    scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:{ok:true,clicked:true}}]; } },
+    scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:args.func?.name==='inspectCompletedTurn'&&nativeGoalProof?nativeGoalProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
   const workerContext = createContext({ chrome, console, URL, crypto:globalThis.crypto, setTimeout, clearTimeout });
@@ -371,9 +399,14 @@ async function workerCheck() {
   assert.equal((await sendGuard({action:'send',text:goalText,url:goalUrl,operationId:goalOperation})).ok,false,
     'Goal has one persisted click grant even after a repeated worker message');
   assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'clicked'})).ok,true);
-  assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'confirmed',newPromptKey:'/c/example|goal-user-1'})).ok,true);
+  const goalRequestAt=Date.now();
+  callbacks.before({tabId:7,method:'POST',timeStamp:goalRequestAt,requestId:'goal-native-request',documentUrl:goalUrl,url:'https://chatgpt.com/backend-api/f/conversation'});await pause();
+  nativeGoalProof={ok:true,url:goalUrl,isLatest:true,isReadOnly:false,userId:'goal-native-user',userSentAtMs:goalRequestAt,
+    userText:goalText,userVisibleText:'Collapsed text… Show more',promptKey:'/c/example|goal-user-1'};
+  assert.equal((await goalCall('CHATGPT_GOAL_STATUS',{status:'confirmed',requestId:'goal-native-request',startedAt:goalRequestAt})).ok,true);
+  nativeGoalProof=null;
   goal=storage[goalKey];assert.equal(goal.phase,'waiting');
-  const goalCompletion={...success,response:'GOAL_COMPLETE',completionKey:'/c/example|goal-user-1|goal-assistant-1',
+  const goalCompletion={...success,requestId:'goal-native-request',attemptId:String(goalRequestAt),completionStartedAt:goalRequestAt,response:'GOAL_COMPLETE',completionKey:'/c/example|goal-user-1|goal-assistant-1',
     goalPromptKey:'/c/example|goal-user-1',goalNativeVerified:true,goalRawExact:true};
   callbacks.message(goalCompletion,goalSender);await pause();
   goal=storage[goalKey];

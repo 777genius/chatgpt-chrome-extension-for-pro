@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.7.9';
+  const SCRIPT_VERSION = '1.8.0';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -488,16 +488,15 @@
       const deadline=Date.now()+15000;
       while(Date.now()<deadline) {
         if(!sameChat())throw Error('Чат изменился при подтверждении отправки');
-        const freshKey=latestPromptSnapshot()?.promptKey||'';
-        const latestUser=turnNodes().filter(turn=>roleOf(turn)==='user').at(-1);
-        const rawUser=latestUser?.querySelector('[data-message-author-role="user"]')?.textContent||
-          latestUser?.textContent||'';
-        if(freshKey&&freshKey!==baselineKey&&normalize(rawUser)===normalize(text)&&
-            (globalThis.__chatgptNotifierAttemptId||'')!==baselineAttempt&&
+        // Long sent bubbles may collapse, add speaker labels or rich widgets.
+        // Only the worker's durable operation + native request/message proof
+        // can acknowledge this click; visible bubble text is not authority.
+        if((globalThis.__chatgptNotifierAttemptId||'')!==baselineAttempt&&
             composer()===editor&&rawEditorText(editor)==='') {
-          const result=await status('confirmed',{newPromptKey:freshKey});
-          if(!result?.ok)throw Error(result?.error||'Goal не подтвердил новое сообщение');
-          return;
+          const result=await status('confirmed',{requestId:globalThis.__chatgptNotifierRequestId||null,
+            startedAt:globalThis.__chatgptNotifierRequestStartedAt});
+          if(result?.ok)return;
+          if(result?.pending!==true)throw Error(result?.error||'Goal не подтвердил новое сообщение');
         }
         await sleepUntilNextCheck();
       }
@@ -615,8 +614,19 @@
         stoppingRecovery = true;
         suppressUntilEpoch = Date.now() + 1500;
         try {
-          result = await runtimeMessage({type:'CHATGPT_STOP_RECOVERY',operationId,url:sourceUrl,attemptId:attempt,requestId,promptKey,recoveryBinding:error.recoveryBinding||null,
-            alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert)});
+          const stopDeadline=Date.now()+60000;
+          do {
+            if(!stillCurrent()||composer()!==beforeStop||beforeStop&&rawEditorText(beforeStop)!==recoveryDraft)return;
+            result = await runtimeMessage({type:'CHATGPT_STOP_RECOVERY',operationId,url:sourceUrl,attemptId:attempt,requestId,promptKey,recoveryBinding:error.recoveryBinding||null,
+              alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert)});
+            // Retry only a positive no-click refusal. A missing/lost reply,
+            // changed native identity or successful Stop never permits replay.
+            if(result?.ok||result?.stopped!==false||result?.retryable!==true)break;
+            if(Date.now()>=stopDeadline)throw new Error(result.reason||'Нативный редактор не стал доступен для восстановления');
+            await readiness('recovery-idle',{timeoutMs:60000,deadlineAt:stopDeadline});
+            const waited=await runtimeMessage({type:'CHATGPT_WAIT',delayMs:Math.min(2000,Math.max(1,stopDeadline-Date.now()))});
+            if(!waited?.ok)throw new Error('Ожидание готовности восстановления недоступно');
+          } while(Date.now()<stopDeadline);
         } finally { stoppingRecovery = false; }
         if (!result?.ok || result.stopped!==true&&result.idle!==true) throw new Error(result?.reason || 'Нативная остановка прерванного ответа не подтверждена; автопродолжение отменено');
         recoveryStopped = result.stopped===true;
@@ -785,11 +795,19 @@
   function rememberManualStatusIntent() {
     const button=sendButton();
     if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return;
-    const editor=composer();
-    if(editor)void inlineGoal?.manualIntent({text:rawEditorText(editor),
-      baselineKey:latestPromptSnapshot()?.promptKey||'',eventAt:Date.now()});
+    const editor=composer(),text=editor?rawEditorText(editor):'',baselineKey=latestPromptSnapshot()?.promptKey||'',at=Date.now();
+    if(editor)void inlineGoal?.manualIntent({text,baselineKey,eventAt:at});
     rememberCompletionSendIntent();
-    manualSendIntent={url:ChatGPTHandoffTitle.chatUrl(location.href),at:Date.now(),attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
+    manualSendIntent={text,baselineKey,url:ChatGPTHandoffTitle.chatUrl(location.href),at,attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
+  }
+  async function bindManualGoalSupplement(intent,startedAt,requestId) {
+    for(let check=0;check<120;check++) {
+      if(!runtimeAvailable()||ChatGPTHandoffTitle.chatUrl(location.href)!==intent.url||
+          globalThis.__chatgptNotifierRequestStartedAt!==startedAt||(globalThis.__chatgptNotifierRequestId||null)!==(requestId||null))return;
+      const result=await runtimeMessage({type:'CHATGPT_GOAL_SUPPLEMENT_BIND',url:intent.url});
+      if(!result?.pending)return;
+      await sleepUntilNextCheck();
+    }
   }
   function confirmManualStatusIntent(startedAt,requestId) {
     const intent=manualSendIntent;
@@ -801,7 +819,7 @@
     if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
     manualSendIntent=null;
     const path=location.pathname;
-    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,startedAt,requestId:requestId||null}).then(result=>{
+    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,text:intent.text,baselineKey:intent.baselineKey,startedAt,requestId:requestId||null}).then(result=>{
       if(!result?.ok)return;
       // The worker owns receipt validation. A rejected or delayed ACK must not
       // unlock this page's durable block or discard a newer local retry state.
@@ -809,6 +827,7 @@
           globalThis.__chatgptNotifierRequestStartedAt===startedAt&&
           (globalThis.__chatgptNotifierRequestId||null)===(requestId||null))retryStates.delete(path);
       statusIndicator?.accept(result);
+      if(typeof intent.text==='string'&&intent.text.trim())void bindManualGoalSupplement(intent,startedAt,requestId).catch(()=>{});
     });
   }
 

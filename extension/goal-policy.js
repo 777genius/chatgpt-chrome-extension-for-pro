@@ -36,13 +36,16 @@
       'Если цель полностью выполнена, ответь ровно GOAL_COMPLETE — это должен быть весь окончательный ответ, без оформления и дополнительного текста.',
       'Если цель не завершена, не используй GOAL_COMPLETE. Работай дальше, прямо указывай блокировки и реальные результаты.'].join('\n\n');
   }
+  function supplementsText(record) {
+    return (record.supplements||[]).map((item,index)=>'Дополнение пользователя '+(index+1)+':\n'+item.userText);
+  }
   function continuationText(record) {
-    return [CONTINUATION,'Исходная цель:',record.goal,
+    return [CONTINUATION,'Исходная цель:',record.goal,...supplementsText(record),
       ...(record.rules?['Условия завершения:',record.rules]:[])].join('\n\n');
   }
   function handoffText(record) {
     return ['--- Активная цель расширения (не отчёт о выполнении) ---',
-      record.goal,...(record.rules?[record.rules]:[]),
+      record.goal,...supplementsText(record),...(record.rules?[record.rules]:[]),
       'Продолжений подтверждено: '+record.continuations+' из '+record.maxContinuations+'.',
       'Не считай перенос чата выполнением цели. '+CONTINUATION].join('\n\n');
   }

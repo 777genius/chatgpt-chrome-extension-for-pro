@@ -192,7 +192,8 @@
     }
     function canSend(record,tabId,id,operationId,phase) {
       return !!record&&record.id===id&&record.url&&record.operation?.id===operationId&&
-        record.operation.tabId===tabId&&record.phase===phase&&!record.pauseRequested&&!record.stopRequested;
+        record.operation.tabId===tabId&&record.phase===phase&&!record.pauseRequested&&!record.stopRequested&&!record.manualPending&&
+        !(record.manualSupplementBinding?.startedAt>record.operation.createdAt);
     }
     async function deliver(record) {
       if(!record?.operation)return;
@@ -326,7 +327,7 @@
             if(!ready?.ok||ready.idle!==true)throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
           }
           let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
-          const pendingKind=old.pendingSendKind||
+          const pendingKind=old.manualPending?null:old.pendingSendKind||
             (old.pendingCompletion||old.manualOverride?'continuation':null);
           if(pendingKind) {
             record={...record,pendingSendKind:null,pendingCompletion:null};
@@ -391,11 +392,14 @@
               newPromptKey===record.operation.baselineKey)
             throw Error('Не подтверждено новое пользовательское сообщение Goal');
           const stop=record.stopRequested,pause=record.pauseRequested;
-          const early=buffered(record,'earlyCompletions','earlyCompletion')
+          const manual=record.manualSupplementBinding;
+          const newerManual=manual&&manual.startedAt>record.operation.createdAt;
+          const expected=newerManual?manual.promptKey:newPromptKey;
+          const early=newerManual?record.earlyCompletion:buffered(record,'earlyCompletions','earlyCompletion')
             .find(item=>item.promptKey===newPromptKey)||null;
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
-            expectedPromptKey:newPromptKey,handoffPending:false,operation:null,
+            expectedPromptKey:expected,handoffPending:false,operation:null,
             earlyCompletion:stop?null:early,earlyCompletions:[],
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
@@ -424,6 +428,14 @@
       const result=await serialize(async()=>{
         const record=await read(target);
         if(!record||record.lastCompletionKey===completionKey)return {ok:false};
+        if(record?.manualPending) {
+          const pending=record.manualPending;
+          if(nativeVerified!==true||pending.tabId!==tabId||promptKey===pending.baselineKey||!promptKey.startsWith(new URL(target).pathname+'|')||!userId)return {ok:false};
+          const saved=buffered(record,'manualEarlyCompletions','manualEarlyCompletion');
+          if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
+          const next={...record,manualEarlyCompletion:null,manualEarlyCompletions:[...saved,{url:target,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}].slice(-6)};
+          await event('manual_completion_staged',next,tabId,{completionKey,promptKey});await save(next);return {ok:true,staged:true};
+        }
         if(['sending','clicked'].includes(record.phase)&&record.operation?.tabId===tabId&&
             record.operation.status!=='reserved'&&nativeVerified===true&&
             promptKey!==record.operation.baselineKey&&
@@ -458,27 +470,72 @@
       if(result.dispatch)await deliver(result.record);
       return {ok:result.ok,record:view(await getRaw(target))};
     }
-    async function manual({url,tabId,startedAt}) {
+    async function manual({url,tabId,startedAt,requestId,eventAt,text,baselineKey}) {
       const target=canonical(url);
       if(!target)return {ok:false};
       return serialize(async()=>{
         const record=await read(target);
         if(record&&Number.isFinite(startedAt)&&Math.max(record.startedAt||0,record.manualStartedAt||0)>startedAt)return {ok:false};
         if(record&&Number.isFinite(startedAt)&&record.manualStart?.startedAt===startedAt)return {ok:false};
-        if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))
-          return {ok:false};
-        const inFlight=['sending','clicked'].includes(record.phase);
-        const reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
-        const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,
-          manualOverride:!inFlight,
-          ...(Number.isFinite(startedAt)&&startedAt>0?
-            {manualStartedAt:Math.max(record.manualStartedAt||0,startedAt)}:{}),
+        if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))return {ok:false};
+        const supplement=typeof requestId==='string'&&requestId&&Number.isFinite(startedAt)&&Number.isFinite(eventAt)&&
+          startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
+          typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'));
+        if(supplement) {
+          const prior=record.manualPending||record.manualSupplementBinding;
+          if(prior?.requestId===requestId) {
+            if(prior.startedAt!==startedAt||prior.text!==text||prior.eventAt!==eventAt||prior.baselineKey!==baselineKey)
+              throw Error('Ручное дополнение уже связано с другим текстом');
+            return {ok:true,record:view(record)};
+          }
+          if(startedAt<=(record.manualStartedAt||0))return {ok:false};
+          const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
+          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,
+            manualPending:{tabId,requestId,startedAt,eventAt,text,baselineKey},manualOverride:false,
+            pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
+            ...(!inFlight?{operation:null}:{}),reason:'Подтверждается отправленное дополнение к цели'};
+          await event('manual_supplement_pending',next,tabId,{requestId,startedAt,eventAt,text,baselineKey});
+          await save(next);return {ok:true,record:view(next)};
+        }
+        // Explicit manual Stop remains a pause. Missing/invalid sent-text proof
+        // cannot silently change an objective or authorize another send.
+        const inFlight=['sending','clicked'].includes(record.phase),reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
+        const next={...record,phase:inFlight?record.phase:'paused',pauseRequested:inFlight,manualOverride:!inFlight,
+          ...(Number.isFinite(startedAt)&&startedAt>0?{manualStartedAt:Math.max(record.manualStartedAt||0,startedAt)}:{}),
           ...(reserved?{pendingSendKind:record.operation.kind,operation:null}:{}),
           reason:inFlight?'Ожидается исход отправки; ручное действие имеет приоритет':'Пауза: ручная отправка пользователя'};
-        await event('manual_pause',next,tabId);
-        await save(next);
-        return {ok:true};
+        await event('manual_pause',next,tabId);await save(next);return {ok:true};
       });
+    }
+    async function manualBind({url,tabId,id,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,nativeVerified}) {
+      const target=requireUrl(url);
+      const result=await serialize(async()=>{
+        const old=await read(target),pending=old?.manualPending,prior=old?.manualSupplementBinding;
+        if(!old||old.id!==id)return {ok:false};
+        const binding={tabId,requestId,startedAt,promptKey,userId,userText,userVisibleText:typeof userVisibleText==='string'?userVisibleText:null,userSentAtMs};
+        if(!pending) {
+          if(prior&&Object.keys(binding).every(k=>binding[k]===prior[k]))return {ok:true,record:view(old)};
+          return {ok:false};
+        }
+        if(!['preparing','sending','clicked','waiting','recovering','paused','blocked'].includes(old.phase)||
+            pending.tabId!==tabId||pending.requestId!==requestId||pending.startedAt!==startedAt||old.manualStartedAt!==startedAt||
+            nativeVerified!==true||typeof userId!=='string'||!userId||typeof userText!=='string'||!userText.trim()||userText.length>10000||
+            (userText!==pending.text&&userVisibleText!==pending.text)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
+            !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
+          return {ok:false};
+        if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};
+        const supplement={...binding,text:pending.text,eventAt:pending.eventAt,baselineKey:pending.baselineKey};
+        const early=buffered(old,'manualEarlyCompletions','manualEarlyCompletion').find(item=>item.userId===userId&&item.promptKey===promptKey)||null;
+        const fenced=!!old.operation||old.phase==='blocked',paused=old.phase==='paused'||old.pauseRequested;
+        const next={...old,supplements:[...(old.supplements||[]),supplement],manualPending:null,manualSupplementBinding:supplement,
+          expectedPromptKey:promptKey,handoffPending:false,manualEarlyCompletion:null,manualEarlyCompletions:[],
+          earlyCompletion:early,phase:fenced?old.phase:paused?'paused':'waiting',
+          reason:fenced?old.reason:paused?'Приостановлено пользователем':''};
+        await event('manual_supplement_bound',next,tabId,{requestId,startedAt,promptKey,userId,text:userText,intentText:pending.text});
+        await save(next);return {ok:true,record:view(next),replay:!fenced?early:null};
+      });
+      if(result.replay)await completion(result.replay);
+      return {ok:result.ok,record:result.replay?await get(target):result.record};
     }
     async function retry({url,tabId,kind,promptKey,attemptId,goalHandoff=false}) {
       const target=canonical(url);
@@ -519,6 +576,7 @@
             await save({...record,handoffTabId:tabId});
           return;
         }
+        if(record.manualPending)throw Error('Дополнение к цели ещё не подтверждено; handoff остановлен');
         if(!['waiting','paused','recovering'].includes(record.phase))throw Error('Goal отправляет сообщение; handoff остановлен');
         const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId,handoffTabId:tabId};
         await event('handoff_begin',next,tabId,{handoffId});
@@ -600,7 +658,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

@@ -28,7 +28,7 @@ function fixture() {
         dispatches.push(message);return {ok:true};
       }}
     };
-    context=createContext({chrome,URL,console,setTimeout,clearTimeout,
+    context=createContext({chrome,URL,console,setTimeout,clearTimeout,bindNativeManualSupplement:async()=>({ok:true,pending:false}),
       crypto:{randomUUID:()=>`fence-operation-${++sequence}`},
       Date:class extends Date {static now(){return clock;}},
       messageChatUrl:(message:Value)=>message.url,
