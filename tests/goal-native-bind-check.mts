@@ -45,7 +45,7 @@ async function fixture(source=chat) {
  runInContext(worker.slice(from,until),context);
  return {data,events,messages,binds,completions,probes,store,
   bind:(url=live,armId=armed.record.id)=>{context.input={url,armId};return runInContext('bindNativeComposerGoal(7,input.url,input.armId)',context) as Promise<Value>;},
-  native:()=>native!,patchNative:(patch:Value)=>Object.assign(native!,patch),missingNative:()=>{native=undefined;},
+  native:()=>native!,patchNative:(patch:Value)=>Object.assign(native!,patch),missingNative:()=>{native=undefined;},restoreNative:(value:Value)=>{native=value;},
   request:(value:Value|null)=>{request=value;},route:(value:string)=>{live=value;},
   afterProbe:(effect:()=>void|Promise<void>)=>{afterProbe=effect;},bindMode:(value:string)=>{bindMode=value;},probeThrows:()=>{probeThrows=true;}};
 }
@@ -132,10 +132,30 @@ for(const patch of [{generating:true},{hasError:true},{assistantCompleted:false}
  const h=await fixture();h.patchNative({turnStatus:'complete',generating:false,assistantCompleted:true,...patch});
  await h.bind();assert.equal(h.completions.length,0,'incomplete or ambiguous native answer cannot replay');assert.equal(h.messages.length,0);
 }
+{
+ const h=await fixture();
+ const intent=h.native().userText;
+ h.patchNative({userText:'[Exact](https://example.test/task) submitted objective',userVisibleText:intent+'\n'});
+ assert.equal((await h.bind()).record.goal,h.native().userText,'native rendered paragraph whitespace does not orphan explicit consent');
+ assert.equal(h.messages.length,0);
+}
 for(const mode of ['unknown','throw','probe-throw']) {
  const h=await fixture();h.patchNative({turnStatus:'complete',generating:false,assistantCompleted:true});
  if(mode==='probe-throw')h.probeThrows();else h.bindMode(mode);
  if(mode==='unknown')assert.equal((await h.bind()).ok,false);else await assert.rejects(()=>h.bind(),/disconnect/);
  assert.equal(h.completions.length,0);assert.equal(h.messages.length,0);
+}
+{
+ const h=await fixture('https://chatgpt.com/');
+ const native=structuredClone(h.native());
+ h.missingNative();assert.equal((await h.bind()).pending,true);
+ const saved=h.data['chatgpt-goal-composer:7'];
+ assert.equal(saved.request.requestId,'native-request','request evidence is durable before native content becomes available');
+ h.request(null);
+ // Missing native content must still refuse, even with a durable request.
+ assert.equal((await h.bind()).pending,true);assert.equal(h.binds.length,0);
+ h.restoreNative(native);
+ assert.equal((await h.bind()).record.phase,'waiting','late native binding survives loss of the session receipt');
+ assert.equal(h.messages.length,0,'recovering initial consent does not send a duplicate');
 }
 console.log('Native composer Goal adoption: request/route freshness, root binding, exact durable proof, idempotence and guarded completion replay passed.');

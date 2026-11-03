@@ -200,12 +200,12 @@ for(const target of [root,other]) {
   assert.deepEqual(env.data,before);
 }
 
-// A rendered-text fallback remains exact and requires real native send proof;
+// A rendered-text fallback tolerates layout whitespace and requires native proof;
 // it cannot adopt another visible message, a draft, or an invalid native text.
 {
   const visible='Explicit PR #681',raw='Explicit PR [#681](https://example.invalid/pull/681)';
   for(const changes of [
-    {userVisibleText:'Different PR #681'}, {userVisibleText:visible+' '}, {userVisibleText:undefined},
+    {userVisibleText:'Different PR #681'}, {userVisibleText:undefined},
     {nativeVerified:false}, {userText:''}, {userText:'x'.repeat(10001)},
     {startedAt:999999}, {promptKey:'/c/wrong-chat|user'}
   ]) {
@@ -214,6 +214,10 @@ for(const target of [root,other]) {
     await assert.rejects(()=>env.store.composerBind(proof));
     assert.equal(env.data[goalKey(saved)],undefined);assert.equal(env.messages.length,0);
   }
+  const env=fixture(),armId=await env.intent(7,saved,visible);
+  const bound=await env.store.composerBind({...env.proof(armId),firstTurn:false,userText:raw,userVisibleText:visible+'\n'});
+  assert.equal(bound.record.binding.userText,raw,'layout whitespace never rewrites the actual native goal');
+  assert.equal(env.messages.length,0);
 }
 
 // Clearing the switch and binding the native request share one serialization

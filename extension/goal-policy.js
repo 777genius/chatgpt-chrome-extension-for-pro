@@ -50,6 +50,11 @@
       'Продолжений подтверждено: '+record.continuations+' из '+record.maxContinuations+'.',
       'Не считай перенос чата выполнением цели. '+CONTINUATION].join('\n\n');
   }
+  function submittedTextMatches(intent,nativeText,visibleText) {
+    if(typeof intent!=='string'||typeof nativeText!=='string')return false;
+    return nativeText===intent||visibleText===intent||typeof visibleText==='string'&&
+      visibleText.replace(/\s+/g,' ').trim()===intent.replace(/\s+/g,' ').trim();
+  }
   function exactMarker(response,rawExact,nativeVerified) {
     return nativeVerified===true&&rawExact===true&&response===MARKER;
   }
@@ -60,7 +65,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,exactMarker,decision});
+  const api=Object.freeze({MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

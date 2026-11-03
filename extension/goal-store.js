@@ -122,6 +122,23 @@
         return {ok:true,record};
       });
     }
+    // Keep the observed request with the consent intent, independent of the
+    // bounded session cache. This grants no click and never adopts draft text.
+    async function composerRequest({tabId,armId,requestId,startedAt,url}) {
+      requireTab(tabId);
+      return serialize(async()=>{
+        const current=await readComposer(tabId),intent=current?.intent;
+        if(current?.id!==armId||current.phase!=='intent'||!intent||
+            typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
+            startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
+            (url&&requirePage(url)!==current.url))return {ok:false};
+        const request={requestId,startedAt,url:url||current.url};
+        if(current.request)return {ok:JSON.stringify(current.request)===JSON.stringify(request),record:current};
+        const record={...current,request};
+        await storage.set({[composerKey(tabId)]:record});
+        return {ok:true,record};
+      });
+    }
     async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,firstTurn,nativeVerified}) {
       requireTab(tabId);
       const target=requireUrl(url);
@@ -129,11 +146,13 @@
         const current=await readComposer(tabId),intent=current?.intent;
         if(!current||current.id!==armId||!['intent','bound'].includes(current.phase)||!intent)
           throw Error('Нет сохранённого намерения ручной отправки Goal');
+        if(current.request&&(current.request.requestId!==requestId||current.request.startedAt!==startedAt))
+          throw Error('Ручная отправка Goal уже связана с другим запросом');
         if(nativeVerified!==true||typeof requestId!=='string'||!requestId||typeof userId!=='string'||!userId||
             !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
             !Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000||
             typeof userText!=='string'||!userText.trim()||userText.length>10000||
-            (userText!==intent.text&&userVisibleText!==intent.text)||
+            !policy.submittedTextMatches(intent.text,userText,userVisibleText)||
             typeof promptKey!=='string'||promptKey===intent.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|'))
           throw Error('Нативная ручная отправка Goal не подтверждена точным запросом и текстом');
@@ -522,8 +541,7 @@
         if(!['preparing','sending','clicked','waiting','recovering','paused','blocked'].includes(old.phase)||
             pending.tabId!==tabId||pending.requestId!==requestId||pending.startedAt!==startedAt||old.manualStartedAt!==startedAt||
             nativeVerified!==true||typeof userId!=='string'||!userId||typeof userText!=='string'||!userText.trim()||userText.length>10000||
-            (userText!==pending.text&&userVisibleText!==pending.text&&
-              !(typeof userVisibleText==='string'&&userVisibleText.replace(/\s+/g,' ').trim()===pending.text.replace(/\s+/g,' ').trim()))||typeof promptKey!=='string'||promptKey===pending.baselineKey||
+            !policy.submittedTextMatches(pending.text,userText,userVisibleText)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
           return {ok:false};
         if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};
@@ -663,7 +681,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

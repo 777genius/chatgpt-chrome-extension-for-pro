@@ -313,6 +313,10 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
     if(event.operationId) {
       request.operationId=event.operationId;
       await bindRequestOperationReceipt(details.tabId,request.requestId,request.startedAt,event.operationId);
+    } else {
+      const pending=await goalController.composerGet({tabId:details.tabId});
+      if(pending?.phase==='intent')await goalController.composerRequest({tabId:details.tabId,armId:pending.id,
+        requestId:request.requestId,startedAt:request.startedAt,url:request.url});
     }
     const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl);
     if(url)await broadcastChatStatus(await markChatLoading(url,details.timeStamp,receipt));
@@ -491,17 +495,21 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
     return {ok:true,url:canonical,record:await goalController.get(canonical),composer:pending};
   }
   const waiting=()=>({ok:true,pending:true,url:currentUrl,composer:pending});
-  if(!canonical)return waiting();
-  const request=await latestRequestReceipt(tabId);
+  const latest=await latestRequestReceipt(tabId);
+  const request=latest||pending.request;
   if(!Number.isFinite(pending.intent?.eventAt)||!request||request.startedAt<pending.intent?.eventAt||request.startedAt-pending.intent?.eventAt>10000)return waiting();
+  if(!pending.request)await goalController.composerRequest({tabId,armId,requestId:request.requestId,
+    startedAt:request.startedAt,url:request.url});
+  if(!canonical)return waiting();
   const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[canonical,true]});
   const native=checked?.result;
   if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.userId||
       typeof native.userText!=='string'||!native.promptKey||!Number.isFinite(native.userSentAtMs))return waiting();
-  const live=ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url),fresh=await latestRequestReceipt(tabId);
+  const live=ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url),
+    fresh=await latestRequestReceipt(tabId)||(await goalController.composerGet({tabId}))?.request;
   if(live!==canonical||fresh?.requestId!==request.requestId||fresh?.startedAt!==request.startedAt)
     return {ok:false,error:'Отправка или чат изменились до подтверждения Goal'};
-  if(request.url&&ChatGPTGoalPolicy.canonical(request.url)!==canonical)
+  if(request.url&&request.url!=='https://chatgpt.com/'&&ChatGPTGoalPolicy.canonical(request.url)!==canonical)
     return {ok:false,error:'Запрос отправлен в другой чат'};
   const result=await goalController.composerBind({tabId,armId,url:canonical,requestId:request.requestId,
     startedAt:request.startedAt,promptKey:native.promptKey,userId:native.userId,userText:native.userText,
@@ -556,8 +564,7 @@ async function bindNativeManualSupplement(tabId,url) {
     const native=checked?.result,current=await goalController.get(url);
     if(!native?.ok||native.isLatest!==false||native.isReadOnly!==false||native.url!==url||!native.userId||!native.promptKey||
         !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-pending.startedAt)>10000||
-        (native.userText!==pending.text&&native.userVisibleText!==pending.text&&
-          !(typeof native.userVisibleText==='string'&&native.userVisibleText.replace(/\s+/g,' ').trim()===pending.text.replace(/\s+/g,' ').trim()))||
+        !ChatGPTGoalPolicy.submittedTextMatches(pending.text,native.userText,native.userVisibleText)||
         current?.id!==record.id||JSON.stringify(current.manualPending)!==JSON.stringify(pending)||
         ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false,pending:true};
     const bound=await goalController.manualBind({url,tabId,id:record.id,requestId:pending.requestId,
@@ -603,6 +610,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if((source!==requested||live!==requested)&&!allocatedIntent)throw Error('Чат изменился');
       let result;
       if(message.action==='bind')return bindNativeComposerGoal(tabId,live,message.armId);
+      if(message.action==='get'&&pending?.phase==='intent'&&ChatGPTGoalPolicy.canonical(live))
+        return bindNativeComposerGoal(tabId,live,pending.id);
       if(message.action==='arm')result=await goalController.composerArm({tabId,url:live,rules:message.rules,
         maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
       else if(message.action==='disarm')result=await goalController.composerDisarm({tabId,armId:message.armId});
