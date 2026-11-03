@@ -37,6 +37,7 @@ interface ReactFiber {
     children?: unknown; entries?: NativeEntry[]; entry?: NativeEntry;
     isLoading?: boolean; isStartButtonAllowed?: boolean;
     composerController?: ComposerController;
+    selectedLabelCandidate?: {reasoningEffort?:string;model?:string};
     attachment?: NativeAttachment;
     conversationId?: string;
   };
@@ -52,8 +53,9 @@ interface ChatErrorOutcome {
   proof?: string;
 }
 interface ComposerOptions {
-  action: "inspect" | "send"; url: string; text: string;
-  requireMax?: boolean; fileName?: string;
+  action: "inspect" | "inspect-mode" | "inspect-seed" | "send"; url: string; text: string;
+  requireMax?: boolean; fileName?: string; nativeText?:string;
+  expectedEffort?:string;expectedModel?:string;
 }
 interface HandoffOptions {
   sourceUrl: string; targetUrl?: string; submittedText: string;
@@ -279,11 +281,19 @@ function inspectHandoffAcceptance(options:HandoffOptions) {
 // ahead of React/ProseMirror and must never authorize sending a user's draft.
 function controlChatComposer(options:ComposerOptions) {
   const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
-  const visible = (node:Element) => Boolean(node?.isConnected && node.getClientRects().length);
+  const visible = (node:Element):boolean => {
+    if (!node?.isConnected || node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'))return false;
+    const computed=document.defaultView?.getComputedStyle?.(node);
+    if(computed?.display==='none'||['hidden','collapse'].includes(computed?.visibility??''))return false;
+    const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
+    return rects.some(rect=>rect.width>0&&rect.height>0);
+  };
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
-  const confirmedEditor: Element = editor;
-  let controller:ComposerController|null = null;
+  const confirmedEditor:Element=editor;
+  const composer=editor.closest('form')||editor.closest('[data-composer-body]');
+  if(!composer)return {ok:false,reason:'Не удалось связать редактор с его формой отправки'};
+  let controller:ComposerController|null=null;
   for (let node: Element|null|undefined = editor; node && !controller; node = node.parentElement) {
     const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
     const observed:unknown=key?Reflect.get(node,key):null;
@@ -294,6 +304,106 @@ function controlChatComposer(options:ComposerOptions) {
   }
   if (!controller) return { ok: false, reason: 'Не удалось проверить состояние редактора ChatGPT' };
   const confirmedController=controller;
+  function selectedMode():{effort:string|null;model:string|null} {
+    const reasoning=Array.from(composer.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible);
+    const effort=reasoning?.getAttribute('data-selected-reasoning-effort')||null;
+    const key=reasoning&&Object.keys(reasoning).find(name=>name.startsWith('__reactFiber
+    const directValue:unknown=Reflect.get(confirmedEditor,'value');
+    if (directValue !== undefined) return typeof directValue==='string'?directValue:'';
+    if (!confirmedEditor.querySelector('p, div, br, li')) return confirmedEditor.textContent || '';
+    const copy = confirmedEditor.cloneNode(true) as Element;
+    copy.querySelectorAll('[aria-hidden="true"], .ProseMirror-widget, svg, button').forEach(node=>node.remove());
+    function text(node:Node):string {
+      if (node.nodeType === 3) return node.textContent || '';
+      if (node.nodeType !== 1) return '';
+      const elementNode=node as Element;
+      if (elementNode.tagName === 'BR') return elementNode.classList.contains('ProseMirror-trailingBreak') ? '' : '\n';
+      return Array.from(node.childNodes).map(text).join(['UL','OL'].includes(elementNode.tagName) ? '\n' : '');
+    }
+    return Array.from(copy.childNodes).map(text).join('\n');
+  }
+  const actualPrompt = confirmedController.getChatGptPrompt();
+  const prompt = actualPrompt?.prompt;
+  const plainMatches = confirmedController.getPlainText() === options.text && visibleText() === options.text;
+  function literalSerializationMatches():boolean {
+    // Native Markdown mode escapes punctuation and wraps generated URL links.
+    // Permit the native serialization only for an independently checked plain
+    // document: no mentions, hidden nodes, custom links, formatting or hints.
+    const doc = confirmedController.view.state?.doc;
+    if (!doc?.toJSON || typeof confirmedController.markdownEditor?.serialize !== 'function' ||
+        actualPrompt.systemHints?.length) return false;
+    const value = doc.toJSON();
+    if (value.type !== 'doc' || value.marks?.length || !Array.isArray(value.content)) return false;
+    const lines:string[]=[];
+    for (const paragraph of value.content) {
+      if (paragraph.type !== 'paragraph' || paragraph.marks?.length) return false;
+      let line = '';
+      for (const node of paragraph.content || []) {
+        if (node.type !== 'text' || typeof node.text !== 'string') return false;
+        for (const mark of node.marks || []) {
+          const attrs = mark.attrs || {};
+          if (mark.type !== 'link' || attrs.isAutolink !== true || attrs.isGeneratedAutolink !== true ||
+              attrs.href !== node.text || (typeof attrs.href!=='string'||!/^https?:\/\//.test(attrs.href)) || attrs.title || attrs.disabled ||
+              attrs.literalMarkdownSource || attrs.literalMarkdownOccurrenceId || attrs.sourceAppId) return false;
+        }
+        line += node.text;
+      }
+      lines.push(line);
+    }
+    return lines.join('\n') === options.text && confirmedController.markdownEditor.serialize(doc) === prompt;
+  }
+  const promptMatches = typeof prompt === 'string' && (prompt === options.text || (plainMatches && literalSerializationMatches()));
+  const matches = plainMatches && promptMatches;
+  const ready = confirmedController.submitReady === true && confirmedController.pendingSubmit == null;
+  const effort = Array.from(root.querySelectorAll('[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort]')).find(visible)?.getAttribute('data-selected-reasoning-effort') || null;
+  const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,promptChars:typeof prompt==='string'?prompt.length:null};
+  if (options.action === 'inspect' && !options.fileName) return inspection;
+  if (options.action !== 'inspect' && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max'))) {
+    return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort};
+  }
+  const attachments = root.querySelector('[data-composer-attachments]');
+  if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};
+  if (options.fileName) {
+    // Never authorize a history send when an extra unrecognized attachment
+    // chip is present. Fiber metadata is not guaranteed to be readable.
+    if (!attachments || attachments.children.length !== 1) {
+      return {ok:false,reason:'Нельзя подтвердить единственное вложение истории'};
+    }
+    const found = new Set<NativeAttachment>();
+    for (const node of attachments?.querySelectorAll('*') || []) {
+      const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
+      const observed:unknown=key?Reflect.get(node,key):null;
+      for(let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;fiber&&i<5;i++,fiber=fiber.return??null){
+        const attachment=fiber.memoizedProps?.attachment;
+        if(attachment)found.add(attachment); // unnamed native files must also fail closed
+      }
+    }
+    if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
+  }
+  if (options.action === 'inspect') return inspection;
+  const button = Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
+  if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
+  // No await between checking the actual prompt and clicking its own button.
+  const clickedAt=Date.now();
+  button.click();
+  let conversationAlias='';
+  try {const id=decodeURIComponent(new URL(location.href).pathname.split('/').at(-1)||'');if(/^local-chatgpt:[a-z0-9-]+$/.test(id))conversationAlias=id;}catch{}
+  return {ok:true,clicked:true,effort,promptChars:typeof prompt==='string'?prompt.length:null,submittedText:prompt,clickedAt,conversationAlias};
+}
+));
+    const models=new Set<string>();
+    const observed:unknown=key&&reasoning?Reflect.get(reasoning,key):null;
+    for(let fiber:ReactFiber|null=observed&&typeof observed==='object'?observed as ReactFiber:null,i=0;
+        fiber&&i<24;i++,fiber=fiber.return??null) {
+      const candidate=fiber.memoizedProps?.selectedLabelCandidate;
+      if(candidate?.reasoningEffort===effort&&typeof candidate.model==='string'&&
+          /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(candidate.model))models.add(candidate.model);
+    }
+    return {effort,model:models.size===1?Array.from(models)[0]!:null};
+  }
+  if(options.action==='inspect-mode') {
+    const mode=selectedMode();return {ok:Boolean(mode.effort&&mode.model),...mode};
+  }
   function visibleText():string {
     const directValue:unknown=Reflect.get(confirmedEditor,'value');
     if (directValue !== undefined) return typeof directValue==='string'?directValue:'';
