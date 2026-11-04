@@ -6,7 +6,7 @@ async function fixture(witness=false){
  const data:V={},journal:V[]=[],dispatched:V[]=[];let live=url,clock=1000,after:(()=>void)|null=null;
  const users=[{userId:'follow-1',userText:'First sent clarification',userSentAtMs:20000,promptKey:prefix+'first'},
   {userId:'follow-2',userText:'Second sent clarification',userSentAtMs:40000,promptKey:prefix+'second'}];
- const native:V={ok:true,url,isLatest:true,isReadOnly:false,...users[1],firstServerMessageId:'original-native-user',
+ const native:V={ok:true,url,isLatest:true,isReadOnly:false,...users[1],firstServerMessageId:'server-alias',firstTurnMessageIds:['original-native-user'],firstTurnResponseConfirmed:true,
   turnStatus:'in_progress',generating:true,hasError:false};
  const history:V={...native,recoveryTimeline:users};
  const events:V[]=[{kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'root-request',eventAt:1100},
@@ -54,7 +54,7 @@ for(const scenario of ['wrong-allocation','ambiguous-root','unknown-followup','m
  if(scenario==='unknown-followup')f.events[2].operationId='unknown-send';
  if(scenario==='missing-followup')f.events.pop();
  if(scenario==='missing-history')f.history.recoveryTimeline=null;
- if(scenario==='server-id')f.native.firstServerMessageId='different-user';
+ if(scenario==='server-id')f.native.firstTurnMessageIds=['different-user'];
  if(scenario==='route-race')f.route('https://chatgpt.com/c/other');
  if(scenario==='disarm-race')f.after(()=>{f.data['chatgpt-goal-composer:7'].phase='disabled';});
  if(scenario==='different-current-user')f.native.userId='new-user';

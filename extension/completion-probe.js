@@ -266,7 +266,8 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     entry.isReadOnly===false&&boundUnit(domUser,user,'user');
   const terminalEmptyResponse=entry.turn.status==='complete'&&inactiveProof&&!generating&&!hasError&&!domAssistant&&users.length>0&&
     entry.turn.items.every(item=>['user-message','chatgpt-reasoning-group'].includes(item.type));
-  return {ok:true,url,firstServerMessageId:nativeEntries?.[0]?.turn?.firstServerMessageId||null,firstUserSentAtMs,lastUserSentAtMs:userTimes.at(-1)?.sentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
+  return {ok:true,url,firstTurnMessageIds:Array.isArray(nativeEntries?.[0]?.turn?.messageIds)?nativeEntries[0].turn.messageIds.filter(id=>typeof id==='string'):[],
+    firstTurnResponseConfirmed:nativeEntries?.[0]?.turn?.items?.some(item=>item.type==='assistant-message'&&item.phase==='final_answer'&&item.completed===true)===true,firstServerMessageId:nativeEntries?.[0]?.turn?.firstServerMessageId||null,firstUserSentAtMs,lastUserSentAtMs:userTimes.at(-1)?.sentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
     assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
     reasoningFailed:entry.turn.status==='cancelled'&&
       entry.turn.items.some(item=>item.type==='chatgpt-reasoning-group')&&

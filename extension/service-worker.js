@@ -590,7 +590,7 @@ async function restoreMissingComposerGoal(tabId,url,armId,userConfirmed=false) {
   const latest=await probe([url,true]);
   if(!latest?.ok||latest.isLatest!==true||latest.isReadOnly!==false||latest.url!==url||!latest.userId||
       !Number.isFinite(latest.userSentAtMs)||!latest.promptKey||
-      !userConfirmed&&latest.firstServerMessageId!==witness.userId)return wait();
+      !userConfirmed&&(!latest.firstTurnMessageIds?.includes(witness.userId)||latest.firstTurnResponseConfirmed!==true))return wait();
   const history=await probe([url,true,null,latest.userSentAtMs]),timeline=history?.recoveryTimeline;
   if(!history?.ok||history.url!==url||history.isReadOnly!==false||!Array.isArray(timeline)||!timeline.length||history.userId!==latest.userId)return wait();
   const later=requests.filter(e=>e.sourceUrl===url&&e.eventAt>initial[0].eventAt),supplements=[];
