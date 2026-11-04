@@ -38,7 +38,7 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{
   if (pending) pending.failure=details.error||'request-failed';
 },TITLE_REQUEST_FILTER);
 
-function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperationId=null}={}) {
+function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperationId=null,recoverNativeTitle=null}={}) {
   if (titleJobs.has(tabId)) return titleJobs.get(tabId);
   const job=(async()=>{
     const key=handoffKey(tabId);
@@ -66,6 +66,23 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
         const alias=path&&decodeURIComponent(path[1]);
         if(target.origin==='https://chatgpt.com'&&/^local-chatgpt:[a-z0-9-]+$/.test(alias||''))targetAlias=alias;
       } catch {}
+    }
+    if(record.titleStatus==='failed'&&record.titleReason==='title-edited-by-user'&&url&&
+        typeof recoverNativeTitle==='string'&&recoverNativeTitle.trim()&&recoverNativeTitle.length<=512&&
+        !record.titleNativeBaselineRecoveryUsed&&!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt')) {
+      const tab=await chrome.tabs.get(tabId);
+      if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:true,skipped:true};
+      const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
+        args:[{action:'inspect',url,operationId:id,title:record.naming.title}]});
+      if(!checked?.result?.ok||checked.result.title!==record.titlePreparationTitle||checked.result.modalOpen!==false)
+        return {ok:true,waiting:true,retryable:true};
+      const fresh=(await chrome.storage.local.get(key))[key];
+      if(JSON.stringify(fresh)!==JSON.stringify(record))return {ok:true,waiting:true,retryable:true};
+      const next={...record,titleStatus:'waiting',titleReason:'',titlePreparationVersion:1,titlePrepareAttempts:0,
+        titleRetryAfter:0,titleNativeBaselineRecoveryUsed:true,titleExpectedNativeBaseline:recoverNativeTitle};
+      await appendJournal({kind:'handoff.title_native_baseline_recovered',operationId:id,sourceUrl:record.sourceUrl,
+        targetUrl:record.targetUrl,expectedNativeTitle:recoverNativeTitle},{id:tabId});
+      await chrome.storage.local.set({[key]:next});record=next;
     }
     // This native refusal happens before save.click(). Allow a bounded fresh
     // preparation after React replaced the form or the generated title changed.
@@ -125,7 +142,8 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       const tab=await chrome.tabs.get(tabId);
       if (ChatGPTHandoffTitle.chatUrl(tab.url)!==url) throw new Error('Открыт другой чат; переименование отменено');
       const result=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
-        args:[{action,url,operationId:id,title:pending.title,expiresAt:deadline,...extra}]});
+        args:[{action,url,operationId:id,title:pending.title,expiresAt:deadline,
+          expectedNativeTitle:record.titleExpectedNativeBaseline,...extra}]});
       return result[0]?.result||{ok:false,reason:'Страница не ответила'};
     }
     try {
@@ -187,7 +205,12 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       if(!saved.ok||!saved.clicked)throw new Error(saved.reason||'Сохранение названия не подтверждено');
       while(Date.now()<deadline) {
         if(pending.failure)throw new Error(pending.failure);
-        const state=await probe('inspect');
+        let state=await probe('inspect');
+        if(pending.ack&&state.title===previousTitle&&state.sidebarTitle===pending.title) {
+          const synced=await probe('sync-title',{previousTitle,serverConfirmed:true});
+          if(!synced.ok)throw new Error(synced.reason||'Название вкладки изменилось');
+          state=await probe('inspect');
+        }
         if(pending.ack&&state.title===pending.title) {
           const lineage=ChatGPTHandoffTitle.confirm(record.naming,url);
           await chrome.storage.local.set({[`chatgpt-handoff-title:${url}`]:lineage});

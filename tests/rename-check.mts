@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal';
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,7 +28,7 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0, cancels = 0;
   let clickAt = 0;
-  let menuReady=!['late-menu','sidebar-menu','sidebar-hidden','sidebar-wrong-chat','sidebar-hidden-delayed-cancel','sidebar-modal'].includes(mode);
+  let menuReady=mode!=='late-menu'&&!mode.startsWith('sidebar-');
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
   const failure: ((value: unknown)=>void)[] = [];
@@ -61,15 +61,16 @@ function harness(mode: Mode = 'success') {
       // must still permit fill/save without reauthorizing through that header.
       document.querySelector('header')!.setAttribute('inert','');
       const input=dialog.querySelector('input')!;
-      input.value=document.title;
+      input.value=trigger.closest('[data-sidebar-cycle-item]')?.querySelector('a')?.textContent||document.title;
       (input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};
       input.addEventListener('input',()=>{(input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};});
       dialog.querySelector('button[type="button"]')!.addEventListener('click',()=>{cancels++;if(mode==='sidebar-hidden-delayed-cancel'&&cancels===1)return;dialog.remove();document.querySelector('header')!.removeAttribute('inert');});
       dialog.querySelector('button[type="submit"]')!.addEventListener('click',()=>{
         saved++;clickAt=time;
-        if(mode!=='optimistic') document.title=input.value;
+        if(mode!=='optimistic'&&!mode.startsWith('sidebar-stale')) document.title=input.value;
+        const savedLink=trigger.closest('[data-sidebar-cycle-item]')?.querySelector('a');if(savedLink)savedLink.textContent=input.value;
         document.querySelector('header')!.removeAttribute('inert');
-        if(mode==='no-ack')return;
+        if(mode==='no-ack'||mode==='sidebar-stale-no-ack')return;
         const payload=new TextEncoder().encode(JSON.stringify({title:mode==='wrong-request'||mode.endsWith('-wrong-title')?'Other':input.value}));
         const split=mode==='split-utf8'?payload.findIndex(byte=>byte>=128)+1:0;
         const raw=split?[{bytes:payload.slice(0,split).buffer as ArrayBuffer},{bytes:payload.slice(split).buffer as ArrayBuffer}]:[{bytes:payload.buffer as ArrayBuffer}];
@@ -88,11 +89,12 @@ function harness(mode: Mode = 'success') {
     const row=document.createElement('div');row.setAttribute('data-sidebar-cycle-item','');
     row.innerHTML=`<a aria-current="page" href="${mode==='sidebar-wrong-chat'?'https://chatgpt.com/c/other':targetUrl}">Native saved chat</a><button id="saved-chat-menu" aria-haspopup="menu"><svg><use href="#ellipsis-horizontal" /></svg></button>`;
     const link=row.querySelector('a')!,trigger=row.querySelector('button')!;
+    link.textContent=mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')?'Server stored title':document.title;
     trigger.addEventListener('click',()=>openMenu(trigger,true));document.body.append(row);
-    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal') {
+    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
       link.hidden=true;trigger.hidden=true;
       const toggle=document.createElement('button');toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<svg><use href="#codex-icon-sidebar-hidden-light-16" /></svg>';
-      if(mode==='sidebar-modal') {
+      if(mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
         const panel=document.createElement('aside');panel.id='native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
         panel.append(row);document.body.append(panel);toggle.setAttribute('aria-controls',panel.id);
         const close=document.createElement('button');close.setAttribute('aria-controls',panel.id);close.hidden=true;panel.append(close);
@@ -126,7 +128,7 @@ function harness(mode: Mode = 'success') {
   ctx.sourceTitle=sourceTitle;
   const naming=runInContext('ChatGPTHandoffTitle.planNext({sourceUrl:"https://chatgpt.com/c/source",sourceTitle})',ctx) as unknown;
   storage['handoff:7']={id:'handoff',stage:'sent',sourceUrl,targetUrl:mode==='temporary-to-server'?temporaryUrl:targetUrl,sentAt:100,naming} satisfies Stored;
-  const rename = (options?:{recoverTemporaryTarget?:boolean;goalOperationId?:string})=>{ctx.renameOptions=options;return runInContext('renameSavedHandoff(7,"handoff",renameOptions)',ctx) as Promise<Result>;};
+  const rename = (options?:{recoverTemporaryTarget?:boolean;goalOperationId?:string;recoverNativeTitle?:string})=>{ctx.renameOptions=options;return runInContext('renameSavedHandoff(7,"handoff",renameOptions)',ctx) as Promise<Result>;};
   const probe = (options:ProbeOptions)=>{ctx.options=options;return runInContext('controlChatTitle(options)',ctx) as Result;};
   return {rename,probe,events,storage,storageWrites,document,location,
     advance(ms:number){time+=ms;},allowReady(){readiness.isReady=true;readiness.isStreaming=false;(share as unknown as HTMLButtonElement).disabled=false;},allowMenu(){menuReady=true;},
@@ -424,4 +426,32 @@ for(const scenario of ['owner-title','save-intent','exhausted']){
  assert.equal(h.probe({...options,action:'select'}).ok,false,'the owned sidebar does not authorize a foreign modal');
  h.probe({...options,action:'cancel'});
  assert.equal(foreign.isConnected,true);assert.equal(foreign.querySelector('input')?.value,'Owner input');assert.equal(h.saved,0);
+}
+
+for(const mode of ['sidebar-native-title','sidebar-stale-title'] as const){
+ const h=harness(mode);const result=await h.rename();
+ assert.equal(result.ok,true,result.reason||mode);assert.equal(h.record.titleStatus,'confirmed');
+ assert.equal(h.saved,1);assert.equal(h.document.title,expectedTitle);assert.equal(h.sent,0);
+ assert.equal(h.document.querySelector('#native-sidebar-panel')?.hasAttribute('hidden'),true);
+}
+
+{
+ const h=harness('sidebar-stale-title');Object.assign(h.record,{titleStatus:'failed',titleReason:'title-edited-by-user',titlePreparationTitle:h.document.title,titlePrepareAttempts:3});
+ assert.equal((await h.rename({recoverNativeTitle:'Server stored title'})).ok,true);assert.equal(h.record.titleStatus,'confirmed');
+ assert.equal(h.document.title,expectedTitle);assert.equal(h.saved,1);
+ await h.rename({recoverNativeTitle:'Server stored title'});assert.equal(h.saved,1);
+}
+for(const scenario of ['wrong-native-title','save-intent','changed-browser-title']){
+ const h=harness('sidebar-stale-title');Object.assign(h.record,{titleStatus:'failed',titleReason:'title-edited-by-user',titlePreparationTitle:h.document.title});
+ if(scenario==='save-intent')h.record.titleSaveStartedAt=100;
+ if(scenario==='changed-browser-title')h.document.title='Owner changed browser title';
+ await h.rename({recoverNativeTitle:scenario==='wrong-native-title'?'Another native title':'Server stored title'});
+ assert.equal(h.saved,0,scenario);assert.equal(h.sent,0,scenario);
+}
+
+for(const mode of ['sidebar-stale-no-ack','sidebar-stale-failed-ack'] as const){
+ const h=harness(mode),original=h.document.title;await h.rename();
+ assert.equal(h.saved,1);assert.equal(h.record.titleStatus,'failed');
+ assert.equal(h.document.title,original,'optimistic native sidebar text cannot synchronize the browser title without server ACK');
+ await h.rename();assert.equal(h.saved,1,'a missing or failed save ACK never authorizes another save');
 }

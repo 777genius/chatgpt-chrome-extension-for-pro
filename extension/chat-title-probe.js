@@ -19,19 +19,27 @@ function controlChatTitle(options) {
     const panel=document.getElementById(id);
     return panel?.getAttribute('role')==='dialog'&&panel.getAttribute('aria-modal')==='true'&&visible(panel)?panel:null;
   }
+  function savedChatLink(url) {
+    const links=Array.from(document.querySelectorAll('a[aria-current="page"][href]'))
+      .filter(node=>visible(node)&&chatUrl(node.href)===url&&node.closest('[data-sidebar-cycle-item]'));
+    return links.length===1?links[0]:null;
+  }
   if (options.action==='cancel') {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
       const candidates=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
       const input=state.input||(state.saved?state.form?.querySelector('input'):state.selected&&candidates.length===1?candidates[0]:null);
-      if(chatUrl(location.href)===state.url && input && [state.title,state.previousTitle].includes(input.value)) input.closest('form')?.querySelector('button[type="button"]')?.click();
+      const unchanged=[state.title,state.previousTitle,state.previousFormTitle];
+      const inputKey=input&&Object.keys(input).find(name=>name.startsWith('__reactProps$'));
+      const unchangedInput=input&&unchanged.includes(input.value)&&inputKey&&input[inputKey]?.value===input.value;
+      if(chatUrl(location.href)===state.url && unchangedInput) input.closest('form')?.querySelector('button[type="button"]')?.click();
       if(chatUrl(location.href)===state.url && !state.selected) {
         const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
       }
       const ownDialog=state.form?.closest('[role="dialog"][aria-modal="true"]');
       const ownClosing=chatUrl(location.href)===state.url&&state.sidebarToggle&&ownDialog&&visible(ownDialog)&&
-        input&&[state.title,state.previousTitle].includes(input.value);
+        unchangedInput;
       if(ownClosing&&!options.finalCleanup)return {ok:true,pending:true};
       const sidebar=ownedSidebar(state);
       if(chatUrl(location.href)===state.url&&sidebar&&
@@ -92,7 +100,8 @@ function controlChatTitle(options) {
   }
   ready=ready&&!canonicalMismatch&&!streaming;
   if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,
-    modalOpen:Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible),title:document.title,url:location.href,
+    modalOpen:Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible),title:document.title,
+    sidebarTitle:savedChatLink(options.url)?.textContent||null,url:location.href,
     conversationId:nativeConversationIds.size===1?Array.from(nativeConversationIds)[0]:null};
   if (Number.isFinite(options.expiresAt)&&Date.now()>=options.expiresAt) return {ok:false,reason:'title-deadline-exceeded'};
   let state=globalThis.__chatgptNotifierTitleOperation;
@@ -100,7 +109,8 @@ function controlChatTitle(options) {
     if (!ready || !actions) return {ok:false,reason:'chat-not-ready'};
     if (document.title!==options.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) return {ok:false,reason:'title-or-form-changed'};
     if (state && state.id!==options.operationId) return {ok:false,reason:'another-title-operation'};
-    state={id:options.operationId,url:options.url,title:options.title,previousTitle:options.previousTitle,triggerId:actions.id,createdAt:Date.now()};
+    state={id:options.operationId,url:options.url,title:options.title,previousTitle:options.previousTitle,
+      previousFormTitle:options.previousTitle,expectedNativeTitle:options.expectedNativeTitle,triggerId:actions.id,createdAt:Date.now()};
     globalThis.__chatgptNotifierTitleOperation=state;
     if (actions.getAttribute('data-state')!=='open') {
       actions.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}));
@@ -109,6 +119,13 @@ function controlChatTitle(options) {
     return {ok:true};
   }
   if (!state || state.id!==options.operationId || state.url!==options.url || state.title!==options.title || Date.now()-state.createdAt>60000) return {ok:false,reason:'title-operation-changed'};
+  if(options.action==='sync-title') {
+    if(state.saved!==true||options.serverConfirmed!==true||savedChatLink(state.url)?.textContent!==state.title)
+      return {ok:false,reason:'native-title-not-confirmed'};
+    if(document.title!==state.previousTitle&&document.title!==state.title)return {ok:false,reason:'title-edited-by-user'};
+    document.title=state.title;
+    return {ok:true};
+  }
   if (options.action==='select') {
     let menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
     const rename=Array.from(menu?.querySelectorAll('[role="menuitem"]')||[]).find(n=>Array.from(n.querySelectorAll('[style]')).some(icon=>{
@@ -120,7 +137,7 @@ function controlChatTitle(options) {
       // Never navigate, touch another row, or substitute a translated label.
       const sidebar=ownedSidebar(state);
       if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(node=>node!==sidebar&&visible(node)))return {ok:false,reason:'title-or-form-changed'};
-      const link=Array.from(document.querySelectorAll('a[aria-current="page"][href]')).find(n=>visible(n)&&chatUrl(n.href)===state.url);
+      const link=savedChatLink(state.url);
       const row=link?.closest('[data-sidebar-cycle-item]');
       const toggle=Array.from(document.querySelectorAll('header button')).find(n=>visible(n)&&!n.disabled&&n.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
       if(!state.sidebarFallback && (row||toggle)) {
@@ -137,6 +154,9 @@ function controlChatTitle(options) {
         }
         const trigger=Array.from(row?.querySelectorAll('button[aria-haspopup="menu"]')||[]).find(n=>visible(n)&&!n.disabled&&n.id&&n.querySelector('use[href*="ellipsis-horizontal"]'));
         if(trigger) {
+          if(typeof state.expectedNativeTitle==='string'&&link.textContent!==state.expectedNativeTitle)
+            return {ok:false,reason:'native-title-changed'};
+          state.previousFormTitle=link.textContent;
           state.triggerId=trigger.id;
           trigger.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}));
           trigger.click();
@@ -161,7 +181,9 @@ function controlChatTitle(options) {
   if (!input || !visible(input) || !form || !form.querySelector('h2') || form.querySelectorAll('input').length!==1 ||
       !form.querySelector('button[type="submit"]') || form.querySelectorAll('button').length!==2) return {ok:false,retryable:true,reason:'rename-form-not-ready'};
   if (options.action==='fill') {
-    if (input.value!==state.previousTitle || document.title!==state.previousTitle) return {ok:false,reason:'title-edited-by-user'};
+    if (input.value!==state.previousFormTitle || document.title!==state.previousTitle) return {ok:false,reason:'title-edited-by-user'};
+    const inputKey=Object.keys(input).find(name=>name.startsWith('__reactProps$'));
+    if(!inputKey||input[inputKey]?.value!==input.value)return {ok:false,retryable:true,reason:'title-model-not-ready'};
     state.input=input;
     state.form=form;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,state.title);
