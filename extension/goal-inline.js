@@ -8,6 +8,9 @@
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
     const prefix='chatgpt-goal-inline-'+(++instance);
+    const ownerToken=prefix+'-'+Math.random().toString(36).slice(2);
+    const ownerAttribute='data-chatgpt-goal-inline-owner';
+    let ownsDOM=false;
     let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false,loading=false;
     let busy=false,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
     const cleanups=[];
@@ -24,7 +27,7 @@
       target.addEventListener(type,fn,options);
       cleanups.push(()=>target.removeEventListener(type,fn,options));
     };
-    const valid=()=>!disposed&&alive();
+    const valid=()=>!disposed&&alive()&&(!ownsDOM||document.documentElement?.getAttribute(ownerAttribute)===ownerToken);
     const current=()=>policy.pageUrl(getUrl());
     const armed=()=>['armed','intent'].includes(composer?.phase);
     const active=()=>!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
@@ -228,6 +231,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(observer)return true;
       const target=document.documentElement;
       if(!target)return false;
+      // Extension reloads can replace the isolated world while leaving its DOM.
+      // Acquire one shared UI slot before removing only extension-owned nodes.
+      target.setAttribute(ownerAttribute,ownerToken);ownsDOM=true;
+      for(const stale of document.querySelectorAll('[data-chatgpt-goal-inline]'))stale.remove();
       (document.head||target).append(style);
       observer=new win.MutationObserver(()=>{
         if(!valid())return;
@@ -453,6 +460,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(typeof unsubscribe==='function')unsubscribe();
       for(const cleanup of cleanups)cleanup();
       controls.remove();panel.remove();style.remove();
+      if(document.documentElement?.getAttribute(ownerAttribute)===ownerToken)document.documentElement.removeAttribute(ownerAttribute);
     }
     return Object.freeze({refresh,dispose,manualIntent});
   }
