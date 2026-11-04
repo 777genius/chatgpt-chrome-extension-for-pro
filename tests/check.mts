@@ -302,6 +302,7 @@ async function workerCheck() {
   const sender = { tab: { id: 7, url: 'https://chatgpt.com/c/example' } };
   const error = { type: 'CHATGPT_RESPONSE_ERROR', sessionTitle: 'My chat - ChatGPT', response: 'Network failed', durationMs: 125000, fingerprint: 'error|prompt|Network failed' };
   callbacks.message(error, sender); await pause();
+  await waitFor(()=>soundCalls>=2&&notifications.length>=1);
   assert.equal(notifications[0].title, '❌ My chat');
   assert.equal(notifications[0].iconUrl,'icons/status-error.png');
   assert.equal(soundCalls,2,'offscreen listener startup race retries without losing notification');

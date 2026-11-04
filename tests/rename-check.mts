@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel';
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,7 +28,7 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0, cancels = 0;
   let clickAt = 0;
-  let menuReady=!['late-menu','sidebar-menu','sidebar-hidden','sidebar-wrong-chat','sidebar-hidden-delayed-cancel'].includes(mode);
+  let menuReady=!['late-menu','sidebar-menu','sidebar-hidden','sidebar-wrong-chat','sidebar-hidden-delayed-cancel','sidebar-modal'].includes(mode);
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
   const failure: ((value: unknown)=>void)[] = [];
@@ -89,10 +89,17 @@ function harness(mode: Mode = 'success') {
     row.innerHTML=`<a aria-current="page" href="${mode==='sidebar-wrong-chat'?'https://chatgpt.com/c/other':targetUrl}">Native saved chat</a><button id="saved-chat-menu" aria-haspopup="menu"><svg><use href="#ellipsis-horizontal" /></svg></button>`;
     const link=row.querySelector('a')!,trigger=row.querySelector('button')!;
     trigger.addEventListener('click',()=>openMenu(trigger,true));document.body.append(row);
-    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel') {
+    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal') {
       link.hidden=true;trigger.hidden=true;
       const toggle=document.createElement('button');toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<svg><use href="#codex-icon-sidebar-hidden-light-16" /></svg>';
-      toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
+      if(mode==='sidebar-modal') {
+        const panel=document.createElement('aside');panel.id='native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
+        panel.append(row);document.body.append(panel);toggle.setAttribute('aria-controls',panel.id);
+        const close=document.createElement('button');close.setAttribute('aria-controls',panel.id);close.hidden=true;panel.append(close);
+        const setOpen=(open:boolean)=>{toggle.setAttribute('aria-expanded',String(open));close.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;close.hidden=!open;panel.hidden=!open;
+          if(open)document.querySelector('header')!.setAttribute('inert','');else document.querySelector('header')!.removeAttribute('inert');};
+        toggle.addEventListener('click',()=>setOpen(toggle.getAttribute('aria-expanded')!=='true'));close.addEventListener('click',()=>setOpen(false));
+      }else toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
       document.querySelector('header')!.append(toggle);
     }
   }
@@ -400,4 +407,21 @@ for(const scenario of ['owner-title','save-intent','exhausted']){
  if(scenario==='save-intent')h.record.titleSaveStartedAt=100;
  if(scenario==='exhausted')h.record.titleRefusalRetries=2;
  await h.rename();assert.equal(h.saved,0,scenario);assert.equal(h.opened,0,scenario);
+}
+
+{
+ const h=harness('sidebar-modal');const result=await h.rename();
+ assert.equal(result.ok,true,result.reason||'modal sidebar rename');assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1);
+ assert.equal(h.document.querySelector('#native-sidebar-panel')?.hasAttribute('hidden'),true,'close the native modal sidebar opened by this operation');
+ assert.equal(h.document.querySelector('header')?.hasAttribute('inert'),false);assert.equal(h.sent,0);
+}
+{
+ const h=harness('sidebar-modal'),options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+ assert.equal(h.probe({...options,action:'open'}).ok,true);
+ assert.equal(h.probe({...options,action:'select'}).reason,'sidebar-opening');
+ const foreign=h.document.createElement('section');foreign.setAttribute('role','dialog');foreign.setAttribute('aria-modal','true');
+ foreign.innerHTML='<form><input value="Owner input"><button type="submit">Submit</button></form>';h.document.body.append(foreign);
+ assert.equal(h.probe({...options,action:'select'}).ok,false,'the owned sidebar does not authorize a foreign modal');
+ h.probe({...options,action:'cancel'});
+ assert.equal(foreign.isConnected,true);assert.equal(foreign.querySelector('input')?.value,'Owner input');assert.equal(h.saved,0);
 }

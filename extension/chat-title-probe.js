@@ -13,6 +13,12 @@ function controlChatTitle(options) {
         ? `${url.origin}${url.pathname.replace(/\/$/,'')}` : '';
     } catch { return ''; }
   };
+  function ownedSidebar(state) {
+    const id=state?.sidebarPanelId,toggle=state?.sidebarToggle;
+    if(!id||!toggle?.isConnected||toggle.getAttribute('aria-controls')!==id||toggle.getAttribute('aria-expanded')!=='true')return null;
+    const panel=document.getElementById(id);
+    return panel?.getAttribute('role')==='dialog'&&panel.getAttribute('aria-modal')==='true'&&visible(panel)?panel:null;
+  }
   if (options.action==='cancel') {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
@@ -27,7 +33,13 @@ function controlChatTitle(options) {
       const ownClosing=chatUrl(location.href)===state.url&&state.sidebarToggle&&ownDialog&&visible(ownDialog)&&
         input&&[state.title,state.previousTitle].includes(input.value);
       if(ownClosing&&!options.finalCleanup)return {ok:true,pending:true};
-      if(chatUrl(location.href)===state.url && state.sidebarToggle && visible(state.sidebarToggle) &&
+      const sidebar=ownedSidebar(state);
+      if(chatUrl(location.href)===state.url&&sidebar&&
+          !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(node=>node!==sidebar&&visible(node))) {
+        const close=Array.from(sidebar.querySelectorAll('button[aria-controls][aria-expanded="true"]'))
+          .find(node=>node.getAttribute('aria-controls')===state.sidebarPanelId&&visible(node)&&!node.disabled);
+        close?.click();
+      } else if(chatUrl(location.href)===state.url && state.sidebarToggle && visible(state.sidebarToggle) &&
           state.sidebarToggle.getAttribute('aria-expanded')==='true' &&
           !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) state.sidebarToggle.click();
       delete globalThis.__chatgptNotifierTitleOperation;
@@ -106,7 +118,8 @@ function controlChatTitle(options) {
       // A newly saved chat can retain its local header identity. Its native
       // sidebar menu already exposes Rename for the confirmed server URL.
       // Never navigate, touch another row, or substitute a translated label.
-      if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible))return {ok:false,reason:'title-or-form-changed'};
+      const sidebar=ownedSidebar(state);
+      if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(node=>node!==sidebar&&visible(node)))return {ok:false,reason:'title-or-form-changed'};
       const link=Array.from(document.querySelectorAll('a[aria-current="page"][href]')).find(n=>visible(n)&&chatUrl(n.href)===state.url);
       const row=link?.closest('[data-sidebar-cycle-item]');
       const toggle=Array.from(document.querySelectorAll('header button')).find(n=>visible(n)&&!n.disabled&&n.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
@@ -118,7 +131,10 @@ function controlChatTitle(options) {
       }
       if(state.sidebarFallback && !state.triggerId) {
         if(Array.from(document.querySelectorAll('[role="menu"]')).some(visible))return {ok:false,retryable:true,reason:'another-menu-open'};
-        if(!row && toggle && !state.sidebarToggle) {state.sidebarToggle=toggle;toggle.click();return {ok:false,retryable:true,reason:'sidebar-opening'};}
+        if(!row && toggle && toggle.getAttribute('aria-expanded')!=='true' && !state.sidebarToggle) {
+          state.sidebarToggle=toggle;state.sidebarPanelId=toggle.getAttribute('aria-controls')||'';
+          toggle.click();return {ok:false,retryable:true,reason:'sidebar-opening'};
+        }
         const trigger=Array.from(row?.querySelectorAll('button[aria-haspopup="menu"]')||[]).find(n=>visible(n)&&!n.disabled&&n.id&&n.querySelector('use[href*="ellipsis-horizontal"]'));
         if(trigger) {
           state.triggerId=trigger.id;
