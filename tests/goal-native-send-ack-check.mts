@@ -11,14 +11,15 @@ function fixture() {
  let request:Value|null={requestId:'actual-request',startedAt:1100,url,operationId:'operation'},live=url,afterProbe:(()=>void)|null=null;
  let native:Value={ok:true,url,isLatest:true,isReadOnly:false,userId:'native-id',userSentAtMs:1100,userText:text,
   userVisibleText:'Long goal… Show more',promptKey:prompt};
- const reports:Value[]=[],probes:Value[]=[];
- const context=createContext({URL,goalController:{report:async(value:Value)=>{reports.push(value);return {ok:true};}},
+ let proof:Value|null=null;
+ const reports:Value[]=[],probes:Value[]=[],completions:Value[]=[];
+ const context=createContext({URL,readGoalAckProof:async()=>proof,goalController:{report:async(value:Value)=>{reports.push(value);return {ok:true};},completion:async(value:Value)=>{completions.push(value);return {ok:true};}},
   latestRequestReceipt:async()=>structuredClone(request),inspectCompletedTurn:function(){},ChatGPTGoalPolicy:{canonical:(v:string)=>v===url?url:''},
   chrome:{storage:{local:{get:async(key:string)=>({[key]:structuredClone(data[key])})}},tabs:{get:async()=>({id:7,url:live})},
    scripting:{executeScript:async(options:Value)=>{probes.push(options);const result=structuredClone(native);afterProbe?.();return [{result}];}}}});
  runInContext(helper,context);
  const args={url,tabId:7,id:'goal',operationId:'operation',requestId:'actual-request',startedAt:1100};
- return {data,reports,probes,args,record:()=>data['chatgpt-goal:'+url],native,setRequest:(v:Value|null)=>{request=v;},route:(v:string)=>{live=v;},onProbe:(fn:()=>void)=>{afterProbe=fn;},run:(patch:Value={})=>{context.args={...args,...patch};return runInContext('confirmNativeGoalSend(args)',context) as Promise<Value>;}};
+ return {data,reports,probes,args,completions,setProof:(value:Value)=>{proof=value;},record:()=>data['chatgpt-goal:'+url],native,setRequest:(v:Value|null)=>{request=v;},route:(v:string)=>{live=v;},onProbe:(fn:()=>void)=>{afterProbe=fn;},run:(patch:Value={})=>{context.args={...args,...patch};return runInContext('confirmNativeGoalSend(args)',context) as Promise<Value>;}};
 }
 {
  const h=fixture();assert.equal((await h.run()).ok,true);assert.equal(h.reports.length,1);
@@ -58,4 +59,22 @@ console.log('Native Goal send ACK: collapsed DOM independent, exact worker opera
 
 for(const change of [{manualStartedAt:1200},{manualPending:{requestId:'manual-newer'}}]) {
  const h=fixture();Object.assign(h.record(),change);assert.equal((await h.run()).ok,false);assert.equal(h.reports.length,0);
+}
+{
+ const h=fixture();h.record().phase='blocked';h.native.userText='Native escaped [literal](https://example.test/task)';
+ h.setProof({submittedText:h.native.userText,request:{requestId:'actual-request',startedAt:1100,url,operationId:'operation'}});
+ h.setRequest(null);
+ Object.assign(h.native,{turnStatus:'complete',generating:false,hasError:false,assistantCompleted:true,
+  assistantPhase:'final_answer',assistantKey:'done',goalResponse:'GOAL_COMPLETE',goalRawExact:true});
+ assert.equal((await h.run()).ok,true,'a durable actual serialization confirms the old click after its cache disappears');
+ assert.equal(h.reports[0].nativeConfirmed,true);assert.equal(h.completions.length,1,'a completion that preceded ACK recovery is processed once by the coordinator');
+}
+{
+ const h=fixture();h.record().phase='blocked';h.record().operation.status='reserved';
+ assert.equal((await h.run()).ok,false);assert.equal(h.reports.length,0,'a blocked preparation has no proven click to acknowledge');
+}
+{
+ const h=fixture();h.record().phase='blocked';h.native.userText='Changed URL https://example.test/wrong';
+ h.setProof({submittedText:'Original URL https://example.test/task'});
+ assert.equal((await h.run()).ok,false);assert.equal(h.reports.length,0,'receipt comparison is exact and does not discard link targets');
 }

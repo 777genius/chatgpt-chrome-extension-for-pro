@@ -415,7 +415,7 @@
         return {ok:true};
       });
     }
-    async function report({url,tabId,id,operationId,status,reason='',newPromptKey=''}) {
+    async function report({url,tabId,id,operationId,status,reason='',newPromptKey='',nativeConfirmed=false}) {
       const result=await serialize(async()=>{
         const record=await read(url);
         if(!record||record.id!==id||record.operation?.id!==operationId||
@@ -428,7 +428,8 @@
           return {ok:true,record:view(next)};
         }
         if(status==='confirmed') {
-          if(!['sending','clicked'].includes(record.phase))return {ok:false};
+          if(!['sending','clicked'].includes(record.phase)&&!(record.phase==='blocked'&&nativeConfirmed===true&&
+              ['intent','clicked'].includes(record.operation.status)))return {ok:false};
           const expectedPrefix=new URL(record.url).pathname+'|';
           if(typeof newPromptKey!=='string'||!newPromptKey.startsWith(expectedPrefix)||
               newPromptKey===record.operation.baselineKey)

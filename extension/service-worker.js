@@ -567,14 +567,40 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   return {ok:result.ok,url:canonical,tabId,composer:result.record,record:await goalController.get(canonical)};
 }
 
+const goalAckProofs=new Map();
+async function readGoalAckProof(tabId,url,op) {
+  const cached=goalAckProofs.get(op.id);
+  if(cached&&cached.tabId===tabId&&cached.url===url&&cached.text===op.text&&cached.createdAt===op.createdAt)return cached;
+  const journal=await readJournal();
+  const own=e=>e.operationId===op.id&&e.tabId===tabId&&e.sourceUrl===url;
+  const sends=journal.events.filter(e=>own(e)&&e.kind==='send.dispatched'&&e.requestedText===op.text&&typeof e.text==='string'&&e.text);
+  const requests=journal.events.filter(e=>own(e)&&e.kind==='request.started'&&typeof e.requestId==='string'&&
+    e.requestId&&Number.isFinite(e.eventAt)&&e.eventAt>=op.createdAt);
+  if(sends.length!==1||requests.length!==1)return null;
+  const proof={tabId,url,text:op.text,createdAt:op.createdAt,submittedText:sends[0].text,
+    request:{requestId:requests[0].requestId,startedAt:requests[0].eventAt,url,operationId:op.id}};
+  goalAckProofs.set(op.id,proof);
+  if(goalAckProofs.size>16)goalAckProofs.delete(goalAckProofs.keys().next().value);
+  return proof;
+}
+async function reconcileNativeGoalAcknowledgement(tabId,url) {
+  const record=(await chrome.storage.local.get('chatgpt-goal:'+url))['chatgpt-goal:'+url],op=record?.operation;
+  if(record?.phase!=='blocked'||!op||!['intent','clicked'].includes(op.status)||op.tabId!==tabId)return;
+  const proof=await readGoalAckProof(tabId,url,op);
+  if(!proof)return;
+  return confirmNativeGoalSend({url,tabId,id:record.id,operationId:op.id,
+    requestId:proof.request.requestId,startedAt:proof.request.startedAt});
+}
 async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,startedAt}) {
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
   const sameOperation=value=>value?.id===id&&value.url===url&&value.operation?.id===operationId&&value.operation.tabId===tabId&&
-    ['sending','clicked'].includes(value.phase)&&['intent','clicked'].includes(value.operation.status)&&
+    ['sending','clicked','blocked'].includes(value.phase)&&['intent','clicked'].includes(value.operation.status)&&
     value.operation.text===op?.text&&value.operation.baselineKey===op?.baselineKey&&!value.manualPending&&
     !(value.manualStartedAt>value.operation.createdAt);
   if(!sameOperation(record))return {ok:false,pending:false,error:'Операция Goal изменилась'};
-  const request=await latestRequestReceipt(tabId);
+  const known=await latestRequestReceipt(tabId);
+  const proof=typeof readGoalAckProof==='function'?await readGoalAckProof(tabId,url,op):null;
+  const request=known||proof?.request;
   const matches=known=>known?.operationId===operationId&&known.requestId===requestId&&known.startedAt===startedAt&&typeof requestId==='string'&&requestId&&
     Number.isFinite(startedAt)&&startedAt>=op.createdAt&&(!known.url||ChatGPTGoalPolicy.canonical(known.url)===url);
   if(!matches(request))return {ok:false,pending:true};
@@ -584,11 +610,18 @@ async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,started
       typeof native.userId!=='string'||!native.userId||typeof native.promptKey!=='string'||
       !native.promptKey.startsWith(new URL(url).pathname+'|')||native.promptKey===op.baselineKey||
       !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-startedAt)>10000||
-      (native.userText!==op.text&&native.userVisibleText!==op.text))return {ok:false,pending:true};
-  const current=(await chrome.storage.local.get(key))[key],fresh=await latestRequestReceipt(tabId);
-  if(!sameOperation(current)||!matches(fresh)||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)
+      (native.userText!==op.text&&native.userVisibleText!==op.text&&native.userText!==proof?.submittedText))return {ok:false,pending:true};
+  const current=(await chrome.storage.local.get(key))[key],fresh=await latestRequestReceipt(tabId)||proof?.request;
+  if(!sameOperation(current)||current.phase!==record.phase||!matches(fresh)||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)
     return {ok:false,pending:false,error:'Goal или запрос изменились при подтверждении'};
-  return goalController.report({url,tabId,id,operationId,status:'confirmed',newPromptKey:native.promptKey});
+  const result=await goalController.report({url,tabId,id,operationId,status:'confirmed',newPromptKey:native.promptKey,nativeConfirmed:true});
+  if(result.ok&&typeof goalAckProofs!=='undefined')goalAckProofs.delete(operationId);
+  if(result.ok&&native.turnStatus==='complete'&&native.generating===false&&!native.hasError&&
+      native.assistantCompleted===true&&native.assistantPhase==='final_answer'&&native.assistantKey)
+    await goalController.completion({url,tabId,completionKey:native.promptKey+'|'+native.assistantKey,
+      promptKey:native.promptKey,userId:native.userId,response:native.goalResponse||'',
+      rawExact:native.goalRawExact===true,nativeVerified:true});
+  return result;
 }
 
 async function bindNativeManualSupplement(tabId,url) {
@@ -669,6 +702,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       if(result?.ok===false)return result;
       const url=ChatGPTGoalPolicy.canonical(live);
+      if(message.action==='get'&&url&&typeof reconcileNativeGoalAcknowledgement==='function')
+        await reconcileNativeGoalAcknowledgement(tabId,url);
       return {ok:true,tabId,url:live,record:url?await goalController.get(url):null,
         composer:result?.record||await goalController.composerGet({tabId})};
     })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));return true;
@@ -1131,6 +1166,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
         rawExact:message.goalRawExact,userId:message.goalNativeUserId};
       try {
+        await reconcileNativeGoalAcknowledgement(tabId,sourceUrl);
         await bindNativeManualSupplement(tabId,sourceUrl);
         const armed=await goalController.composerGet({tabId});
         if(armed?.phase==='intent')await bindNativeComposerGoal(tabId,sourceUrl,armed.id);
