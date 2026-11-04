@@ -615,7 +615,7 @@
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
           next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,reason:''};
-        if(['retry.failed','retry.blocked'].includes(kind))
+        if(['retry.failed','retry.blocked','draft.restore_failed'].includes(kind))
           next={...record,phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'};
         if(next===record)return;
         await event('recovery',next,tabId,{recoveryKind:kind});

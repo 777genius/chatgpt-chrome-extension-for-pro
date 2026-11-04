@@ -1045,7 +1045,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return {...event,retryUserId:native.userId};
     };
     prepareEvent().then(verified=>appendJournal(verified,sender.tab)).then(async result=>{
-      if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked'].includes(event.kind)) {
+      if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked','draft.restore_failed'].includes(event.kind)) {
         const observed=event.kind==='retry.confirmed'?await latestRequestReceipt(sender.tab.id):null;
         const confirmedAttempt=observed?.operationId===event.operationId&&Number.isFinite(observed.startedAt)
           ?String(observed.startedAt):event.attemptId;

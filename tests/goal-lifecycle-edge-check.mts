@@ -177,3 +177,11 @@ console.log('Goal lifecycle: handoff pause/resume/failure, legacy binding and fi
  assert.equal(env.state().deadlineAt,before.deadlineAt);assert.equal(env.state().continuations,before.continuations);
  assert.equal(env.messages.length,1,'recovery returns control to the shared retry sender');
 }
+
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|user');
+ await env.store.retry({url:source,tabId:7,kind:'retry.planned',attemptId:'1000000'});
+ assert.equal(env.state().phase,'recovering');
+ await env.store.retry({url:source,tabId:7,kind:'draft.restore_failed',attemptId:'1000000'});
+ assert.equal(env.state().phase,'blocked','failed native cleanup cannot leave Goal pretending recovery is active');
+}
