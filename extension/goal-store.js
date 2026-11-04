@@ -655,6 +655,23 @@
         return {ok:true,record:view(next)};
       });
     }
+    async function handoffPreparationReady({sourceUrl,handoffId,tabId}) {
+      const source=canonical(sourceUrl);
+      if(!source)return {ok:false};
+      return serialize(async()=>{
+        const record=await read(source);
+        if(!record)return {ok:true};
+        if(record.handoffId!==handoffId||record.handoffTabId!==tabId||record.operation||
+            record.pauseRequested||record.stopRequested||record.manualPending||
+            record.preHandoffPhase==='paused'||now()>=record.deadlineAt)return {ok:false};
+        if(record.phase==='handoff')return {ok:true};
+        if(record.phase!=='blocked'||record.reason!=='Передача Goal остановлена: Не удалось дождаться готовности нового чата')return {ok:false};
+        const next={...record,phase:'handoff',reason:''};
+        await event('handoff_preparation_ready',next,tabId,{handoffId});
+        await save(next);
+        return {ok:true};
+      });
+    }
     async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target||!handoffId||!userId||nativeVerified!==true||
@@ -716,7 +733,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,retryPreparation,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,retryPreparation,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

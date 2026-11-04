@@ -310,8 +310,17 @@ function controlChatComposer(options) {
     typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
     effort===options.expectedEffort&&model===options.expectedModel;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
+  const inspectingEmptyHandoff=options.action==='inspect-empty-handoff';
+  if(inspectingEmptyHandoff) {
+    const emptyRoot=location.pathname==='/'&&!root.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"]');
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    if(!emptyRoot||!matches||!ready||prompt!=='')return {...inspection,ok:false};
+    if(!attachments?.children.length)return inspection;
+    // Reuse the exact one-ready-file proof below; never accept user files.
+    if(!options.fileName)return {...inspection,ok:false};
+  }
   if (options.action === 'inspect' && !options.fileName) return inspection;
-  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || !modeMatches)) {
+  if (options.action !== 'inspect' && !inspectingSeed && !inspectingEmptyHandoff && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || !modeMatches)) {
     return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort,model};
   }
   const attachments = composer.querySelector('[data-composer-attachments]');
@@ -327,7 +336,7 @@ function controlChatComposer(options) {
     }
     if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
-  if (options.action === 'inspect' || inspectingSeed) return inspection;
+  if (options.action === 'inspect' || inspectingSeed || inspectingEmptyHandoff) return inspection;
   const button = Array.from(composer.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.

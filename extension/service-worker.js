@@ -351,6 +351,42 @@ chrome.webRequest.onErrorOccurred?.addListener((details) => {
 
 const handoffWrites = new Map();
 function handoffKey(tabId) { return `chatgpt-handoff:${tabId}`; }
+// Recover pre-send readiness/upload timeouts only into an empty native root.
+// Send intents and unknown clicks remain terminal; reuse the original sender.
+async function recoverHandoffReadiness(tabId, expected) {
+  const prior=handoffWrites.get(tabId)||Promise.resolve();
+  const write=prior.catch(()=>{}).then(async()=>{
+    const key=handoffKey(tabId),current=(await chrome.storage.local.get(key))[key];
+    if(current?.id!==expected.id||current.stage!=='failed'||
+        current.reason!=='Не удалось дождаться готовности нового чата'||current.sendReceipt||
+        (current.preparationRecoveries||0)>=3)return current;
+    const tab=await chrome.tabs.get(tabId);
+    if(tab.url!=='https://chatgpt.com/'||tab.status!=='complete'||(current.targetUrl&&current.targetUrl!==tab.url))return current;
+    const journal=await readJournal();
+    if(!journal.ok||journal.storageError)return current;
+    const events=journal.events.filter(e=>e.operationId===current.id);
+    if(!events.some(e=>e.kind==='handoff.navigating'&&e.sourceUrl===current.sourceUrl)||
+        events.some(e=>e.kind==='handoff.sending'||e.kind==='handoff.sent'||e.kind==='handoff.awaiting-confirmation'||
+          e.kind==='handoff.clicked'||e.kind.startsWith('send.')||e.kind==='request.started')||
+        journal.events.some(e=>e.tabId===tabId&&e.kind==='request.started'&&e.recordedAt>=current.createdAt))return current;
+    const [probe]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+      func:controlChatComposer,args:[{action:'inspect-empty-handoff',text:'',url:tab.url,fileName:current.asFile?current.fileName:null}]});
+    if(probe?.result?.ok!==true)return current;
+    // Storage, URL and Goal fences are checked again after the native probe.
+    const latest=(await chrome.storage.local.get(key))[key];
+    if(latest?.id!==current.id||latest.stage!=='failed'||(await chrome.tabs.get(tabId)).url!==tab.url)return latest;
+    const goal=await goalController.handoffPreparationReady({sourceUrl:current.sourceUrl,handoffId:current.id,tabId});
+    if(!goal.ok)return current;
+    const record={...current,stage:'navigating',reason:'',preparationRecoveries:(current.preparationRecoveries||0)+1};
+    await appendJournal({kind:'handoff.preparation_recovered',operationId:current.id,
+      sourceUrl:current.sourceUrl,targetUrl:tab.url,recoveries:record.preparationRecoveries},{id:tabId});
+    await chrome.storage.local.set({[key]:record});
+    return record;
+  });
+  handoffWrites.set(tabId,write);
+  try{return await write;}finally{if(handoffWrites.get(tabId)===write)handoffWrites.delete(tabId);}
+}
+
 async function handleHandoffMessage(message, tabId) {
   const key = handoffKey(tabId);
   if (message.type === 'CHATGPT_HANDOFF_GET') {
@@ -360,7 +396,10 @@ async function handleHandoffMessage(message, tabId) {
     // to resume its native handoff. Never redeliver a send intent.
     const pending=handoffWrites.get(tabId);
     if(pending)await pending.catch(()=>{});
-    const saved=(await chrome.storage.local.get(key))[key]||null;
+    let saved=(await chrome.storage.local.get(key))[key]||null;
+    if(saved?.stage==='failed'&&saved.reason==='Не удалось дождаться готовности нового чата')
+      saved=await recoverHandoffReadiness(tabId,saved);
+
     if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation'].includes(saved.stage))
       await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
     if(saved?.id&&['sent','failed'].includes(saved.stage)) {

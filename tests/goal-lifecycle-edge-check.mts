@@ -148,3 +148,19 @@ function fixture() {
 }
 
 console.log('Goal lifecycle: handoff pause/resume/failure, legacy binding and finite manual-resume budget passed.');
+
+// Readiness recovery preserves the exact Goal and budget; explicit controls win.
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|user');
+ await env.store.handoffBegin({sourceUrl:source,handoffId:'ready-handoff',tabId:7});
+ await env.store.handoffFailed({sourceUrl:source,handoffId:'ready-handoff',tabId:7,reason:'Не удалось дождаться готовности нового чата'});
+ const before=structuredClone(env.state());
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'other',tabId:7})).ok,false);
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:8})).ok,false);
+ const recovered=await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:7});
+ assert.equal(recovered.ok,true);assert.equal(env.state().phase,'handoff');
+ for(const key of ['goal','deadlineAt','continuations','id','maxContinuations'])assert.equal(env.state()[key],before[key]);
+ assert.equal(env.messages.length,1,'preparation recovery never dispatches a Goal message');
+ env.state().pauseRequested=true;
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:7})).ok,false);
+}

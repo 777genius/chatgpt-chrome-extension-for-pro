@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.33';
+  const SCRIPT_VERSION = '1.8.34';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -16,6 +16,7 @@
   let goalDispatchBusy = false;
   let goalDispatchQueue = Promise.resolve();
   let completionRecoveryTimer = null;
+  let handoffReadinessTimer = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
   const answerWaitSlot = ChatGPTNotifierMemory.createLatestTaskSlot();
@@ -32,6 +33,8 @@
     inlineGoal?.dispose();
     deferredTaskObserver?.dispose();
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
+    if(handoffReadinessTimer!==null)clearTimeout(handoffReadinessTimer);
+    handoffReadinessTimer=null;
     manualSendIntent = null;
     listeners.abort();
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
@@ -1050,6 +1053,7 @@
       }
     } finally {
       handoffBusy = false;
+      scheduleHandoffReadiness();
     }
   }
 
@@ -1184,6 +1188,16 @@
     }
   }
 
+  function scheduleHandoffReadiness() {
+    if(handoffReadinessTimer!==null||handoffRecord?.stage!=='failed'||
+        handoffRecord.reason!=='Не удалось дождаться готовности нового чата'||
+        (handoffRecord.preparationRecoveries||0)>=3)return;
+    handoffReadinessTimer=setTimeout(()=>{
+      handoffReadinessTimer=null;
+      if(runtimeAvailable())void resumeSavedHandoff();
+    },300000);
+  }
+
   async function resumeSavedHandoff() {
     try {
       const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_GET' });
@@ -1196,6 +1210,7 @@
         await submitHandoff();
       }
     } catch {}
+    finally {scheduleHandoffReadiness();}
   }
 
   async function renameHandoff() {

@@ -126,3 +126,32 @@ assert.equal(control({text:'Prepared history',expectedEffort:'medium'}).ok,false
 assert.equal(clicks,beforeModelGuard);
 assert.equal(control({text:'Prepared history',expectedEffort:'medium',expectedModel:'gpt-6-pro'}).clicked,true);
 assert.equal(clicks,beforeModelGuard+1);
+
+// A late root-page recovery is read-only and requires exact native emptiness.
+runInContext("location.href='https://chatgpt.com/';location.pathname='/'",ctx);
+richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});
+richController.getPlainText=()=>'';editor.textContent='';
+const emptyRoot=()=>control({action:'inspect-empty-handoff',text:'',url:'https://chatgpt.com/'});
+const beforeRootInspection=clicks;
+assert.equal(emptyRoot().ok,true);
+pending={queued:true};assert.equal(emptyRoot().ok,false);pending=null;
+ready=false;assert.equal(emptyRoot().ok,false);ready=true;
+richController.getChatGptPrompt=()=>({prompt:'hidden draft',systemHints:[]});assert.equal(emptyRoot().ok,false);
+richController.getChatGptPrompt=()=>({prompt:'',systemHints:['owner context']});assert.equal(emptyRoot().ok,false);
+richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});
+document.querySelector('[data-composer-body]')!.append(attachment);assert.equal(emptyRoot().ok,false);attachment.remove();
+const turn=document.createElement('div');turn.setAttribute('data-message-author-role','user');
+document.querySelector('[data-app-shell-active-page]')!.append(turn);assert.equal(emptyRoot().ok,false);turn.remove();
+runInContext("location.pathname='/c/already-saved'",ctx);assert.equal(emptyRoot().ok,false);
+assert.equal(clicks,beforeRootInspection,'late readiness inspection never clicks');
+
+runInContext("location.pathname='/'",ctx);
+attachment.innerHTML='<span>history.txt</span>';
+historyFile.status='ready';
+(attachment.firstElementChild as any).__reactFiber$readiness={memoizedProps:{attachment:historyFile}};
+document.querySelector('[data-composer-body]')!.append(attachment);
+const uploadedRoot=()=>control({action:'inspect-empty-handoff',text:'',url:'https://chatgpt.com/',fileName:'history.txt'});
+assert.equal(uploadedRoot().ok,true,'exact one ready recovery file may finish uploading after the timeout');
+historyFile.status='uploading';assert.equal(uploadedRoot().ok,false);historyFile.status='ready';
+attachment.append(extra);assert.equal(uploadedRoot().ok,false,'owner file alongside history blocks recovery');
+assert.equal(clicks,beforeRootInspection);
