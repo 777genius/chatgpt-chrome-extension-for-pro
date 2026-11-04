@@ -153,8 +153,9 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 {
   const f=fixture('https://chatgpt.com/',false,false,false,true);await tick();
   assert.equal(f.toggle().disabled,false);assert.equal(f.toggle().getAttribute('aria-checked'),'false');
-  assert.match(f.toggle().title,/Retry loading/);assert.equal(f.panel().hidden,false);
-  assert.match(f.panel().textContent!,/Initial Goal load failed/);
+  assert.match(f.toggle().title,/Retry loading/);
+  assert.equal(f.document.querySelector('[data-chatgpt-goal-inline=panel]'),null,'background failure must not open settings');
+  assert.match(f.toggle().getAttribute('aria-description')||'',/Initial Goal load failed/);
   const count=f.calls.length;f.toggle().click();await tick();assert.equal(f.calls.length,count,'untrusted input cannot retry');
   const pending=deferred<Result>();f.respond(()=>pending.promise);f.click(f.toggle());
   assert.equal(f.calls.at(-1)!.action,'get');assert.equal(f.toggle().disabled,true);
@@ -164,6 +165,9 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.ok(f.calls.every(value=>value.action==='get'),'successful retry does not also arm');
   f.respond(null);f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'arm');
   assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);f.instance.dispose();
+  const h=fixture(chat,false,false,false,true);await tick();
+  h.details().click();assert.equal(h.panel().hidden,false);
+  assert.match(h.panel().textContent!,/Initial Goal load failed/);h.instance.dispose();
   const g=fixture(chat,false,false,false,true);await tick();g.setRecord(goal());g.click(g.toggle());await tick();
   assert.equal(g.toggle().getAttribute('aria-checked'),'true','retry reflects existing active Goal');
   assert.ok(g.calls.every(value=>value.action==='get'),'unknown state never grants Stop or Arm');g.instance.dispose();

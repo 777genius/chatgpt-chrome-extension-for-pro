@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.47';
+  const SCRIPT_VERSION = '1.8.48';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -1437,13 +1437,15 @@
         if (!runtimeAvailable()) { stopContext(); return; }
         if (!isCurrent()) { finish(null); return; }
         lastCheckAt = performance.now();
+        const snapshot=latestPromptSnapshot();
         if (currentErrors().length) {
           checkErrors();
-          finish(null);
+          // Request-start can precede mounting its new user turn. A retained
+          // baseline error must not retire the new completion observer.
+          if(attempt.promptKey&&snapshot?.promptKey===attempt.promptKey)finish(null);
           return;
         }
 
-        const snapshot=latestPromptSnapshot();
         if(!attempt.promptKey&&snapshot){
           const bound=bindAttemptPrompt(attempt,{...snapshot,url:attempt.url,attemptId:globalThis.__chatgptNotifierAttemptId});
           if(bound){attempt.promptKey=bound.promptKey;persistCompletionAttempt(attempt);void audit('completion.bound',{promptKey:attempt.promptKey,startedAt:attempt.startedAt});}

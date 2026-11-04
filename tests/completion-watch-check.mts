@@ -25,6 +25,7 @@ const event=new window.Event('click',{bubbles:true});Object.defineProperty(event
 document.querySelector('[data-testid=send-button]')!.dispatchEvent(event);
 runInContext(`globalThis.__chatgptNotifierAttemptId='1000000';globalThis.__chatgptNotifierRequestStartedAt=1000000`,context);
 listener({type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:1000000});
+document.querySelector('main')!.insertAdjacentHTML('beforeend','<aside role="alert" class="text-danger">Prior request error<button>Retry</button></aside>');
 await new Promise(r=>setTimeout(r,70));
 assert.equal(messages.length,0,'old complete response cannot complete the new request before its user turn mounts');
 document.querySelector('main')!.insertAdjacentHTML('beforeend','<article data-testid="conversation-turn-2" data-turn="user">new</article><article data-testid="conversation-turn-3" data-turn="assistant">final</article>');

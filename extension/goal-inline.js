@@ -347,7 +347,6 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
         loaded=false;error='Goal: '+String(cause?.message||cause);
-        if(controls.isConnected)show(true,false);
       } finally {
         if(accepts(url,revision,serial)){loading=false;render();}
       }
