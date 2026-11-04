@@ -16,16 +16,17 @@ async function fixture(extra:any={}) {
  const appendJournal=async(e:any)=>{writes++;state={...state,blocked:false,preparationRecovered:true};events.push(e);};
  const chrome={tabs:{get:async()=>({url:extra.url||url,status:extra.status||'complete'})},scripting:{executeScript:async(o:any)=>{
   calls++;
+  if(o.func?.name==='restoreNoClickAttemptBinding')return [{result:extra.bindingRace!==true}];
   if(o.func===inspectCompletedTurn)return [{result:native}];
   if(o.func===inspectChatError)return [{result:{action:extra.action||'retry'}}];
   if(o.func===controlChatComposer)return [{result:{ok:extra.empty!==false}}];
-  return [{result:{attemptId:extra.runtimeAttempt||attemptId,requestId:'request'}}];
+  return [{result:extra.runtimeEmpty?{}:{attemptId:extra.runtimeAttempt||attemptId,requestId:'request'}}];
  }}};
  function inspectCompletedTurn(){}function inspectChatError(){}function controlChatComposer(){}
  const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn',
   code+';return recoverNoClickRetry;')(
   async()=>structuredClone(state),async()=>extra.draftRecord|| (extra.draft?{draft:'owner'}:null),async()=>({ok:true,storageError:'',events}),chrome,
-  {get:async()=>extra.goal||null,retry:async()=>{goalCalls++;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url,promptKey,startedAt:1000000,requestId:'request',httpCompleted:extra.httpCompleted!==false}),async()=>native);
+  {get:async()=>extra.goal||null,retry:async()=>{goalCalls++;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url,promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false}),async()=>native);
  const result=await fn(7,url);return {result,writes,calls,goalCalls,fn};
 }
 const safe=await fixture();assert.equal(safe.writes,1);assert.equal(safe.result.blocked,false);
@@ -68,3 +69,9 @@ assert.equal((await fixture({draftRecord:carry,native:{generating:true,nativeCon
 
 ctx.state={[new URL(url).pathname.split('/').at(-1)!]:recovered};ctx.event={kind:'retry.confirmed',sourceUrl:url};
 assert.equal(runInContext('reduceRetrySummary(state,event)',ctx)[new URL(url).pathname.split('/').at(-1)!].preparationDraftOperationId,null,'a confirmed retry retires the carry reference');
+
+assert.equal((await fixture({runtimeEmpty:true,draftRecord:carry,native:{generating:false,nativeConversationInactive:true}})).writes,1,'restart restores only the failed durable request with positive native idle evidence');
+assert.equal((await fixture({runtimeEmpty:true,draftRecord:carry,bindingRace:true,native:{generating:false,nativeConversationInactive:true}})).writes,0);
+assert.equal((await fixture({runtimeEmpty:true,draftRecord:carry,native:{generating:true,nativeConversationInactive:true}})).writes,0);
+
+assert.equal((await fixture({runtimeEmpty:true,noTransportFailure:true,draftRecord:carry,native:{generating:false,nativeConversationInactive:true}})).writes,0,'an absent runtime alone never authorizes retry recovery');
