@@ -375,7 +375,10 @@ function appendJournal(event, tab = {}) {
     const clearsRetry=(exactGrant||resetRetry)&&currentSend?.kind==='retry.send_intent'&&
       ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
     const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&
-      ['handoff.sent','handoff.failed'].includes(event.kind);
+      (['handoff.sent','handoff.failed'].includes(event.kind)||event.kind==='handoff.superseded'&&
+        event.nativeVerified===true&&typeof event.manualRequestId==='string'&&event.manualRequestId&&
+        Number.isFinite(event.manualStartedAt)&&event.manualStartedAt>currentSend.at&&
+        typeof event.userId==='string'&&event.userId&&typeof event.promptKey==='string'&&event.promptKey);
     // A closed tab is not evidence that its message was never clicked.
     // Preserve unresolved Goal locks for other tabs opening the same chat.
     if((event.kind==='tab.closed'&&currentSend?.kind!=='goal.send_intent')||

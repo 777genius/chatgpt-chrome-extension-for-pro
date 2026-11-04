@@ -82,18 +82,27 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   }
   let recoveryTimeline=null;
   if(historicalUserIndex!==null) {
-    const timeline=[];
+    const timeline=[],seenUserIds=new Set();
     let complete=true;
     for(const candidate of nativeEntries) {
       const items=(candidate.turn?.items||[]).filter(item=>item.type==='user-message');
       const times=(candidate.timestampTurns||[]).filter(item=>item.role==='user');
-      if(items.length!==times.length||candidate.isReadOnly!==false||typeof entry.conversationId!=='string'||
+      if(items.length!==times.length||typeof candidate.id!=='string'||!candidate.id||candidate.isReadOnly!==false||typeof entry.conversationId!=='string'||
           !entry.conversationId||candidate.conversationId!==entry.conversationId){complete=false;break;}
       const row=turns.find(node=>(node.getAttribute('data-content-search-turn-key')||node.getAttribute('data-testid'))===candidate.id);
       const dom=Array.from(row?.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]')||[]);
+      // Historical rows can be virtualized while their exact native entries
+      // remain in this conversation. This is timeline metadata only; the
+      // selected/current user still needs its ordinary mounted DOM binding.
+      const virtualized=!dom.length&&candidate!==nativeEntries.at(-1)&&candidate.isMostRecentTurn!==true;
+      if(!virtualized&&dom.length!==items.length){complete=false;break;}
       for(let i=0;i<items.length;i++) {
-        const key=dom[i]?.getAttribute('data-testid')||dom[i]?.getAttribute('data-chatgpt-search-unit-key');
-        if(!key||!items[i].messageId||typeof items[i].message!=='string'||!Number.isFinite(times[i]?.sentAtMs)) {complete=false;break;}
+        const nativeKey=candidate.id+':'+candidate.turn.items.indexOf(items[i])+':user';
+        const key=virtualized?nativeKey:dom[i]?.getAttribute('data-testid')||dom[i]?.getAttribute('data-chatgpt-search-unit-key');
+        const ids=new Set((dom[i]?.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
+        if(key!==nativeKey||typeof items[i].messageId!=='string'||!items[i].messageId||seenUserIds.has(items[i].messageId)||typeof items[i].message!=='string'||!Number.isFinite(times[i]?.sentAtMs)||
+            ids.size&&(ids.size!==1||!ids.has(items[i].messageId))) {complete=false;break;}
+        seenUserIds.add(items[i].messageId);
         timeline.push({userId:items[i].messageId,userText:items[i].message,userSentAtMs:times[i].sentAtMs,
           promptKey:location.pathname+'|'+key});
       }
@@ -190,6 +199,8 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     // fallback Markdown only when that reference is the entire native body;
     // surrounding prose/code and missing fallback parts must remain non-exact.
     const references=assistant?.contentReferences;
+    const wholeReference=/^::chatgpt-content-reference\{[^{}]+\}$/.test(goalResponse);
+    const rawMarkerCandidate=/^GOAL(?:\\+)?_(?:COMPLETE|BLOCKED)$/.test(goalResponse);
     if(/^::chatgpt-content-reference\{[^{}]+\}/.exec(goalResponse)?.[0]===goalResponse&&
         Array.isArray(references)&&references.length&&
         references.every(ref=>typeof ref?.model_dil_v2?.fallbackMarkdown==='string')) {
@@ -234,9 +245,13 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
       }
     }
     const sentAtMs=(historicalUserIndex===null?userTimes.at(-1):userTimes[historicalUserIndex])?.sentAtMs;
+    const terminalCandidate=rawMarkerCandidate||wholeReference&&(
+      /^GOAL(?:\\+)?_(?:COMPLETE|BLOCKED)$/.test(goalResponse)||
+      /^::chatgpt-content-reference\{[^{}]+\}$/.test(goalResponse)&&['GOAL_COMPLETE','GOAL_BLOCKED'].includes(rendered?.textContent));
+    const goalMarkerPending=!goalRawExact&&Boolean(terminalCandidate);
     goalText={userText:typeof user.message==='string'?user.message:'',userVisibleText,userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
       ...(historicalUserIndex!==null?{recoveryTimeline}:{}),
-      goalResponse,goalRawExact};
+      goalResponse,goalRawExact,goalMarkerPending};
   }
   // Failure rollback is separate from completion. Require the real idle
   // voice control AND its native editor controller; absence of Stop is unsafe.

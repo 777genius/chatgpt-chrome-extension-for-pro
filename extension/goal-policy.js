@@ -44,12 +44,12 @@
     return (record.supplements||[]).map((item,index)=>'Дополнение пользователя '+(index+1)+':\n'+item.userText);
   }
   function continuationText(record) {
-    return [CONTINUATION,'Исходная цель:',record.goal,...supplementsText(record),
+    return [CONTINUATION,'Исходная цель:',record.goal,...(record.sourceContexts||[]).map(x=>'Сохранённый контекст предыдущего чата '+x.url+' (история, не новая цель):\n'+x.text),...supplementsText(record),
       ...(record.rules?['Условия завершения:',record.rules]:[])].join('\n\n');
   }
   function handoffText(record) {
     return ['--- Активная цель расширения (не отчёт о выполнении) ---',
-      record.goal,...supplementsText(record),...(record.rules?[record.rules]:[]),
+      record.goal,...(record.sourceContexts||[]).map(x=>'История предыдущего чата '+x.url+':\n'+x.text),...supplementsText(record),...(record.rules?[record.rules]:[]),
       'Продолжений подтверждено: '+record.continuations+' из '+record.maxContinuations+'.',
       'Не считай перенос чата выполнением цели. '+CONTINUATION].join('\n\n');
   }

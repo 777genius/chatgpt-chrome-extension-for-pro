@@ -146,6 +146,34 @@
         return {ok:true,record};
       });
     }
+    async function composerObserveOrigin({tabId,armId,url,requestId,startedAt,userId,userText,userSentAtMs,firstMessageVerified,nativeVerified}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{
+        const current=await readComposer(tabId),witness=current?.request?.submission;
+        if(current?.id!==armId||current.phase!=='intent'||current.request?.requestId!==requestId||
+            current.request.startedAt!==startedAt||!witness||witness.userId!==userId||witness.userText!==userText||
+            !policy.submittedTextMatches(current.intent?.text,userText,null)||nativeVerified!==true||firstMessageVerified!==true||
+            !Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)return {ok:false};
+        const proof={url:target,requestId,startedAt,userId,userSentAtMs};
+        if(current.originProof)return {ok:JSON.stringify(current.originProof)===JSON.stringify(proof)};
+        await storage.set({[composerKey(tabId)]:{...current,originProof:proof}});return {ok:true};
+      });
+    }
+    async function composerFollowup({tabId,requestId,startedAt,url,submission}) {
+      requireTab(tabId);const target=canonical(url);
+      return serialize(async()=>{
+        const current=await readComposer(tabId);
+        if(current?.phase!=='intent'||!current.request||current.request.requestId===requestId||
+            !target||typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||startedAt<=current.request.startedAt||
+            typeof submission?.userId!=='string'||!submission.userId||typeof submission?.userText!=='string'||
+            !submission.userText.trim()||submission.userText.length>10000)return {ok:false};
+        const next={url:target,requestId,startedAt,userId:submission.userId,userText:submission.userText};
+        const saved=current.sentFollowups||[],prior=saved.find(x=>x.requestId===requestId);
+        if(prior)return {ok:JSON.stringify(prior)===JSON.stringify(next)};
+        if(saved.length>=100){await storage.set({[composerKey(tabId)]:{...current,followupOverflow:true}});return {ok:false};}
+        await storage.set({[composerKey(tabId)]:{...current,sentFollowups:[...saved,next]}});return {ok:true};
+      });
+    }
     async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,firstTurn,nativeVerified,recovery}) {
       requireTab(tabId);
       const target=requireUrl(url);
@@ -217,7 +245,7 @@
     // A fresh explicit user action can restore the saved objective without
     // pretending that the missing original message has been acknowledged.
     // Automatic restoration additionally needs an exact submitted-body witness.
-    async function composerRestore({tabId,armId,url,expectedComposer,requestId,startedAt,supplements,
+    async function composerRestore({tabId,armId,url,expectedComposer,requestId,startedAt,supplements,anchor=null,originUrl=null,priorSupplements=[],sourceContexts=[],
         nativeVerified,userConfirmed=false,requestBodyConfirmed=false}) {
       requireTab(tabId);const target=requireUrl(url);
       return serialize(async()=>{
@@ -228,7 +256,7 @@
             !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
             !(userConfirmed===true||requestBodyConfirmed===true&&request.submission&&
               policy.submittedTextMatches(intent.text,request.submission.userText,null))||
-            !Array.isArray(supplements)||!supplements.length||supplements.length>100)
+            !Array.isArray(supplements)||(!supplements.length&&!anchor)||supplements.length>100)
           throw Error('Восстановление сохранённой цели не подтверждено');
         if(await read(target)||(await storage.get(composerBindingKey(armId)))[composerBindingKey(armId)])
           throw Error('В этом чате уже есть Goal или прежняя привязка');
@@ -243,16 +271,26 @@
             throw Error('Отправленные дополнения к сохранённой цели не подтверждены');
           previous=item.startedAt;ids.add(item.userId);requests.add(item.requestId);
         }
-        const last=supplements.at(-1),deadlineAt=startedAt+current.config.maxMinutes*60000;
+        if(!Array.isArray(priorSupplements)||!Array.isArray(sourceContexts)||priorSupplements.length>100||sourceContexts.length>20||
+            sourceContexts.some(x=>!canonical(x.url)||typeof x.text!=='string'||x.text.length>200000)||
+            priorSupplements.some(x=>!canonical(x.url)||typeof x.requestId!=='string'||!x.requestId||typeof x.userText!=='string'||!x.userText.trim()||!Number.isFinite(x.startedAt)))throw Error('Контекст прежних чатов не подтверждён');
+        const last=anchor||supplements.at(-1);
+        if(anchor&&(!anchor.automatic||typeof anchor.operationId!=='string'||!anchor.operationId||
+            typeof anchor.userId!=='string'||!anchor.userId||typeof anchor.requestId!=='string'||!anchor.requestId||
+            !Number.isFinite(anchor.startedAt)||anchor.startedAt<=startedAt||!Number.isFinite(anchor.userSentAtMs)||
+            Math.abs(anchor.startedAt-anchor.userSentAtMs)>10000||typeof anchor.userText!=='string'||!anchor.userText.trim()||
+            typeof anchor.promptKey!=='string'||!anchor.promptKey.startsWith(new URL(target).pathname+'|')||
+            supplements.some(s=>s.startedAt>anchor.startedAt)))throw Error('Текущий автоматический ответ не подтверждён');
+        const deadlineAt=startedAt+current.config.maxMinutes*60000;
         const binding={url:target,requestId,startedAt,restored:true,
           confirmation:userConfirmed?'explicit-user':'request-body',anchorUserId:last.userId};
-        const next={schema:1,id:armId,url:target,originUrl:target,goal:intent.text,rules:current.config.rules,
+        const next={schema:1,id:armId,url:target,originUrl:canonical(originUrl)||target,goal:intent.text,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
           startedAt,manualStartedAt:last.startedAt,deadlineAt,phase:now()>=deadlineAt?'stopped':'waiting',
           reason:now()>=deadlineAt?'Время Goal истекло':'',continuations:0,expectedPromptKey:last.promptKey,
           lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
-          supplements:supplements.map(s=>({...s,text:s.userText,tabId,eventAt:Math.min(s.startedAt,s.userSentAtMs)})),
-          manualSupplementBinding:last,handoffPending:false,handoffId:null,operation:null,restoredIntent:binding};
+          supplements:[...priorSupplements.map(s=>({...s,text:s.userText,tabId,eventAt:s.startedAt})),...supplements.map(s=>({...s,text:s.userText,tabId,eventAt:Math.min(s.startedAt,s.userSentAtMs)}))],sourceContexts,
+          manualSupplementBinding:last.automatic?null:last,restoredAnchor:last.automatic?last:null,handoffPending:false,handoffId:null,operation:null,restoredIntent:binding};
         await event('composer_restored',next,tabId,{requestId,startedAt,confirmation:binding.confirmation,anchorUserId:last.userId});
         await storage.set({[key(target)]:next,[composerKey(tabId)]:{...current,phase:'bound',binding},
           [composerBindingKey(armId)]:{...binding,tabId}});
@@ -583,7 +621,7 @@
         await save(next);return {ok:true,record:view(next)};
       });
     }
-    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
+    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false}) {
       const target=canonical(url);
       if(!target||typeof completionKey!=='string'||!completionKey||typeof promptKey!=='string'||
           !completionKey.startsWith(promptKey+'|')||typeof response!=='string')return {ok:false};
@@ -594,8 +632,9 @@
           const pending=record.manualPending;
           if(nativeVerified!==true||pending.tabId!==tabId||promptKey===pending.baselineKey||!promptKey.startsWith(new URL(target).pathname+'|')||!userId)return {ok:false};
           const saved=buffered(record,'manualEarlyCompletions','manualEarlyCompletion');
-          if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
-          const next={...record,manualEarlyCompletion:null,manualEarlyCompletions:[...saved,{url:target,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}].slice(-6)};
+          const previous=saved.find(item=>item.completionKey===completionKey);
+          if(previous&&!previous.nativeMarkerPending)return {ok:false};
+          const next={...record,manualEarlyCompletion:null,manualEarlyCompletions:[...saved.filter(item=>item.completionKey!==completionKey),{url:target,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending}].slice(-6)};
           await event('manual_completion_staged',next,tabId,{completionKey,promptKey});await save(next);return {ok:true,staged:true};
         }
         if(['sending','clicked'].includes(record.phase)&&record.operation?.tabId===tabId&&
@@ -603,10 +642,11 @@
             promptKey!==record.operation.baselineKey&&
             promptKey.startsWith(new URL(target).pathname+'|')&&typeof userId==='string'&&userId) {
           const saved=buffered(record,'earlyCompletions','earlyCompletion');
-          if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
+          const previous=saved.find(item=>item.completionKey===completionKey);
+          if(previous&&!previous.nativeMarkerPending)return {ok:false};
           const next={...record,earlyCompletion:null,
-            earlyCompletions:[...saved,{url:target,tabId,completionKey,promptKey,response,
-              nativeVerified,rawExact,userId}].slice(-6)};
+            earlyCompletions:[...saved.filter(item=>item.completionKey!==completionKey),{url:target,tabId,completionKey,promptKey,response,
+              nativeVerified,rawExact,userId,nativeMarkerPending}].slice(-6)};
           await event('completion_staged',next,tabId,{completionKey,promptKey});
           await save(next);
           return {ok:true,staged:true};
@@ -615,8 +655,18 @@
             (!record.handoffPending&&record.expectedPromptKey!==promptKey)||
             (record.handoffPending&&(!record.handoffAcceptedUserId||userId!==record.handoffAcceptedUserId)))
           return {ok:false};
+        if(nativeMarkerPending===true&&nativeVerified===true&&rawExact!==true&&!record.stopRequested&&
+            now()<record.deadlineAt) {
+          const markerPending={url:target,tabId,completionKey,promptKey,userId:userId||null,observedAt:now()};
+          const previous=record.markerPending;
+          if(!previous||previous.completionKey!==completionKey||previous.promptKey!==promptKey) {
+            await event('marker_pending',record,tabId,{completionKey,promptKey,userId:userId||null});
+            await save({...record,markerPending});
+          }
+          return {ok:false,pendingMarker:true};
+        }
         const outcome=policy.decision(record,response,rawExact,nativeVerified,now());
-        let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
+        let next={...record,markerPending:null,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
           handoffPending:false,earlyCompletion:null,earlyCompletions:[]};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
         else if(outcome==='blocked')next={...next,phase:'blocked',reason:'Модель ответила точным маркером GOAL_BLOCKED',pendingCompletion:null};
@@ -631,7 +681,7 @@
         return {ok:true,record:next,dispatch:next.phase==='preparing'};
       });
       if(result.dispatch)await deliver(result.record);
-      return {ok:result.ok,record:view(await getRaw(target))};
+      return {ok:result.ok,...(result.pendingMarker?{pendingMarker:true}:{}),record:view(await getRaw(target))};
     }
     async function manual({url,tabId,startedAt,requestId,eventAt,text,baselineKey}) {
       const target=canonical(url);
@@ -654,7 +704,7 @@
           if(startedAt<=(record.manualStartedAt||0))return {ok:false};
           const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
           const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,
-            manualPending:{tabId,requestId,startedAt,eventAt,text,baselineKey},manualOverride:false,
+            manualPending:{tabId,requestId,startedAt,eventAt,text,baselineKey},manualOverride:false,markerPending:null,
             pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
             ...(!inFlight?{operation:null}:{}),reason:'Подтверждается отправленное дополнение к цели'};
           await event('manual_supplement_pending',next,tabId,{requestId,startedAt,eventAt,text,baselineKey});
@@ -691,7 +741,7 @@
         const early=buffered(old,'manualEarlyCompletions','manualEarlyCompletion').find(item=>item.userId===userId&&item.promptKey===promptKey)||null;
         const fenced=!!old.operation||old.phase==='blocked',paused=old.phase==='paused'||old.pauseRequested;
         const next={...old,supplements:[...(old.supplements||[]),supplement],manualPending:null,manualSupplementBinding:supplement,
-          expectedPromptKey:promptKey,handoffPending:false,manualEarlyCompletion:null,manualEarlyCompletions:[],
+          expectedPromptKey:promptKey,handoffPending:false,markerPending:null,manualEarlyCompletion:null,manualEarlyCompletions:[],
           earlyCompletion:early,phase:fenced?old.phase:paused?'paused':'waiting',
           reason:fenced?old.reason:paused?'Приостановлено пользователем':''};
         await event('manual_supplement_bound',next,tabId,{requestId,startedAt,promptKey,userId,text:userText,intentText:pending.text});
@@ -782,7 +832,7 @@
         return {ok:true};
       });
     }
-    async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
+    async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target||!handoffId||!userId||nativeVerified!==true||
           !completionKey?.startsWith(promptKey+'|')||
@@ -791,13 +841,14 @@
         const old=await read(source);
         if(!old||old.phase!=='handoff'||old.handoffId!==handoffId)return {ok:false};
         const saved=buffered(old,'handoffEarlyCompletions','handoffEarlyCompletion');
-        if(saved.some(item=>item.completionKey===completionKey))return {ok:false};
+        const previous=saved.find(item=>item.completionKey===completionKey);
+        if(previous&&!previous.nativeMarkerPending)return {ok:false};
         // Native acceptance may arrive *after* the answer. Never evict its
         // candidate because later unrelated turns completed in the same tab.
         // Keep one compact final proof per native user id; no assistant text is
         // needed beyond the exact marker for policy.decision().
         const compact={url:target,tabId,completionKey,promptKey,
-          response:policy.terminalMarker(response,rawExact,nativeVerified)?response:'',nativeVerified,rawExact,userId};
+          response:policy.terminalMarker(response,rawExact,nativeVerified)?response:'',nativeVerified,rawExact,userId,nativeMarkerPending};
         const index=saved.findIndex(item=>item.userId===userId);
         const candidates=index<0?[...saved,compact]:saved.map((item,i)=>i===index?compact:item);
         if(candidates.length>256) {
@@ -843,7 +894,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,composerRestore,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

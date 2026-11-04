@@ -200,6 +200,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
     return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages,incomplete:interference==='history-loading'&&++historyInspections<3};
    }
+   if(m.type==='CHATGPT_HANDOFF_SUCCESSOR')return {ok:true,record:stored};
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
     if(m.type==='CHATGPT_HANDOFF_BEGIN'){begins++;assert.equal(loc.href,originalURL,'backup must precede navigation');}
     if(m.type==='CHATGPT_HANDOFF_UPDATE')updates.push(m.stage);

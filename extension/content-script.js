@@ -28,15 +28,37 @@
   let visibleErrors = new Set();
   let errorScanTimer = null;
   let errorObserver = null;
+  let goalRecoveryTimer=null,goalRecoveryBusy=false,goalRecoveryAgain=false,goalRecoveryPath='',goalRecoveryFirstAt=0;
   function runtimeAvailable() {
     try { return contextAlive && Boolean(chrome.runtime?.id); } catch { return false; }
   }
+  async function recoverGoalState() {
+    if(!runtimeAvailable())return;
+    if(goalRecoveryBusy){goalRecoveryAgain=true;return;}
+    if(goalRecoveryTimer!==null)clearTimeout(goalRecoveryTimer);goalRecoveryTimer=null;
+    const path=location.pathname;
+    if(goalRecoveryPath!==path||!goalRecoveryFirstAt){goalRecoveryPath=path;goalRecoveryFirstAt=Date.now();}
+    goalRecoveryBusy=true;
+    try {
+      const result=await runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
+      if(!runtimeAvailable())return;
+      if(location.pathname!==path){goalRecoveryAgain=true;return;}
+      if(result?.pending===true&&result.canRetry===true)
+        goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState();},Date.now()-goalRecoveryFirstAt<30000?5000:300000);
+      else goalRecoveryFirstAt=0;
+    }catch{}finally{
+      goalRecoveryBusy=false;
+      if(goalRecoveryAgain&&runtimeAvailable()){goalRecoveryAgain=false;void recoverGoalState();}
+    }
+  }
+
   function stopContext() {
     contextAlive = false;
     statusIndicator?.dispose();
     inlineGoal?.dispose();
     deferredTaskObserver?.dispose();
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
+    if(goalRecoveryTimer!==null)clearTimeout(goalRecoveryTimer);goalRecoveryTimer=null;
     if(handoffReadinessTimer!==null)clearTimeout(handoffReadinessTimer);
     handoffReadinessTimer=null;
     if(retryReadinessTimer!==null)clearTimeout(retryReadinessTimer);
@@ -1093,6 +1115,15 @@
     }
   }
 
+  async function resolveHandoffSuccessor(sourceUrl,stillCurrent) {
+    // The worker may retire a prior uncertain transfer only from a positively
+    // accepted later manual message. This never retries its historical send.
+    const result=await runtimeMessage({type:'CHATGPT_HANDOFF_SUCCESSOR',url:sourceUrl});
+    if(!stillCurrent())throw new Error('Исходный чат или запрос изменился во время проверки предыдущей передачи');
+    if(!result?.ok)throw new Error(result?.reason||'Предыдущая передача ещё ожидает подтверждения');
+    if(result.record)handoffRecord=result.record;
+  }
+
   async function beginHandoff(error, info, alert) {
     if (handoffBusy) return;
     const sourceUrl = location.href;
@@ -1122,6 +1153,7 @@
     if (handoffRecord && handoffRecord.sourceUrl !== sourceUrl && Date.now() - handoffRecord.createdAt < RETRY_WINDOW_MS) {
       throw new Error('Новый чат тоже завершился ошибкой; повторная передача остановлена');
     }
+    await resolveHandoffSuccessor(sourceUrl,sameSource);
     const goalContext=await runtimeMessage({type:'CHATGPT_GOAL_CONTEXT',url:sourceUrl});
     if(!goalContext?.ok)throw Error('Не удалось сохранить контекст Goal перед переносом чата');
     const text=handoffText(info.messages,error.response,sourceUrl)+(goalContext.text?'\n\n'+goalContext.text:'');
@@ -1539,6 +1571,7 @@
               if(nativeFinal||(attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
                 attempt.goalNativeVerified=nativeFinal;
                 attempt.goalNativeUserId=nativeFinal&&typeof native.userId==='string'?native.userId:'';
+                attempt.goalNativeMarkerPending=nativeFinal&&native.goalMarkerPending===true;
                 void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
                 sendCompletion(latest,attempt);
                 finish(text);
@@ -1608,7 +1641,7 @@
       sessionTitle: document.title,
       response: snapshot.response,
       goalPromptKey:snapshot.promptKey,goalNativeVerified:attempt.goalNativeVerified===true,
-      goalRawExact:snapshot.goalMarkerExact===true,goalNativeUserId:attempt.goalNativeUserId||'',
+      goalRawExact:snapshot.goalMarkerExact===true,goalNativeMarkerPending:attempt.goalNativeMarkerPending===true,goalNativeUserId:attempt.goalNativeUserId||'',
       fingerprint,
       completionKey: snapshot.assistantKey
         ? `${snapshot.promptKey}|${snapshot.assistantKey}`
@@ -1772,6 +1805,17 @@
 
   function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_GOAL_MARKER_PENDING'){
+      if(ChatGPTHandoffTitle.chatUrl(location.href)===message.url)void recoverGoalState();
+      sendResponse?.({ok:true});return;
+    }
+    if(message?.type==='CHATGPT_HANDOFF_SUPERSEDED'){
+      if(message.id===handoffRecord?.id&&ChatGPTHandoffTitle.chatUrl(location.href)===message.url){
+        handoffRecord={...handoffRecord,stage:'superseded'};
+        if(message.recheck===true){retryState().terminalHandled=false;visibleErrors.clear();scheduleErrorCheck(0);}
+      }
+      sendResponse?.({ok:true});return;
+    }
     if(message?.type==='CHATGPT_GOAL_READINESS') {
       const editor=composer();
       const idle=ChatGPTHandoffTitle.chatUrl(location.href)===message.url&&
@@ -1805,6 +1849,7 @@
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest){armForCurrentPrompt();void reconcileFailedCompletionLoading().catch(()=>{});}
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
+    if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_STARTED','CHATGPT_CONVERSATION_REQUEST_COMPLETED','CHATGPT_CONVERSATION_REQUEST_FAILED'].includes(message?.type))void recoverGoalState();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
   const initialDraftRecovery=restoreDraft(null,true).catch(()=>{});
@@ -1812,6 +1857,6 @@
     if(!runtimeAvailable())return;void reconcileLegacyCompletionStatus().catch(()=>{});if(!completionAttempt)scheduleActiveCompletionRecovery();
   });
   void Promise.all([initialDraftRecovery,initialCompletionRecovery]).then(()=>{
-    if(runtimeAvailable())return runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
+    if(runtimeAvailable())return recoverGoalState();
   }).catch(()=>{});
 })();

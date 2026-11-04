@@ -80,6 +80,7 @@ function plainGoalMarkerDOM(rendered,sourceMessageId='',marker='GOAL_COMPLETE') 
   const rendered=unit.querySelector('[data-markdown-text-style="assistant-message"],.markdown,[class*="prose"],[data-message-content]');
   if(!rendered||!visible(rendered))return {ok:false};
   let body=typeof answer.content==='string'?answer.content:'';
+  const wholeReference=/^::chatgpt-content-reference\{[^{}]+\}$/.test(body),rawCandidate=/^GOAL(?:\\+)?_(?:COMPLETE|BLOCKED)$/.test(body);
   if(/^::chatgpt-content-reference\{[^{}]+\}$/.test(body)&&Array.isArray(answer.contentReferences)&&answer.contentReferences.length&&answer.contentReferences.every(r=>typeof r?.model_dil_v2?.fallbackMarkdown==='string')) {
     body=answer.contentReferences.map(r=>r.model_dil_v2.fallbackMarkdown).join('\n\n');
     if(['GOAL\\_COMPLETE','GOAL\\_BLOCKED'].includes(body))body=body.replace('\\_','_');
@@ -87,7 +88,7 @@ function plainGoalMarkerDOM(rendered,sourceMessageId='',marker='GOAL_COMPLETE') 
   const semantic=unit.cloneNode(true);
   semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
   const marker=['GOAL_COMPLETE','GOAL_BLOCKED'].includes(body)&&plainGoalMarkerDOM(rendered,answer.messageId,body)&&semantic.textContent.trim()===body;
-  return {ok:true,goalResponse:body,goalRawExact:Boolean(marker),url,assistantId:answer.messageId,assistantKey:unit.getAttribute('data-chatgpt-search-unit-key'),
+  return {ok:true,goalResponse:body,goalRawExact:Boolean(marker),goalMarkerPending:!marker&&Boolean(rawCandidate||wholeReference&&(/^GOAL(?:\\+)?_(?:COMPLETE|BLOCKED)$/.test(body)||/^::chatgpt-content-reference\{[^{}]+\}$/.test(body)&&['GOAL_COMPLETE','GOAL_BLOCKED'].includes(rendered.textContent))),url,assistantId:answer.messageId,assistantKey:unit.getAttribute('data-chatgpt-search-unit-key'),
     response:rendered.innerText||rendered.textContent||'',responseStartedAt:times[0].sentAtMs,alias:entry.conversationId,
     firstServerMessageId:entry.turn.firstServerMessageId,proof:'native-detached-user-final'};
 }

@@ -572,3 +572,83 @@ console.log('GOAL_BLOCKED: exact verified stop, restart, duplicate refusal and f
  await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'early-blocked',tabId:7,acceptedUserId:'accepted'});
  assert.equal(env.messages.length,1);
 }
+
+// Native terminal source can settle before its rendered plain paragraph. Hold
+// that exact answer without consuming its completion or sending a continuation.
+for(const marker of ['GOAL_COMPLETE','GOAL_BLOCKED']) {
+ const env=fixture();await begin(env);await confirm(env);
+ const before=structuredClone(state(env));
+ const held=await answer(env,{response:marker,rawExact:false,nativeMarkerPending:true,userId:'same-user'});
+ assert.equal(held.ok,false);assert.equal(held.pendingMarker,true);
+ assert.equal(state(env).phase,'waiting');assert.equal(state(env).lastCompletionKey,before.lastCompletionKey);
+ assert.equal(state(env).continuations,before.continuations);assert.equal(env.messages.length,1);
+ assert.equal(state(env).markerPending.promptKey,before.expectedPromptKey);
+ assert.equal((await env.fresh().get(URL_A)).markerPending.completionKey,state(env).markerPending.completionKey);
+ await answer(env,{response:marker,rawExact:true,nativeMarkerPending:false,userId:'same-user'});
+ assert.equal(state(env).phase,marker==='GOAL_COMPLETE'?'completed':'blocked');
+ assert.equal(state(env).markerPending,null);assert.equal(env.messages.length,1);
+}
+{
+ const env=fixture();await begin(env);await confirm(env);
+ await env.store.control({url:URL_A,tabId:7,action:'pause'});
+ await answer(env,{response:'GOAL_COMPLETE',rawExact:false,nativeMarkerPending:true});
+ assert.equal(state(env).phase,'paused');assert.equal(env.messages.length,1);
+ await env.store.control({url:URL_A,tabId:7,action:'stop'});
+ assert.equal((await answer(env,{response:'GOAL_COMPLETE',rawExact:true})).ok,false);
+ assert.equal(state(env).phase,'stopped');assert.equal(env.messages.length,1);
+}
+// A definitive formatted/ordinary settled body can replace the candidate and
+// continue normally; merely mentioning the marker never enters pending state.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ await answer(env,{response:'GOAL_COMPLETE',rawExact:false,nativeMarkerPending:true});
+ await answer(env,{response:'`GOAL_COMPLETE`',rawExact:false,nativeMarkerPending:false});
+ assert.equal(state(env).phase,'preparing');assert.equal(state(env).markerPending,null);assert.equal(env.messages.length,2);
+}
+// The pending bit survives an early answer before native send acceptance.
+{
+ const env=fixture();await begin(env);const rec=state(env),op=rec.operation;
+ await env.store.intent({url:URL_A,tabId:7,id:rec.id,operationId:op.id,text:op.text});
+ const payload={url:URL_A,tabId:7,promptKey:'/c/goal-fixture-a|render-user',
+ completionKey:'/c/goal-fixture-a|render-user|answer',userId:'render-user',response:'GOAL_COMPLETE',nativeVerified:true,rawExact:false,nativeMarkerPending:true};
+ await env.store.completion(payload);
+ assert.equal(state(env).earlyCompletions[0].nativeMarkerPending,true);
+ await env.store.report({url:URL_A,tabId:7,id:rec.id,operationId:op.id,status:'confirmed',newPromptKey:payload.promptKey});
+ assert.equal(state(env).phase,'waiting');assert.ok(state(env).markerPending);assert.equal(env.messages.length,1);
+ await env.store.completion({...payload,rawExact:true,nativeMarkerPending:false});
+ assert.equal(state(env).phase,'completed');assert.equal(env.messages.length,1);
+}
+// An exact settled update can replace the buffered pending answer before ACK.
+{
+ const env=fixture();await begin(env);const rec=state(env),op=rec.operation;
+ await env.store.intent({url:URL_A,tabId:7,id:rec.id,operationId:op.id,text:op.text});
+ const payload={url:URL_A,tabId:7,promptKey:'/c/goal-fixture-a|settled-user',completionKey:'/c/goal-fixture-a|settled-user|answer',userId:'settled-user',response:'GOAL_BLOCKED',nativeVerified:true,rawExact:false,nativeMarkerPending:true};
+ await env.store.completion(payload);await env.store.completion({...payload,rawExact:true,nativeMarkerPending:false});
+ assert.equal(state(env).earlyCompletions.length,1);
+ await env.store.report({url:URL_A,tabId:7,id:rec.id,operationId:op.id,status:'confirmed',newPromptKey:payload.promptKey});
+ assert.equal(state(env).phase,'blocked');assert.equal(env.messages.length,1);
+}
+{
+ const env=fixture();await begin(env);await confirm(env);await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'pending-marker-handoff',tabId:7});
+ const payload={sourceUrl:URL_A,targetUrl:URL_B,handoffId:'pending-marker-handoff',tabId:7,promptKey:'/c/goal-fixture-b|pending',completionKey:'/c/goal-fixture-b|pending|answer',response:'GOAL_COMPLETE',userId:'pending-user',nativeVerified:true,rawExact:false,nativeMarkerPending:true};
+ await env.store.stageHandoffCompletion(payload);
+ assert.equal(state(env).handoffEarlyCompletions[0].nativeMarkerPending,true);
+ await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:payload.handoffId,tabId:7,acceptedUserId:payload.userId});
+ assert.equal(state(env,URL_B).phase,'waiting');assert.ok(state(env,URL_B).markerPending);assert.equal(env.messages.length,1);
+ await env.store.completion({...payload,url:URL_B,rawExact:true,nativeMarkerPending:false});
+ assert.equal(state(env,URL_B).phase,'completed');assert.equal(env.messages.length,1);
+}
+console.log('Terminal marker render-settle: persisted pending, no continuation, same-key settle, pause/stop and early/handoff ACK passed');
+// Manual follow-up acceptance must also carry an early pending marker.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ const promptKey='/c/goal-fixture-a|manual-pending-marker',requestId='manual-pending-request',startedAt=env.time+100;
+ await env.store.manual({url:URL_A,tabId:7,requestId,startedAt,eventAt:startedAt,text:'Clarify existing goal',baselineKey:state(env).expectedPromptKey});
+ const payload={url:URL_A,tabId:7,promptKey,completionKey:promptKey+'|answer',response:'GOAL_BLOCKED',userId:'manual-pending-user',nativeVerified:true,rawExact:false,nativeMarkerPending:true};
+ await env.store.completion(payload);
+ assert.equal(state(env).manualEarlyCompletions[0].nativeMarkerPending,true);
+ await env.store.manualBind({url:URL_A,tabId:7,id:state(env).id,requestId,startedAt,promptKey,userId:payload.userId,userText:'Clarify existing goal',userSentAtMs:startedAt,nativeVerified:true});
+ assert.equal(state(env).phase,'waiting');assert.ok(state(env).markerPending);assert.equal(env.messages.length,1);
+ await env.store.completion({...payload,rawExact:true,nativeMarkerPending:false});
+ assert.equal(state(env).phase,'blocked');assert.equal(env.messages.length,1);
+}

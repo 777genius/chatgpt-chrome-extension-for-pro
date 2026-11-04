@@ -94,3 +94,25 @@ await store.recoverAcknowledgement({url:reopened,tabId:18,expectedRecord:structu
  promptKey:'/c/reopened-fence|accepted',userId:'accepted-native',nativeVerified:true});
 assert.equal(meta().active[17],undefined,'native recovery retires only the accepted old grant');
 assert.equal((await log('retry.send_intent','next-recovery',18,reopened,{promptKey:'/c/reopened-fence|accepted'})).ok,true);
+
+// A later accepted manual successor can retire an uncertain handoff only with
+// its own native witness. Keep the old consumed operation in immutable history.
+{
+ const u='https://chatgpt.com/c/superseded-handoff',id=101,op='superseded-transfer';
+ await log('handoff.sending',op,id,u,{targetUrl:'https://chatgpt.com/'});
+ await log('send.authorized',op,id,u);
+ const at=meta().active[id].at;
+ for(const extra of [{},{nativeVerified:false,manualRequestId:'new',manualStartedAt:at+1,userId:'native-user',promptKey:'/c/superseded-handoff|user'},
+  {nativeVerified:true,manualRequestId:'new',manualStartedAt:at-1,userId:'native-user',promptKey:'/c/superseded-handoff|user'}]){
+  await log('handoff.superseded',op,id,u,extra);assert.equal(meta().active[id].operationId,op);
+ }
+ await log('handoff.superseded',op,id,u,{nativeVerified:true,manualRequestId:'new',manualStartedAt:at+1,userId:'native-user',promptKey:'/c/superseded-handoff|user'});
+ assert.equal(meta().active[id],undefined);await assert.rejects(()=>log('send.authorized',op,id,u),/Повторная/);
+ await log('goal.send_intent','fresh-goal-after-native-successor',id,u);assert.equal(meta().active[id].operationId,'fresh-goal-after-native-successor');
+ assert.equal((await api.readJournal()).events.filter((e:any)=>e.kind==='send.authorized'&&e.operationId===op).length,1);
+}
+{
+ const workerSource=readFileSync('extension/service-worker.js','utf8'),from=workerSource.indexOf("  if (message?.type === 'CHATGPT_LOG_EVENT')"),until=workerSource.indexOf("  if (message?.type === 'CHATGPT_INSPECT_HANDOFF_SEED')",from);let reply:any=null,writes=0;
+ const c=createContext({message:{type:'CHATGPT_LOG_EVENT',event:{kind:'handoff.superseded',operationId:'unknown',nativeVerified:true,manualRequestId:'forged',manualStartedAt:Date.now()+1000,userId:'forged-user',promptKey:'/c/fixture|user'}},sender:{tab:{id:7,url:'https://chatgpt.com/c/fixture'},frameId:0},sendResponse:(v:any)=>{reply=v;},appendJournal:()=>{writes++;}});
+ runInContext('(function(){'+workerSource.slice(from,until)+'})()',c);assert.equal(reply?.ok,false);assert.equal(writes,0,'content telemetry cannot mint its own handoff retirement proof');
+}
