@@ -1375,6 +1375,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isError&&!isWarning && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
     if (!isError&&!isWarning && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
+    let suppressGoalNotice=false,acceptedGoalMarker=false,goalAnswerIncomplete=false;
     if(!isError&&!isWarning) {
       const goalAnswer={url:sourceUrl,tabId,completionKey:rawCompletionKey,
         promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
@@ -1407,8 +1408,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if(handoff.stage==='sent')await goalController.handoffConfirm({sourceUrl:handoff.sourceUrl,
             targetUrl:sourceUrl,handoffId:handoff.id,tabId,acceptedUserId:handoff.acceptance?.messageId});
         }
-        await goalController.completion(goalAnswer);
+        const goalResult=await goalController.completion(goalAnswer);
+        goalAnswerIncomplete=goalResult?.ok===true&&goalResult.record?.phase!=='completed';
+        acceptedGoalMarker=goalResult?.ok===true&&ChatGPTGoalPolicy.exactMarker(goalAnswer.response,goalAnswer.rawExact,goalAnswer.nativeVerified);
       } catch(error) { console.error('Goal completion reconciliation failed',error); }
+      const currentGoal=sourceUrl?await goalController.get(sourceUrl):null;
+      suppressGoalNotice=Boolean((goalAnswerIncomplete||currentGoal&&!['completed','stopped'].includes(currentGoal.phase))&&!acceptedGoalMarker);
+      if(suppressGoalNotice)journalInBackground({kind:'goal.notification_suppressed',sourceUrl,goalId:currentGoal.id,reason:'goal-incomplete'},sender.tab);
     }
     journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
       sourceUrl,warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
@@ -1431,6 +1437,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // A foreground result is already visible. Only its captured generation
       // is acknowledged; OS dismissal still follows an actual visit event.
       if(reserved&&!isWarning)void seeVisibleResult(sourceUrl,receipt).catch(()=>{});
+      if(suppressGoalNotice)return completeChatNotification(reserved.ticket,false);
       return emitBoth({...notification,ticket:reserved.ticket});
     },async error=>{
       console.error('Prompt-Bound Alert: status reservation failed',error);
@@ -1438,7 +1445,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // no invented status or notification receipt, and no fallback resend.
       const tab=await chrome.tabs.get(tabId);
       if(ChatGPTHandoffTitle.chatUrl(tab.url)!==sourceUrl||!isWarning&&(manualRequestReceiptsByTab.get(tabId)||null)!==completionRequest)return;
-      await emitBoth(notification);
+      if(!suppressGoalNotice)await emitBoth(notification);
     });
     })().then(()=>sendResponse?.({ok:true})).catch((error) => {
       console.error('Prompt-Bound Alert: completion alert failed', error);

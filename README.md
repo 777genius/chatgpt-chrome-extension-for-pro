@@ -6,7 +6,7 @@
 <img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
-Version **1.8.42** · Chrome / Chromium **116+** · No build required
+Version **1.8.43** · Chrome / Chromium **116+** · No build required
 
 ## Features
 

@@ -260,7 +260,7 @@ async function domCheck() {
 
   const uncertain = setup('Черновик до неясной отправки', true, false);
   await uncertain.fail('error');
-  await pause();
+  await waitFor(()=>uncertain.sends.length===1);
   assert.equal(uncertain.logs.filter(e=>e.kind==='retry.confirmed').length,0,'uncertain send must never be logged as confirmed');
   assert.equal(uncertain.sends.length, 1, 'uncertain send is clicked exactly once');
   assert.match(uncertain.messages[0].retryReason, /подтвердить отправку/);
@@ -321,6 +321,27 @@ async function workerCheck() {
   assert.equal(notifications[2].contextMessage, 'Ответ за 1 ч 1 мин 1 с');
   callbacks.message({ ...success, completionKey: 'unknown', durationMs: null }, sender); await pause();
   assert.equal(notifications[3].contextMessage, '', 'unknown duration leaves subtitle empty');
+  // Goal intermediate responses keep status accounting but emit neither OS notice nor sound.
+  const quietGoalKey='chatgpt-goal:'+sender.tab.url;
+  storage[quietGoalKey]={schema:1,id:'quiet-goal',url:sender.tab.url,phase:'waiting',goal:'Synthetic notification goal',
+    rules:'',continuations:0,maxContinuations:2,deadlineAt:Date.now()+60000,expectedPromptKey:'quiet-prompt',operation:null};
+  const quietNoticeCount=notifications.length,quietSoundCount=soundCalls;
+  const quietAnswer={...success,goalPromptKey:'quiet-prompt',goalNativeVerified:true,goalRawExact:false,
+    goalNativeUserId:'quiet-user',completionKey:'quiet-prompt|answer',response:'Still working'};
+  callbacks.message(quietAnswer,sender);await pause();
+  assert.equal(notifications.length,quietNoticeCount,'unfinished Goal is silent');
+  assert.equal(soundCalls,quietSoundCount,'unfinished Goal has no completion sound');
+  assert.ok(!storage['chatgpt-status:'+sender.tab.url].notifications.some((n:any)=>n.state==='pending'),'silent Goal leaves no pending OS notification ticket');
+  storage[quietGoalKey]={...storage[quietGoalKey],phase:'waiting',operation:null,lastCompletionKey:null,expectedPromptKey:'budget-prompt',continuations:2};
+  callbacks.message({...quietAnswer,goalPromptKey:'budget-prompt',completionKey:'budget-prompt|answer'},sender);await pause();
+  assert.equal(storage[quietGoalKey].phase,'stopped');
+  assert.equal(notifications.length,quietNoticeCount,'budget exhaustion must not emit a false success notice');
+  storage[quietGoalKey]={...storage[quietGoalKey],phase:'waiting',operation:null,lastCompletionKey:null,expectedPromptKey:'final-prompt',continuations:0};
+  callbacks.message({...quietAnswer,goalPromptKey:'final-prompt',completionKey:'final-prompt|answer',response:'GOAL_COMPLETE',goalRawExact:true},sender);await pause();
+  assert.equal(storage[quietGoalKey].phase,'completed');
+  assert.equal(notifications.length,quietNoticeCount+1,'completed Goal notifies exactly once');
+  assert.ok(soundCalls>quietSoundCount,'completed Goal plays its sound');
+  delete storage[quietGoalKey];
   callbacks.before({ tabId: 8, method: 'POST', timeStamp: 123456, url: 'https://chatgpt.com/backend-api/f/conversation' }); await pause();
   assert.equal(injections.at(-1).target.tabId, 8);
   assert.equal(injections.at(-1).args[0], 123456);
@@ -386,7 +407,7 @@ async function workerCheck() {
   const goalKey='chatgpt-goal:'+goalUrl;
   let goal=storage[goalKey];
   assert.equal(goal.phase,'preparing');
-  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1);
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH'&&m.goalId!=='quiet-goal').length,1);
   const goalText=goal.operation.text,goalOperation=goal.operation.id,goalId=goal.id;
   assert.ok(goalText.includes('GOAL_COMPLETE')&&goalText.includes('Verify CI and merge safely'));
   const goalSender={tab:{id:7,url:goalUrl}};
@@ -414,12 +435,12 @@ async function workerCheck() {
   callbacks.message(goalCompletion,goalSender);await pause();
   goal=storage[goalKey];
   assert.equal(goal.phase,'completed','only the native-final, entire marker completes the Goal');
-  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1,
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH'&&m.goalId!=='quiet-goal').length,1,
     'exact marker cannot schedule a second continuation');
   callbacks.message({...goalCompletion,completionKey:'/c/example|goal-user-1|goal-assistant-2',
     response:'GOAL_COMPLETE is a word',goalRawExact:false},goalSender);
   await pause();
-  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH').length,1,
+  assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_GOAL_DISPATCH'&&m.goalId!=='quiet-goal').length,1,
     'duplicate or later completion cannot restart Goal');
   console.log('PASS: Goal popup -> journal -> native send gate -> confirmed answer -> exact marker');
 
