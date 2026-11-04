@@ -619,13 +619,14 @@
         let next={...record,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
           handoffPending:false,earlyCompletion:null,earlyCompletions:[]};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
+        else if(outcome==='blocked')next={...next,phase:'blocked',reason:'Модель ответила точным маркером GOAL_BLOCKED',pendingCompletion:null};
         else if(outcome==='complete')next={...next,phase:'completed',reason:'Модель ответила точным маркером GOAL_COMPLETE'};
         else if(outcome==='budget'||outcome==='deadline')
           next={...next,phase:'stopped',reason:outcome==='budget'?'Лимит продолжений исчерпан':'Время Goal истекло'};
         else if(record.phase==='paused')next={...next,pendingCompletion:{key:completionKey,promptKey},reason:'Ожидает возобновления'};
         else next={...next,phase:'preparing',operation:operation(record,'continuation',tabId,now()),pendingCompletion:null,reason:''};
         await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,
-          {completionKey,promptKey,nativeVerified:nativeVerified===true,exactMarker:outcome==='complete'});
+          {completionKey,promptKey,nativeVerified:nativeVerified===true,exactMarker:outcome==='complete',blockedMarker:outcome==='blocked'});
         await save(next);
         return {ok:true,record:next,dispatch:next.phase==='preparing'};
       });
@@ -796,7 +797,7 @@
         // Keep one compact final proof per native user id; no assistant text is
         // needed beyond the exact marker for policy.decision().
         const compact={url:target,tabId,completionKey,promptKey,
-          response:response===policy.MARKER?policy.MARKER:'',nativeVerified,rawExact,userId};
+          response:policy.terminalMarker(response,rawExact,nativeVerified)?response:'',nativeVerified,rawExact,userId};
         const index=saved.findIndex(item=>item.userId===userId);
         const candidates=index<0?[...saved,compact]:saved.map((item,i)=>i===index?compact:item);
         if(candidates.length>256) {

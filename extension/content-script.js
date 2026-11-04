@@ -179,12 +179,13 @@
       (roleNode.matches?.('[data-chatgpt-search-unit-key$=":assistant"]')?roleNode:null);
     const ids=new Set((unit?.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
     const sourceMessageId=ids.size===1?Array.from(ids)[0]:'';
-    if(!plainGoalMarkerDOM(rendered,sourceMessageId))return false;
+    const marker=rendered?.textContent;
+    if(!['GOAL_COMPLETE','GOAL_BLOCKED'].includes(marker)||!plainGoalMarkerDOM(rendered,sourceMessageId,marker))return false;
     const semantic=roleNode.cloneNode(true);
     // Fallback turns expose the speaker label as a screen reader heading,
     // outside the answer itself. It is interface text in every locale.
     semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
-    return semantic.textContent.trim()==='GOAL_COMPLETE';
+    return semantic.textContent.trim()===marker;
   }
 
   function assistantText(turn) {
@@ -1640,7 +1641,7 @@
       completionRecoveryInFlight=true;
       let recovered=false,pendingRestore=false;
       try{
-        if(!completionAttempt||completionAttempt.path!==location.pathname){
+        if(!completionAttempt||completionAttempt.path!==location.pathname||!isGenerating()){
           const restored=await restoreCompletionCheckpoint();recovered=restored===true;pendingRestore=restored==='pending'||Boolean(globalThis.__chatgptNotifierAttemptId);
         }
         if(!recovered)recovered=await recoverActiveCompletion()===true;
@@ -1649,8 +1650,8 @@
       observedGeneration ||= generating;
       // Keep observing a long-running request through temporary probe failures.
       // Before controls mount, allow only a short startup grace period.
-      if(!recovered&&!currentErrors().length&&(generating||allowStartupGrace&&pendingRestore&&!observedGeneration&&Date.now()-scheduledAt<30000))
-        completionRecoveryTimer=setTimeout(retry,Date.now()-scheduledAt<5000?1000:5000);
+      if(!recovered&&!currentErrors().length&&(generating||pendingRestore||Boolean(id)))
+        completionRecoveryTimer=setTimeout(retry,generating||allowStartupGrace&&!observedGeneration&&Date.now()-scheduledAt<30000?(Date.now()-scheduledAt<5000?1000:5000):300000);
     };
     void retry();
   }
@@ -1699,6 +1700,7 @@
     const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
     const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
     if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||initial!==globalThis.__chatgptNotifierAttemptId||initialRequestId!==globalThis.__chatgptNotifierRequestId)return;
+    if(result?.detached?.changed){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;return true;}
     if(result?.rollback?.changed){
       statusIndicator?.accept(result.rollback);
       if(completionAttempt){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;}

@@ -49,7 +49,7 @@ function fixture() {
   const armed=await env.store.composerArm({tabId:7,url:root+'?model=fixture'});
   assert.equal(armed.record.url,root);
   assert.equal(armed.record.phase,'armed');
-  assert.deepEqual(structuredClone(armed.record.config),{rules:'',maxContinuations:10,maxMinutes:1440});
+  assert.deepEqual(structuredClone(armed.record.config),{rules:'',maxContinuations:30,maxMinutes:1440});
   assert.equal((await env.fresh().composerGet({tabId:7})).id,armed.record.id);
   assert.equal(env.data[goalKey(root)],undefined);
   const first={tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''};

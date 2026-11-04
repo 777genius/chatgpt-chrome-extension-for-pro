@@ -523,3 +523,52 @@ for(const response of ['Маркер `GOAL_COMPLETE` не выдаю.','Марк
  assert.equal(state(env).phase,'completed');
  assert.equal(env.messages.length,2,'standalone completion never schedules another continuation');
 }
+
+// A positively verified whole-answer blocker stops before limits or dispatch,
+// survives coordinator recreation and cannot be replayed as a continuation.
+assert.deepEqual(policy.DEFAULTS,{maxContinuations:30,maxMinutes:1440});
+assert.match(policy.initialText({goal:'Test',rules:''}),/GOAL_BLOCKED/);
+assert.match(policy.continuationText({goal:'Test'}),/штатные способы/);
+assert.equal(policy.exactBlockedMarker('GOAL_BLOCKED',true,true),true);
+for(const value of [' GOAL_BLOCKED','GOAL_BLOCKED ','`GOAL_BLOCKED`','GOAL_BLOCKED\nReason','Не выдаю GOAL_BLOCKED','GOAL_BLOCKED is the marker'])
+ assert.equal(policy.exactBlockedMarker(value,true,true),false);
+for(const [rawExact,nativeVerified] of [[false,true],[true,false]])
+ assert.equal(policy.exactBlockedMarker('GOAL_BLOCKED',rawExact,nativeVerified),false);
+{
+ const env=fixture();await begin(env);await confirm(env);
+ env.time=state(env).deadlineAt+1;
+ const result=await answer(env,{response:'GOAL_BLOCKED',rawExact:true});
+ assert.equal(result.ok,true);assert.equal(state(env).phase,'blocked');
+ assert.match(state(env).reason,/GOAL_BLOCKED/);assert.equal(state(env).operation,null);
+ assert.equal(env.messages.length,1,'blocked marker never dispatches another message');
+ assert.equal((await env.fresh().get(URL_A)).phase,'blocked','block survives restart');
+ assert.equal((await answer(env,{response:'GOAL_BLOCKED',rawExact:true})).ok,false);
+ assert.equal(env.messages.length,1);
+ assert.ok(env.events.some(e=>e.kind==='goal.answer_blocked'));
+}
+for(const response of ['Маркер `GOAL_BLOCKED` не выдаю.','GOAL_BLOCKED не выдаю.','"GOAL_BLOCKED"']) {
+ const env=fixture();await begin(env);await confirm(env);
+ await answer(env,{response,rawExact:false});
+ assert.equal(state(env).phase,'preparing','discussion of blocked marker is ordinary progress');
+ assert.equal(env.messages.length,2);
+}
+console.log('GOAL_BLOCKED: exact verified stop, restart, duplicate refusal and finite defaults passed');
+
+// A blocker can arrive before handoff acceptance. Compact proof must retain
+// that exact terminal response, select the accepted user and never continue.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'early-blocked',tabId:7});
+ for(const [userId,response,rawExact] of [['unrelated','GOAL_COMPLETE',true],['accepted','GOAL_BLOCKED',true],['quoted','GOAL_BLOCKED',false]]) {
+  assert.equal((await env.store.stageHandoffCompletion({sourceUrl:URL_A,targetUrl:URL_B,
+   handoffId:'early-blocked',tabId:7,userId,response,rawExact,nativeVerified:true,
+   promptKey:'/c/goal-fixture-b|'+userId,completionKey:'/c/goal-fixture-b|'+userId+'|assistant'})).ok,true);
+ }
+ assert.equal(state(env).handoffEarlyCompletions.find((x:any)=>x.userId==='accepted').response,'GOAL_BLOCKED');
+ assert.equal(state(env).handoffEarlyCompletions.find((x:any)=>x.userId==='quoted').response,'');
+ await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'early-blocked',tabId:7,acceptedUserId:'accepted'});
+ assert.equal(state(env,URL_B).phase,'blocked');assert.match(state(env,URL_B).reason,/GOAL_BLOCKED/);
+ assert.equal(env.messages.length,1,'early blocker cannot be replaced with an empty response and continued');
+ await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'early-blocked',tabId:7,acceptedUserId:'accepted'});
+ assert.equal(env.messages.length,1);
+}

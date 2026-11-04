@@ -66,7 +66,7 @@
       group.append(label,input);limits.append(group);
     }
     panel.append(limits);
-    panel.append(node('p',{class:'cggi-note'},'Write the goal in the message box and send it yourself. Goal checks completion after the first answer. GOAL_COMPLETE is the model’s declaration of completion.'));
+    panel.append(node('p',{class:'cggi-note'},'Write the goal in the message box and send it yourself. Goal checks completion after the first answer. GOAL_COMPLETE declares completion; GOAL_BLOCKED stops a blocked goal.'));
     const actions=node('div',{class:'cggi-actions'}),buttons={};
     for(const [action,title] of [['restore','Restore saved goal'],['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
       const button=node('button',{type:'button','data-goal-action':action},title);
@@ -97,7 +97,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       hydrated=null;
     }
     resetFields();
-    const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Waiting for full answer',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked for safety',stopped:'Stopped',moved:'Moved to a new chat'};
+    const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Waiting for full answer',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
     function render() {
       if(!valid())return;
       const on=(active()&&!record.stopRequested)||armed();

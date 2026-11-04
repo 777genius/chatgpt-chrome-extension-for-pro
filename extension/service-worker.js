@@ -1,6 +1,7 @@
 'use strict';
 importScripts('page-probe.js');
 importScripts('completion-probe.js');
+importScripts('reply-probe.js');
 importScripts('completion-checkpoint.js');
 importScripts('legacy-handoff-status.js');
 importScripts('request-receipts.js');
@@ -676,6 +677,62 @@ async function inspectBoundNativeTurn(tabId,url) {
   if(JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
       ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url||checked?.result?.userId!==native.userId)return native;
   return checked.result;
+}
+
+// A completed native reply can remain after ChatGPT drops its user item.
+// Observe that reply against one exact request; never turn this into a missing
+// payload acceptance, a handoff confirmation, or permission to replay a send.
+const detachedReplyRecoveries=new Map();
+function reconcileDetachedReply(tabId,url) {
+  if(detachedReplyRecoveries.has(tabId))return detachedReplyRecoveries.get(tabId);
+  const task=(async()=>{
+    const checkpoint=await completionCheckpointRead(tabId),view=await readChatStatus(url);
+    if(checkpoint?.state!=='active'||view.status?.kind!=='loading'||view.status.eventAt!==checkpoint.startedAt||
+        ![url,'https://chatgpt.com/'].includes(checkpoint.url))return {changed:false};
+    const [initial]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url]});
+    if(initial?.result?.reason!=='bound-messages-missing')return {changed:false};
+    const journal=await readJournal();
+    const requests=journal.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.requestId===checkpoint.requestId&&e.eventAt===checkpoint.startedAt);
+    if(!journal.ok||journal.storageError||requests.length!==1||journal.events.some(e=>e.kind==='request.started'&&
+        (e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence))return {changed:false};
+    const [observed]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectDetachedUserReply,args:[url,checkpoint.startedAt]});
+    const reply=observed?.result;
+    if(!reply?.ok||reply.url!==url||JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+        ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {changed:false};
+    const live=await readChatStatus(url);
+    if(live.revision!==view.revision)return {changed:false};
+    const goal=await goalController.get(url),binding=goal?.manualStart;
+    const known=await latestRequestReceipt(tabId);
+    if(known&&(known.requestId!==checkpoint.requestId||known.startedAt!==checkpoint.startedAt)||
+        JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+        (await readChatStatus(url)).revision!==view.revision)return {changed:false};
+    let continued=false,blocked=false,goalTerminal=false;
+    // A saved native first-message binding remains authoritative after its DOM
+    // item disappears. Do not invent a native user ID for an unknown handoff.
+    if(goal?.phase==='waiting'&&!goal.operation&&binding?.url===url&&binding.tabId===tabId&&
+        binding.requestId===checkpoint.requestId&&binding.startedAt===checkpoint.startedAt&&
+        binding.userId&&binding.promptKey===goal.expectedPromptKey) {
+      const result=await goalController.completion({url,tabId,promptKey:binding.promptKey,userId:binding.userId,
+        completionKey:binding.promptKey+'|'+reply.assistantKey,response:reply.goalResponse,
+        rawExact:reply.goalRawExact===true,nativeVerified:true});
+      if(result.ok){goalTerminal=['completed','blocked','stopped'].includes(result.record?.phase);continued=!goalTerminal;blocked=['blocked','stopped'].includes(result.record?.phase);}
+    }
+    const handoff=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)],uncertain=handoff&&['sending','awaiting-confirmation'].includes(handoff.stage);
+    const receipt=statusReceipt(),reserved=await reserveChatNotification(url,tabId,blocked||uncertain?'error':'success',Date.now(),receipt,
+      {revision:view.revision,startedAt:checkpoint.startedAt,receipt:view.status.receipt});
+    if(!reserved)return {changed:continued}; // A continuation/new manual send won the generation race.
+    await completionCheckpointFinish(tabId,checkpoint.startedAt,'complete',checkpoint.requestId);
+    await appendJournal({kind:'completion.detached_user_reconciled',sourceUrl:url,requestId:checkpoint.requestId,
+      operationId:requests[0].operationId||null,assistantId:reply.assistantId,proof:reply.proof,
+      handoffUnconfirmed:Boolean(uncertain),goalContinued:continued},{id:tabId});
+    await broadcastChatStatus(reserved.view);
+    if(continued||goal&&!['completed','stopped','blocked','moved'].includes(goal.phase)&&!goalTerminal&&!uncertain)await completeChatNotification(reserved.ticket,false);
+    else await emitBoth({tabId,title:(blocked||uncertain?'❌ ':'')+cleanSessionTitle((await chrome.tabs.get(tabId)).title),
+      message:uncertain?'Ответ получен. Подтверждение исходного сообщения переноса недоступно; повторная отправка заблокирована.':truncateResponse(reply.response),
+      isError:Boolean(blocked||uncertain),ticket:reserved.ticket,durationMs:null});
+    return {changed:true};
+  })().finally(()=>detachedReplyRecoveries.delete(tabId));
+  detachedReplyRecoveries.set(tabId,task);return task;
 }
 
 // Stable native identity is observation metadata; it never authorizes a send.
@@ -1425,6 +1482,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if(ok)await bindCompletionNativeIdentity(tabId,url,await completionCheckpointRead(tabId));
         return {ok};
       }
+      const detached=await reconcileDetachedReply(tabId,url);
+      if(detached.changed)return {ok:false,detached};
       const rollback=await reconcileFailedCompletionLoading(tabId,url);
       if(rollback.changed)return {ok:false,rollback};
       let record=await completionCheckpointRead(tabId);
@@ -1588,7 +1647,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!isError&&!isWarning && completionKey && lastNotificationFingerprintByTab.get(tabId) === completionKey) return;
     if (!isError&&!isWarning && completionKey) lastNotificationFingerprintByTab.set(tabId, completionKey);
 
-    let suppressGoalNotice=false,acceptedGoalMarker=false,goalAnswerIncomplete=false;
+    let suppressGoalNotice=false,acceptedGoalMarker=false,goalAnswerIncomplete=false,goalBlocked=false;
     if(!isError&&!isWarning) {
       const goalAnswer={url:sourceUrl,tabId,completionKey:rawCompletionKey,
         promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
@@ -1623,19 +1682,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         const goalResult=await goalController.completion(goalAnswer);
         goalAnswerIncomplete=goalResult?.ok===true&&goalResult.record?.phase!=='completed';
-        acceptedGoalMarker=goalResult?.ok===true&&ChatGPTGoalPolicy.exactMarker(goalAnswer.response,goalAnswer.rawExact,goalAnswer.nativeVerified);
+        acceptedGoalMarker=goalResult?.ok===true&&ChatGPTGoalPolicy.terminalMarker(goalAnswer.response,goalAnswer.rawExact,goalAnswer.nativeVerified);
+        goalBlocked=goalResult?.ok===true&&ChatGPTGoalPolicy.exactBlockedMarker(goalAnswer.response,goalAnswer.rawExact,goalAnswer.nativeVerified);
       } catch(error) { console.error('Goal completion reconciliation failed',error); }
       const currentGoal=sourceUrl?await goalController.get(sourceUrl):null;
+      // handoffConfirm may already have consumed this exact terminal answer.
+      // Reuse its persisted result, never a different previously blocked Goal.
+      if(currentGoal&&currentGoal.lastCompletionKey===rawCompletionKey&&currentGoal.expectedPromptKey===goalAnswer.promptKey&&
+          ['completed','blocked'].includes(currentGoal.phase)&&ChatGPTGoalPolicy.terminalMarker(goalAnswer.response,goalAnswer.rawExact,goalAnswer.nativeVerified)) {
+        acceptedGoalMarker=true;
+        goalBlocked=currentGoal.phase==='blocked'&&ChatGPTGoalPolicy.exactBlockedMarker(goalAnswer.response,goalAnswer.rawExact,goalAnswer.nativeVerified);
+      }
       suppressGoalNotice=Boolean((goalAnswerIncomplete||currentGoal&&!['completed','stopped'].includes(currentGoal.phase))&&!acceptedGoalMarker);
       if(suppressGoalNotice)journalInBackground({kind:'goal.notification_suppressed',sourceUrl,goalId:currentGoal.id,reason:'goal-incomplete'},sender.tab);
     }
     journalInBackground({kind:isWarning?'operation.warning':isError?'notification.requested':'response.complete', response:message.response,
       sourceUrl,warningKind:message.warningKind,operationId:message.operationId,durationMs:message.durationMs,retryReason:message.retryReason,attemptId:message.attemptId},sender.tab);
-    const notification={tabId,title:`${isWarning?'⚠️ ':isError?'❌ ':''}${cleanSessionTitle(message.sessionTitle)}`,
-      message:truncateResponse(message.response),isError,isWarning,durationMs:message.durationMs,retryReason:message.retryReason||''};
+    const notification={tabId,title:`${isWarning?'⚠️ ':isError||goalBlocked?'❌ ':''}${cleanSessionTitle(message.sessionTitle)}`,
+      message:truncateResponse(message.response),isError:isError||goalBlocked,isWarning,durationMs:message.durationMs,retryReason:message.retryReason||''};
     if(movedWarning){await emitBoth(notification);return;}
     const reserve=(!isWarning&&!isError?completionCheckpointRead(tabId).then(record=>!record||record.state==='active'&&record.startedAt===message.completionStartedAt&&(!record.requestId||record.requestId===message.requestId)):Promise.resolve(true))
-      .then(accepted=>accepted&&sourceUrl?reserveChatNotification(sourceUrl,tabId,isWarning?'warning':isError?'error':'success',eventAt,receipt):null);
+      .then(accepted=>accepted&&sourceUrl?reserveChatNotification(sourceUrl,tabId,isWarning?'warning':isError||goalBlocked?'error':'success',eventAt,receipt):null);
 
     await reserve.then(reserved=>{
       if(!reserved)return;

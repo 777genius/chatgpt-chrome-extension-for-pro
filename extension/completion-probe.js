@@ -4,15 +4,15 @@
 // request already-sent message text. Never reads drafts or invokes handlers.
 // The expected attempt is bound by the extension caller.
 function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null) {
-  function plainGoalMarkerDOM(rendered,sourceMessageId='') {
-    if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
+  function plainGoalMarkerDOM(rendered,sourceMessageId='',marker='GOAL_COMPLETE') {
+    if(!rendered||rendered.textContent!==marker)return false;
     const plain=node=>{
       if(node?.tagName!=='P'||node.childNodes.length!==1)return false;
       const text=node.firstChild;
-      if(text.nodeType===3)return text.textContent==='GOAL_COMPLETE';
+      if(text.nodeType===3)return text.textContent===marker;
       // ChatGPT's ordinary renderer wraps unformatted text in an attribute-free span.
       return text.tagName==='SPAN'&&text.attributes.length===0&&text.childNodes.length===1&&
-        text.firstChild.nodeType===3&&text.firstChild.textContent==='GOAL_COMPLETE';
+        text.firstChild.nodeType===3&&text.firstChild.textContent===marker;
     };
     let paragraph=rendered;
     while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&paragraph.children.length===1)paragraph=paragraph.firstElementChild;
@@ -28,7 +28,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     const streamed=p?.children.length===1&&p.childNodes.length===1&&run?.tagName==='SPAN'&&
       run.hasAttribute('data-d-stream-run')&&run.getAttribute('data-d-text-flow')==='run'&&
       !run.children.length&&run.childNodes.length===1&&run.firstChild.nodeType===3&&
-      run.firstChild.textContent==='GOAL_COMPLETE'&&neutral(run)&&
+      run.firstChild.textContent===marker&&neutral(run)&&
       inkOnly&&Array.from(run.attributes).every(a=>['data-d-stream-run','data-d-text-flow','style'].includes(a.name));
     // Completed DIL paragraphs can retain a stream run or flatten it to text.
     if(dil.tagName!=='DIV'||dil.children.length!==1||dil.childNodes.length!==1||p?.tagName!=='P'||
@@ -197,6 +197,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
       // Native DIL serialization escapes this literal underscore. This single
       // representation still needs the independent plain rendered check below.
       if(goalResponse==='GOAL\\_COMPLETE')goalResponse='GOAL_COMPLETE';
+      if(goalResponse==='GOAL\\_BLOCKED')goalResponse='GOAL_BLOCKED';
     }
     const rendered=domAssistant?.querySelector('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]');
     let goalRawExact=false;
@@ -207,10 +208,10 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     const boundDIL=assistant?.messageId&&(unitMatches||assistantIds.size===1&&assistantIds.has(assistant.messageId))&&
       (!assistantIds.size||assistantIds.size===1&&assistantIds.has(assistant.messageId))&&
       references?.some(ref=>ref.source_message_id===assistant.messageId)?assistant.messageId:'';
-    if(goalResponse==='GOAL_COMPLETE'&&plainGoalMarkerDOM(rendered,boundDIL)) {
+    if(['GOAL_COMPLETE','GOAL_BLOCKED'].includes(goalResponse)&&plainGoalMarkerDOM(rendered,boundDIL,goalResponse)) {
       const semantic=domAssistant.cloneNode(true);
       semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
-      goalRawExact=semantic.textContent.trim()==='GOAL_COMPLETE';
+      goalRawExact=semantic.textContent.trim()===goalResponse;
     }
     // Require the exact native completion envelope and corroborate its marker
     // in the rendered answer. Preserve the existing marker-only protocol.

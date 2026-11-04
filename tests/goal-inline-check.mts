@@ -128,11 +128,11 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   f.details().click();assert.equal(f.panel().parentElement,f.document.body);
   assert.equal(f.document.querySelector('[data-goal-field=goal]'),null);
   assert.equal(f.document.querySelector('[data-goal-action=start]'),null);
-  assert.equal(f.field('maxContinuations').value,'10');assert.equal(f.field('maxMinutes').value,'1440');
+  assert.equal(f.field('maxContinuations').value,'30');assert.equal(f.field('maxMinutes').value,'1440');
   f.field('rules').value='Synthetic criteria';f.click(f.toggle());f.click(f.toggle());await tick();
   assert.equal(f.calls.filter(value=>value.action==='arm').length,1);
   const armed=f.calls.find(value=>value.action==='arm')!;
-  assert.equal(armed.rules,'Synthetic criteria');assert.equal(armed.maxContinuations,10);assert.equal(armed.maxMinutes,1440);
+  assert.equal(armed.rules,'Synthetic criteria');assert.equal(armed.maxContinuations,30);assert.equal(armed.maxMinutes,1440);
   assert.equal('text' in armed,false);assert.equal('goal' in armed,false);
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.field('rules').disabled,true);
   assert.match(f.panel().textContent!,/Write the goal in the message box and send it yourself/);
