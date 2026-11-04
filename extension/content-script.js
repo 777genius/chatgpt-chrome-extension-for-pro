@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.38';
+  const SCRIPT_VERSION = '1.8.39';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -1452,15 +1452,19 @@
           lastCompletionProbeAt=now;
           void runtimeMessage({type:'CHATGPT_COMPLETION_PROBE',url:attempt.url,
             startedAt:attempt.startedAt,requestId:attempt.requestId,boundPromptKey:promptKey})
-            .then(native=>{
+            .then(async native=>{
               if(!isCurrent()||settled||isGenerating()||currentErrors().length||
-                  !native?.ok||native.reasoningFailed!==true||native.generating!==false||
+                  !native?.ok||(native.reasoningFailed!==true&&native.terminalEmptyResponse!==true)||native.generating!==false||
                   native.isLatest!==true||native.isReadOnly!==false||native.promptKey!==promptKey)return;
               const latest=latestPromptSnapshot();
               if(latest?.promptKey!==promptKey||latest.response)return;
               finish(null);
-              handleError({sourceUrl:attempt.url,sessionTitle:document.title,
-                response:'Обдумывание не удалось',durationMs:Date.now()-attempt.startedAt},promptKey);
+              const response=native.terminalEmptyResponse?'Запрос завершился без ответа':'Обдумывание не удалось';
+              await audit('error.detected',{error:response,action:'retry',promptKey,attemptId:attempt.id},true);
+              if(!runtimeAvailable()||location.href!==attempt.url||
+                  (globalThis.__chatgptNotifierAttemptId||'')!==attempt.id||
+                  (globalThis.__chatgptNotifierRequestId||null)!==attempt.requestId||latestPromptSnapshot()?.promptKey!==promptKey)return;
+              handleError({sourceUrl:attempt.url,sessionTitle:document.title,response,durationMs:Date.now()-attempt.startedAt},promptKey);
             }).catch(()=>{}).finally(()=>{completionProbeBusy=false;});
           return;
         }

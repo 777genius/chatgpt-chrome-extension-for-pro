@@ -8,9 +8,9 @@ const baseState={reason:'native-not-ready',blocked:true,blockedAttemptId:attempt
 async function fixture(extra:any={}) {
  let state:any={...structuredClone(baseState),...extra.state},writes=0,calls=0,goalCalls=0;
  const events:any[]=[{kind:'retry.planned',operationId:'op',sourceUrl:url,tabId:7,retryUserId:'user',promptKey,attemptId,requestId:'request',recordedAt:1000100},
-  {kind:'retry.send_intent',operationId:'op'},{kind:'send.authorized',operationId:'op'},
+  ...(extra.cleanupOnly?[]:[{kind:'retry.send_intent',operationId:'op'},{kind:'send.authorized',operationId:'op'}]),
   ...(extra.noRefusal?[]:[{kind:'send.not_clicked',operationId:'op'}]),
-  {kind:'retry.failed',sourceUrl:url,tabId:7,operationId:'op',attemptId,error:'native-not-ready',clicked:extra.clicked??false},
+  {kind:extra.cleanupOnly?'draft.restore_failed':'retry.failed',sourceUrl:url,tabId:7,operationId:'op',attemptId,error:'native-not-ready',clicked:extra.cleanupOnly?undefined:extra.clicked??false},
   {kind:'retry.finished',operationId:'op',clicked:false},...(extra.events||[])];
  const native={ok:true,isLatest:true,isReadOnly:false,hasError:true,userId:'user',promptKey,lastUserSentAtMs:999990,...extra.native};
  const appendJournal=async(e:any)=>{writes++;state={...state,blocked:false,preparationRecovered:true};events.push(e);};
@@ -22,10 +22,10 @@ async function fixture(extra:any={}) {
   return [{result:{attemptId:extra.runtimeAttempt||attemptId,requestId:'request'}}];
  }}};
  function inspectCompletedTurn(){}function inspectChatError(){}function controlChatComposer(){}
- const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal',
+ const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn',
   code+';return recoverNoClickRetry;')(
   async()=>structuredClone(state),async()=>extra.draft?{draft:'owner'}:null,async()=>({ok:true,storageError:'',events}),chrome,
-  {get:async()=>extra.goal||null,retry:async()=>{goalCalls++;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal);
+  {get:async()=>extra.goal||null,retry:async()=>{goalCalls++;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url,promptKey,startedAt:1000000,requestId:'request',httpCompleted:extra.httpCompleted!==false}),async()=>native);
  const result=await fn(7,url);return {result,writes,calls,goalCalls,fn};
 }
 const safe=await fixture();assert.equal(safe.writes,1);assert.equal(safe.result.blocked,false);
@@ -41,6 +41,11 @@ for(const extra of [{clicked:true},{noRefusal:true},{draft:true},{empty:false},{
  {events:[{kind:'draft.restore_failed',sourceUrl:url,tabId:7,operationId:'op',attemptId}]}]) {
  const test=await fixture(extra);assert.equal(test.writes,0,JSON.stringify(extra));
 }
+const emptyTerminal={hasError:false,terminalEmptyResponse:true,nativeConversationInactive:true};
+assert.equal((await fixture({cleanupOnly:true,native:emptyTerminal})).writes,1,'no-click own-text cleanup may recover a verified empty terminal response');
+assert.equal((await fixture({cleanupOnly:true,native:emptyTerminal,httpCompleted:false})).writes,0);
+assert.equal((await fixture({cleanupOnly:true,native:emptyTerminal,events:[{kind:'draft.saved',operationId:'op'}]})).writes,0,'an historical owner draft remains fenced');
+assert.equal((await fixture({cleanupOnly:true,native:{hasError:true}})).writes,0);
 // Real reducer preserves historical failures/limits and makes the grant one-use.
 const ctx=createContext({URL,Date});runInContext(readFileSync('extension/journal-store.js','utf8'),ctx);
 ctx.state={[new URL(url).pathname.split('/').at(-1)!]:{...baseState,remainingRetries:2}};

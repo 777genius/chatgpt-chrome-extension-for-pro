@@ -606,6 +606,47 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   return {ok:result.ok,url:canonical,tabId,composer:result.record,record:await goalController.get(canonical)};
 }
 
+// An initial native conversation may retain its local alias after receiving a
+// permanent URL. Only the persisted, accepted first Goal message can bind it.
+async function inspectBoundNativeTurn(tabId,url) {
+  const [first]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const native=first?.result||{ok:false,reason:'native-turn-missing'};
+  if(!native.ok||native.nativeConversationInactive||native.nativeTurnStatus!=='complete'||native.assistantId||
+      native.hasError||native.generating!==false||native.isLatest!==true||native.isReadOnly!==false||
+      !/^local-chatgpt:[a-z0-9-]+$/.test(native.nativeConversationId||''))return native;
+  const goal=await goalController.get(url),binding=goal?.manualStart,checkpoint=await completionCheckpointRead(tabId);
+  if(!binding||binding.url!==url||binding.tabId!==tabId||binding.userId!==native.userId||
+      binding.userText!==native.userText||binding.userSentAtMs!==native.userSentAtMs||
+      checkpoint?.state!=='active'||checkpoint.url!==url||checkpoint.promptKey!==native.promptKey||
+      checkpoint.requestId!==binding.requestId||checkpoint.startedAt!==binding.startedAt||checkpoint.httpCompleted!==true)return native;
+  const proof={url,alias:native.nativeConversationId,userId:binding.userId,userText:binding.userText,userSentAtMs:binding.userSentAtMs};
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true,null,null,proof]});
+  if(JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+      ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url||checked?.result?.userId!==native.userId)return native;
+  return checked.result;
+}
+
+// Notification-only recovery. A lost MV3 receipt must not suppress a proven
+// terminal error, but this proof never releases any retry or unknown-send lock.
+async function readRestartErrorReceipt(tabId,url,message) {
+  if(!url||ChatGPTHandoffTitle.chatUrl(url)!==url||!message.requestId||typeof message.attemptId!=='string')return null;
+  const checkpoint=await completionCheckpointRead(tabId),before=await readChatStatus(url);
+  if(checkpoint?.state!=='active'||checkpoint.url!==url||!checkpoint.promptKey||
+      checkpoint.requestId!==message.requestId||String(checkpoint.startedAt)!==message.attemptId||
+      before.status?.kind!=='loading'||before.status.eventAt!==checkpoint.startedAt)return null;
+  const native=await inspectBoundNativeTurn(tabId,url);
+  if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!(native.hasError===true||
+        checkpoint.httpCompleted===true&&native.terminalEmptyResponse===true&&native.nativeConversationInactive===true)||
+      native.generating!==false||native.turnStatus!=='complete'||!native.userId||native.promptKey!==checkpoint.promptKey||
+      !Number.isFinite(native.lastUserSentAtMs)||Math.abs(native.lastUserSentAtMs-checkpoint.startedAt)>10000)return null;
+  const current=await completionCheckpointRead(tabId),view=await readChatStatus(url);
+  if(JSON.stringify(current)!==JSON.stringify(checkpoint)||view.revision!==before.revision||
+      view.status?.kind!=='loading'||view.status.eventAt!==checkpoint.startedAt||
+      ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url||await latestRequestReceipt(tabId))return null;
+  return {url,startedAt:checkpoint.startedAt,requestId:checkpoint.requestId,receipt:view.status.receipt,
+    notificationOnly:true};
+}
+
 async function reconcileGoalPromptBinding(tabId,url) {
   const goal=await goalController.get(url);
   if(goal?.phase!=='waiting'||goal.operation||goal.manualPending||goal.pauseRequested||goal.stopRequested)return {ok:false};
@@ -657,11 +698,12 @@ async function recoverNoClickRetry(tabId,url) {
     if(!journal.ok||journal.storageError)return state;
     const failures=journal.events.filter(e=>e.sourceUrl===url&&['retry.failed','draft.restore_failed'].includes(e.kind));
     const failed=failures.at(-1);
-    if(failed?.kind!=='retry.failed'||failed.tabId!==tabId||!failed.operationId||failed.clicked!==false||failed.attemptId!==state.blockedAttemptId||
+    if(!['retry.failed','draft.restore_failed'].includes(failed?.kind)||failed.tabId!==tabId||!failed.operationId||failed.kind==='retry.failed'&&failed.clicked!==false||failed.attemptId!==state.blockedAttemptId||
         (failed.error||failed.reason)!==state.reason)return state;
     const events=journal.events.filter(e=>e.operationId===failed.operationId);
     const planned=events.find(e=>e.kind==='retry.planned');
-    if(planned?.promptKey!==state.lastPromptKey||planned.attemptId!==failed.attemptId||
+    const cleanupOnly=failed.kind==='draft.restore_failed'&&!events.some(e=>e.kind==='draft.saved');
+    if(failed.kind==='draft.restore_failed'&&!cleanupOnly||planned?.promptKey!==state.lastPromptKey||planned.attemptId!==failed.attemptId||
         !events.some(e=>e.kind==='retry.finished'&&e.clicked===false)||
         events.some(e=>e.kind==='send.dispatched'||e.kind==='retry.clicked'||e.kind==='request.started')||
         events.some(e=>e.kind==='retry.send_intent'||e.kind==='send.authorized')&&!events.some(e=>e.kind==='send.not_clicked')||
@@ -671,15 +713,19 @@ async function recoverNoClickRetry(tabId,url) {
     const goal=await goalController.get(url);
     if(goal&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||
         goal.phase!=='blocked'||goal.reason!=='Восстановление запроса завершилось ошибкой'||Date.now()>=goal.deadlineAt))return state;
-    const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url]});
-    const native=checked?.result;
-    if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.hasError||!native.userId||
+    const native=await inspectBoundNativeTurn(tabId,url);
+    const checkpoint=native?.hasError?null:await completionCheckpointRead(tabId);
+    const terminalEmpty=checkpoint?.state==='active'&&checkpoint.url===url&&checkpoint.promptKey===planned.promptKey&&
+      checkpoint.startedAt===Number(planned.attemptId)&&checkpoint.requestId===planned.requestId&&checkpoint.httpCompleted===true&&
+      native?.terminalEmptyResponse===true&&native.nativeConversationInactive===true;
+    if(cleanupOnly&&!terminalEmpty)return state;
+    if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||(!native.hasError&&!terminalEmpty)||!native.userId||
         native.promptKey!==planned.promptKey||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
         !Number.isFinite(native.lastUserSentAtMs))return state;
     const [error]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
-    if(error?.result?.action!=='retry')return state;
+    if(!terminalEmpty&&error?.result?.action!=='retry')return state;
     const [empty]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
-      args:[{action:'inspect-empty-retry',text:'',url}]});
+      args:[{action:terminalEmpty&&cleanupOnly?'inspect-plain-retry-draft':'inspect-empty-retry',text:'',url}]});
     if(empty?.result?.ok!==true)return state;
     const [runtime]=await chrome.scripting.executeScript({target:{tabId},world:'ISOLATED',
       func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
@@ -1246,8 +1292,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(initial?.url==='https://chatgpt.com/'&&(!checkpoint?.promptKey||
           checkpoint.promptKey!==message.boundPromptKey||checkpoint.baselineKey!==''))return {ok:false,reason:'allocation-unbound'};
       if(!initial&&(before.status?.kind!=='loading'||before.status.eventAt!==message.startedAt))return {ok:false,reason:'attempt-changed'};
-      const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectCompletedTurn,args:[url]});
-      const native=results[0]?.result||{ok:false,reason:'native-turn-missing'};
+      const native=await inspectBoundNativeTurn(sender.tab.id,url);
       const tab=await chrome.tabs.get(sender.tab.id);
       if(manualRequestReceiptsByTab.get(sender.tab.id)!==initial||ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:false,reason:'attempt-changed'};
       if(!initial){
@@ -1257,7 +1302,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           native.assistantPhase==='final_answer'&&Boolean(native.assistantId)&&Boolean(native.assistantKey);
         const boundReasoningFailure=checkpoint?.state==='active'&&checkpoint.promptKey===message.boundPromptKey&&
           native.promptKey===checkpoint.promptKey&&native.reasoningFailed===true&&native.generating===false;
-        if(!native.ok||(!liveProgress&&!boundFinal&&!boundReasoningFailure)||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
+        const boundEmptyFailure=checkpoint?.httpCompleted===true&&checkpoint.promptKey===message.boundPromptKey&&
+          native.promptKey===checkpoint.promptKey&&native.terminalEmptyResponse===true&&native.nativeConversationInactive===true&&native.generating===false;
+        if(!native.ok||(!liveProgress&&!boundFinal&&!boundReasoningFailure&&!boundEmptyFailure)||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||!native.promptKey||!native.userId)return {ok:false,reason:'unbound-existing-request'};
         const runtime=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'ISOLATED',func:()=>({attempt:globalThis.__chatgptNotifierAttemptId,startedAt:globalThis.__chatgptNotifierRequestStartedAt})});
         const current=await readChatStatus(url);
         if(runtime[0]?.result?.attempt!==String(message.startedAt)||runtime[0]?.result?.startedAt!==message.startedAt||
@@ -1298,7 +1345,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(!target||!message.operationId||saved?.id!==message.operationId||ChatGPTHandoffTitle.chatUrl(saved.targetUrl)!==target)return;
       sourceUrl=target;movedWarning=true;
     }
-    const completionRequest=isWarning?manualRequestReceiptsByTab.get(tabId)||null:await latestRequestReceipt(tabId);
+    let completionRequest=isWarning?manualRequestReceiptsByTab.get(tabId)||null:await latestRequestReceipt(tabId);
+    if(isError&&!completionRequest)completionRequest=await readRestartErrorReceipt(tabId,sourceUrl,message);
     if(isError&&message.requestId&&completionRequest?.requestId!==message.requestId)return;
     if(!isError&&!isWarning&&(!completionRequest||completionRequest.startedAt!==message.completionStartedAt||
         String(completionRequest.startedAt)!==message.attemptId||

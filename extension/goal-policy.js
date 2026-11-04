@@ -3,8 +3,9 @@
 // Pure Goal rules. The model's marker is an assertion, not evidence of CI or merge.
 (function(root) {
   const MARKER='GOAL_COMPLETE';
-  const COMPLETION_FORMAT='После полного выполнения цели напиши GOAL_COMPLETE отдельным первым абзацем без оформления. После пустой строки напиши «Итог:», затем 1–3 коротких пункта с префиксом «- » о том, что выполнено по всей цели.';
-  const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. Если работа ещё не завершена, продолжай её и не выдавай маркер. '+COMPLETION_FORMAT;
+  const COMPLETION_FORMAT='Только после полного выполнения всей цели ответь ровно одной строкой GOAL_COMPLETE без точки в конце. Всё сообщение должно состоять только из этой строки: без Markdown, кавычек, пояснений, итогов и любого другого текста.';
+  const INCOMPLETE_FORMAT='Пока цель не выполнена полностью, продолжай работу и сообщай конкретный прогресс или блокировки. Не обсуждай сигнал завершения и не поясняй, почему ты его не подаёшь.';
+  const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. '+INCOMPLETE_FORMAT+' '+COMPLETION_FORMAT;
   function canonical(value) {
     try {
       const url=new URL(value);
@@ -34,8 +35,8 @@
     return ['Цель (автономное выполнение):',record.goal,
       ...(record.rules?['Условия завершения:',record.rules]:[]),
       'Продолжай работу end-to-end. Успешные проверки, публикация и merge должны действительно состояться, если это требуется целью.',
-      COMPLETION_FORMAT,
-      'Если цель не завершена, не используй GOAL_COMPLETE. Работай дальше, прямо указывай блокировки и реальные результаты.'].join('\n\n');
+      INCOMPLETE_FORMAT,
+      COMPLETION_FORMAT].join('\n\n');
   }
   function supplementsText(record) {
     return (record.supplements||[]).map((item,index)=>'Дополнение пользователя '+(index+1)+':\n'+item.userText);

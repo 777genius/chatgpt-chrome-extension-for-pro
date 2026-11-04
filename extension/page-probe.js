@@ -310,6 +310,12 @@ function controlChatComposer(options) {
     typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
     effort===options.expectedEffort&&model===options.expectedModel;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
+  if(options.action==='inspect-plain-retry-draft') {
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    const plain=typeof controller.getPlainText==='function'?controller.getPlainText():null;
+    return {...inspection,ok:noSystemHints&&typeof prompt==='string'&&plain===prompt&&visibleText()===prompt&&
+      controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&ready&&!attachments?.children.length};
+  }
   if(options.action==='inspect-empty-retry') {
     const attachments=composer.querySelector('[data-composer-attachments]');
     return {...inspection,ok:matches&&prompt===''&&!attachments?.children.length};

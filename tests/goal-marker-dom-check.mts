@@ -49,6 +49,9 @@ assert.equal(match('<p>GOAL_COMPLETE<br></p>'),false,'a line break is additional
 assert.equal(match('<p>GOAL_COMPLETE</p><p></p>'),false,'a second empty paragraph is not the exact marker');
 assert.equal(match('<p>GOAL_COMPLETE<!--extra node--></p>'),false,'unknown paragraph nodes fail closed');
 assert.equal(match('<p>Done: GOAL_COMPLETE</p>'),false,'substring is not the marker');
+for(const phrase of ['Маркер <code>GOAL_COMPLETE</code> не выдаю.',
+ 'Маркер GOAL_COMPLETE не выдаю.','GOAL_COMPLETE не выдаю.','Не завершено: GOAL_COMPLETE'])
+ assert.equal(match('<p>'+phrase+'</p>'),false,'a quoted or negated mention is not a completion message');
 assert.equal(match('<p>goal_complete</p>'),false,'marker is case-sensitive');
 assert.equal(match('<p>GOAL_COMPLETE</p><button>Click me</button>'),false,
   'interactive content inside the rendered answer disqualifies the marker');

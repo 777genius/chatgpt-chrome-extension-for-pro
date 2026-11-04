@@ -28,8 +28,8 @@ const last={id:'fallback-turn-2',isMostRecentTurn:true,isReadOnly:false,errorMes
  turn:{status:'complete',items:[{type:'user-message',messageId:'user-id'},
  {type:'assistant-message',messageId:'assistant-id',phase:'final_answer',completed:true}]}};
 const node=(key:string)=>({getAttribute:(name:string)=>name==='data-chatgpt-search-unit-key'?key:null});
-const element={getAttribute:(name:string)=>name==='data-content-search-turn-key'?'fallback-turn-2':null,
- querySelectorAll:(selector:string)=>selector.startsWith('aside')?[]:[node(selector.includes(':user')?'fallback-turn-2:0:user':'fallback-turn-2:2:assistant')],
+const element={closest:()=>null,getAttribute:(name:string)=>name==='data-content-search-turn-key'?'fallback-turn-2':null,
+ querySelectorAll:(selector:string)=>selector.startsWith('aside')||selector.includes('data-automation-card')?[]:[node(selector.includes(':user')?'fallback-turn-2:0:user':'fallback-turn-2:2:assistant')],
  __reactFiber$fixture:{memoizedProps:{entries:[{...last,id:'fallback-turn-1'},last]},return:null}};
 const root={querySelectorAll:(selector:string)=>selector.startsWith('[data-content-search-turn-key]')?[element]:[]};
 const globals=globalThis as unknown as Record<string,unknown>;

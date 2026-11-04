@@ -165,3 +165,13 @@ richController.getChatGptPrompt=()=>({prompt:'',systemHints:['owner hint']});ass
 richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});
 document.querySelector('[data-composer-body]')!.append(attachment);assert.equal(retryEmpty().ok,false);
 assert.equal(clicks,beforeRootInspection);
+
+attachment.remove();ready=true;pending=null;
+richController.getChatGptPrompt=()=>({prompt:'Owner plain draft',systemHints:[]});
+richController.getPlainText=()=> 'Owner plain draft';editor.textContent='Owner plain draft';
+const plainDraft=()=>control({action:'inspect-plain-retry-draft',text:'',url:'https://chatgpt.com/'});
+assert.equal(plainDraft().ok,true,'a plain current draft can be saved/restored by the existing retry sender');
+pending={queued:true};assert.equal(plainDraft().ok,false);pending=null;
+richController.getChatGptPrompt=()=>({prompt:'Owner plain draft',systemHints:['private context']});assert.equal(plainDraft().ok,false);
+richController.getChatGptPrompt=()=>({prompt:'[Owner](https://example.test)',systemHints:[]});assert.equal(plainDraft().ok,false,'rich native text cannot be silently flattened');
+assert.equal(clicks,beforeRootInspection);

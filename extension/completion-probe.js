@@ -3,7 +3,7 @@
 // Serialized into MAIN. Metadata by default; an armed Goal may explicitly
 // request already-sent message text. Never reads drafts or invokes handlers.
 // The expected attempt is bound by the extension caller.
-function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null) {
+function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null) {
   function plainGoalMarkerDOM(rendered,sourceMessageId='') {
     if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
     const plain=node=>node?.tagName==='P'&&!node.children.length&&node.childNodes.length===1&&
@@ -98,6 +98,41 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   const hasError=Boolean(entry.errorMessage)||Array.from(element.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(visible);
   const userTimes=(entry.timestampTurns||[]).filter(item=>item.role==='user');
   const firstUserSentAtMs=entryCount===1&&users.length===1&&userTimes.length===1?userTimes[0].sentAtMs:null;
+  // Native turn aggregation can remain in_progress after an aborted stream,
+  // even though the conversation controller has positively become inactive.
+  // Bind that controller to this exact latest entry, never another retained page.
+  const aliasBindingVerified=conversationBinding?.url===expectedUrl&&
+    /^local-chatgpt:[a-z0-9-]+$/.test(conversationBinding.alias||'')&&entry.conversationId===conversationBinding.alias&&
+    user.messageId===conversationBinding.userId&&user.message===conversationBinding.userText&&
+    userTimes.at(-1)?.sentAtMs===conversationBinding.userSentAtMs;
+  let nativeConversationInactive=false;
+  for(let current=fiberKey&&element[fiberKey],depth=0;current&&depth<64;depth++,current=current.return) {
+    const props=current.memoizedProps;
+    if(!(props?.conversationId===location.pathname.split('/').at(-1)||aliasBindingVerified&&props?.conversationId===conversationBinding.alias)||
+        props.composerConversationId!==props.conversationId||props.entries!==nativeEntries||
+        props.entries?.at(-1)!==entry)continue;
+    nativeConversationInactive=props.isTurnActive===false&&props.awaitingGptContinuation===false&&
+      props.showPendingLoadingMessage===false&&props.isConversationFetching===false&&props.isConversationLoading===false&&
+      props.hasLoadError===false&&props.isComposerDisabled===false&&props.isSubmitDisabled===false&&
+      props.isWorkConversation===false&&props.isSharedConversation===false;
+    break;
+  }
+  const boundUnit=(node,item,role)=>{
+    if(!node||!item?.messageId)return false;
+    const unit=node.closest(`[data-chatgpt-search-unit-key$=":${role}"]`);
+    if(!unit)return false;
+    const ids=new Set((unit.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
+    const index=(entry.turn?.items||[]).lastIndexOf(item);
+    return unit.getAttribute('data-chatgpt-search-unit-key')===`${entry.id}:${index}:${role}`&&
+      ids.size===1&&ids.has(item.messageId);
+  };
+  const latestRow=element.closest('[data-turn-key]')||element;
+  const currentTask=Boolean(entry.turn.automation)||Array.from(latestRow.querySelectorAll('[data-automation-card="true"]'))
+    .some(node=>visible(node)&&!node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
+  const inactiveFinalCandidate=entry.turn.status==='in_progress'&&nativeConversationInactive&&
+    entry.isMostRecentTurn===true&&entry.isReadOnly===false&&!generating&&!hasError&&!currentTask&&
+    assistant?.phase==='final_answer'&&assistant.completed===true&&
+    boundUnit(domUser,user,'user')&&boundUnit(domAssistant,assistant,'assistant');
   let goalText={};
   if(includeGoalText===true) {
     let userVisibleText=null;
@@ -187,9 +222,9 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   }
   // Failure rollback is separate from completion. Require the real idle
   // voice control AND its native editor controller; absence of Stop is unsafe.
-  let composerIdle=false,absentPromptKey=null;
-  if(typeof failedPromptKey==='string'&&failedPromptKey.startsWith(location.pathname+'|')) {
-    const key=failedPromptKey.slice(location.pathname.length+1),match=/^(.*):(\d+):user$/.exec(key);
+  let composerIdle=false,nativeControllerIdle=false,absentPromptKey=null;
+  if(nativeConversationInactive||typeof failedPromptKey==='string'&&failedPromptKey.startsWith(location.pathname+'|')) {
+    const key=typeof failedPromptKey==='string'?failedPromptKey.slice(location.pathname.length+1):'',match=/^(.*):(\d+):user$/.exec(key);
     if(match&&nativeEntries&&!nativeEntries.some(item=>item.id===match[1]))absentPromptKey=failedPromptKey;
     const visibleIdle=node=>Boolean(node?.isConnected&&visible(node)&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
     const voice=Array.from(root.querySelectorAll('[data-composer-body] button')).find(node=>visibleIdle(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true'&&node.querySelector('use[href$="#codex-icon-voice-regular-20"]'));
@@ -203,17 +238,27 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
       const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
       for(let current=key&&node[key],i=0;current&&i<16;i++,current=current.return) {
         const controller=current.memoizedProps?.composerController;
-        if(controller?.view?.dom===editor&&typeof controller.getChatGptPrompt==='function'&&
-            controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')composerIdle=Boolean(voice&&nativeVoiceIdle);
+        if(controller?.view?.dom===editor&&typeof controller.getChatGptPrompt==='function'&&typeof controller.submitReady==='boolean') {
+          if(controller.pendingSubmit===null&&controller.pendingBrowserAutocompleteSubmission===null)nativeControllerIdle=true;
+          if(controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null)composerIdle=Boolean(voice&&nativeVoiceIdle);
+        }
       }
     }
   }
+  const inactiveProof=nativeConversationInactive&&nativeControllerIdle&&!currentTask&&entry.isMostRecentTurn===true&&
+    entry.isReadOnly===false&&boundUnit(domUser,user,'user');
+  const terminalEmptyResponse=entry.turn.status==='complete'&&inactiveProof&&!generating&&!hasError&&!domAssistant&&users.length>0&&
+    entry.turn.items.every(item=>['user-message','chatgpt-reasoning-group'].includes(item.type));
   return {ok:true,url,firstUserSentAtMs,lastUserSentAtMs:userTimes.at(-1)?.sentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
     assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
     reasoningFailed:entry.turn.status==='cancelled'&&
       entry.turn.items.some(item=>item.type==='chatgpt-reasoning-group')&&
       !entry.turn.items.some(item=>item.type==='assistant-message'),
-    turnStatus:entry.turn.status,assistantPhase:assistant?.phase,assistantCompleted:assistant?.completed===true,
+    nativeTurnStatus:entry.turn.status,
+    nativeConversationInactive:inactiveProof,nativeConversationId:entry.conversationId||null,terminalEmptyResponse,
+    turnStatus:inactiveFinalCandidate&&composerIdle&&nativeControllerIdle?'complete':entry.turn.status,
+    completionProof:inactiveFinalCandidate&&composerIdle&&nativeControllerIdle?'native-inactive-final':null,
+    assistantPhase:assistant?.phase,assistantCompleted:assistant?.completed===true,
     generating,hasError,...(failedPromptKey?{composerIdle,absentPromptKey}:{}),...goalText};
 }
 if(typeof module!=='undefined')module.exports={inspectCompletedTurn};

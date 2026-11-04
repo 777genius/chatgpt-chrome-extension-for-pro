@@ -508,3 +508,18 @@ for(const stop of [false,true]) {
   release();await pending;
   assert.equal(env.messages.length,stop?0:1,'stop during title preparation cancels the exact reserved dispatch');
 }
+
+// A refusal mentioning the completion token is an ordinary answer, never a stop.
+for(const response of ['Маркер `GOAL_COMPLETE` не выдаю.','Маркер GOAL_COMPLETE не выдаю.',
+ 'GOAL_COMPLETE не выдаю.','Не завершено: GOAL_COMPLETE','"GOAL_COMPLETE"']) {
+ const env=fixture();await begin(env);await confirm(env);
+ await answer(env,{response,rawExact:true});
+ assert.equal(state(env).phase,'preparing','a quoted/negated token does not complete Goal');
+ assert.equal(env.messages.length,2,'exactly one continuation is scheduled');
+ assert.match(env.messages[1].message.text,/Всё сообщение должно состоять только из этой строки/);
+ assert.doesNotMatch(env.messages[1].message.text,/«Итог:»|1–3 коротких пункта/);
+ await confirm(env,'/c/goal-fixture-a|continued-user');
+ await answer(env,{response:'GOAL_COMPLETE',rawExact:true});
+ assert.equal(state(env).phase,'completed');
+ assert.equal(env.messages.length,2,'standalone completion never schedules another continuation');
+}
