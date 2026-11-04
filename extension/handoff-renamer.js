@@ -69,7 +69,24 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
     }
     // This native refusal happens before save.click(). Allow a bounded fresh
     // preparation after React replaced the form or the generated title changed.
-    if(record.titleStatus==='failed'&&record.titleReason==='title-form-changed'&&
+    let preSaveRefusal=false;
+    if(record.titleStatus==='failed'&&record.titleReason==='title-or-form-changed'&&url&&
+        !Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt')&&
+        typeof record.titlePreparationTitle==='string'&&(record.titleRefusalRetries||0)<2) {
+      const tab=await chrome.tabs.get(tabId);
+      if(ChatGPTHandoffTitle.chatUrl(tab.url)!==url)return {ok:true,skipped:true};
+      const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatTitle,
+        args:[{action:'inspect',url,operationId:id,title:record.naming.title}]});
+      const snapshot=checked?.result;
+      // A foreign modal is temporary, but a changed title may be the owner's
+      // edit. Never adopt a new title snapshot just to make an old retry pass.
+      if(!snapshot?.ok||snapshot.title!==record.titlePreparationTitle)return {ok:true,skipped:true};
+      if(snapshot.modalOpen!==false)return {ok:true,waiting:true,retryable:true};
+      const fresh=(await chrome.storage.local.get(key))[key];
+      if(JSON.stringify(fresh)!==JSON.stringify(record))return {ok:true,waiting:true,retryable:true};
+      preSaveRefusal=true;
+    }
+    if(record.titleStatus==='failed'&&(record.titleReason==='title-form-changed'||preSaveRefusal)&&
         (record.titleRefusalRetries||0)<2) {
       const next={...record,titleStatus:'waiting',titlePreparationVersion:1,
         titlePrepareAttempts:0,titleRetryAfter:0,titleRefusalRetries:(record.titleRefusalRetries||0)+1};

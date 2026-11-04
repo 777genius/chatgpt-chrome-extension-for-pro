@@ -6,8 +6,8 @@ import { parseHTML } from 'linkedom';
 type Request = { tabId: number; method: string; url: string; requestId: string; requestBody: {raw: {bytes: ArrayBuffer}[]} };
 type Completion = { tabId: number; url: string; requestId: string; statusCode: number };
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
-type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; streaming?:boolean; title?: string; conversationId?: string};
-type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string};
+type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
+type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
 type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
@@ -384,4 +384,20 @@ console.log('PASS: observed native rename DOM, local/canonical chat binding, ine
 {
  const h=harness();h.storage['chatgpt-goal:'+targetUrl]={phase:'sending',operation:{id:'goal-send',status:'intent'}};
  await h.rename({goalOperationId:'goal-send'});assert.equal(h.opened,0,'an already sending operation cannot authorize title UI');
+}
+
+// A modal can block native menu preparation before any title save intent.
+{
+ const h=harness();Object.assign(h.record,{titleStatus:'failed',titleReason:'title-or-form-changed',titlePreparationTitle:h.document.title});
+ const modal=h.document.createElement('section');modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');h.document.body.append(modal);
+ assert.equal((await h.rename()).waiting,true);assert.equal(h.saved,0);assert.equal(h.record.titleRefusalRetries,undefined);
+ modal.remove();assert.equal((await h.rename()).ok,true);assert.equal(h.saved,1);assert.equal(h.record.titleRefusalRetries,1);
+ await h.rename();assert.equal(h.saved,1,'safe preparation recovery never repeats a confirmed save');
+}
+for(const scenario of ['owner-title','save-intent','exhausted']){
+ const h=harness();Object.assign(h.record,{titleStatus:'failed',titleReason:'title-or-form-changed',titlePreparationTitle:h.document.title});
+ if(scenario==='owner-title')h.document.title='Owner renamed this chat';
+ if(scenario==='save-intent')h.record.titleSaveStartedAt=100;
+ if(scenario==='exhausted')h.record.titleRefusalRetries=2;
+ await h.rename();assert.equal(h.saved,0,scenario);assert.equal(h.opened,0,scenario);
 }

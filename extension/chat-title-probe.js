@@ -79,7 +79,8 @@ function controlChatTitle(options) {
     if(query?.state?.data?.conversation_id && query.state.data.conversation_id!==chatId)canonicalMismatch=true;
   }
   ready=ready&&!canonicalMismatch&&!streaming;
-  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,title:document.title,url:location.href,
+  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,
+    modalOpen:Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible),title:document.title,url:location.href,
     conversationId:nativeConversationIds.size===1?Array.from(nativeConversationIds)[0]:null};
   if (Number.isFinite(options.expiresAt)&&Date.now()>=options.expiresAt) return {ok:false,reason:'title-deadline-exceeded'};
   let state=globalThis.__chatgptNotifierTitleOperation;
