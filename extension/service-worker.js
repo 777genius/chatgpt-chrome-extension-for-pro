@@ -743,8 +743,23 @@ async function recoverNoClickRetry(tabId,url) {
     if(empty?.result?.ok!==true)return state;
     const [runtime]=await chrome.scripting.executeScript({target:{tabId},world:'ISOLATED',
       func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
-    if(runtime?.result?.attemptId!==planned.attemptId||(runtime.result.requestId||null)!==(planned.requestId||null)||
-        (await chrome.tabs.get(tabId)).url!==url)return state;
+    const runtimeMatches=runtime?.result?.attemptId===planned.attemptId&&(runtime.result.requestId||null)===(planned.requestId||null);
+    if(!runtimeMatches) {
+      const saved=await completionCheckpointRead(tabId);
+      if(runtime?.result?.attemptId||runtime?.result?.requestId||native.generating!==false||native.nativeConversationInactive!==true||
+          saved?.state!=='active'||saved.url!==url||saved.promptKey!==planned.promptKey||
+          saved.requestId!==planned.requestId||String(saved.startedAt)!==planned.attemptId||!Number.isFinite(saved.requestFailedAt))return state;
+      const [bound]=await chrome.scripting.executeScript({target:{tabId},world:'ISOLATED',
+        func:function restoreNoClickAttemptBinding(binding) {
+          if(location.origin+location.pathname!==binding.url||globalThis.__chatgptNotifierAttemptId||globalThis.__chatgptNotifierRequestId)return false;
+          globalThis.__chatgptNotifierAttemptId=binding.attemptId;
+          globalThis.__chatgptNotifierRequestStartedAt=binding.startedAt;
+          globalThis.__chatgptNotifierRequestId=binding.requestId;
+          return true;
+        },args:[{url,attemptId:planned.attemptId,startedAt:saved.startedAt,requestId:planned.requestId}]});
+      if(bound?.result!==true||JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(saved))return state;
+    }
+    if((await chrome.tabs.get(tabId)).url!==url)return state;
     if(JSON.stringify(await readRetryDraft(url))!==JSON.stringify(carriedDraft))return state;
     await appendJournal({kind:'retry.preparation_recovered',operationId:failed.operationId,sourceUrl:url,
       attemptId:planned.attemptId,promptKey:planned.promptKey,requestId:planned.requestId,
