@@ -18,7 +18,7 @@ async function fixture(extra:any={}) {
   calls++;
   if(o.func?.name==='restoreNoClickAttemptBinding')return [{result:extra.bindingRace!==true}];
   if(o.func===inspectCompletedTurn)return [{result:native}];
-  if(o.func===inspectChatError)return [{result:{action:extra.action||'retry'}}];
+  if(o.func===inspectChatError)return [{result:{action:extra.action||'retry',deliveryUserSentAtMs:extra.deliveryTime}}];
   if(o.func===controlChatComposer)return [{result:{ok:extra.empty!==false}}];
   return [{result:extra.runtimeEmpty?{}:{attemptId:extra.runtimeAttempt||attemptId,requestId:'request'}}];
  }}};
@@ -75,3 +75,9 @@ assert.equal((await fixture({runtimeEmpty:true,draftRecord:carry,bindingRace:tru
 assert.equal((await fixture({runtimeEmpty:true,draftRecord:carry,native:{generating:true,nativeConversationInactive:true}})).writes,0);
 
 assert.equal((await fixture({runtimeEmpty:true,noTransportFailure:true,draftRecord:carry,native:{generating:false,nativeConversationInactive:true}})).writes,0,'an absent runtime alone never authorizes retry recovery');
+
+assert.equal((await fixture({goal:{phase:'completed',expectedPromptKey:'prior-prompt'}})).writes,1,'a completed older Goal cannot block a later ordinary retry');
+assert.equal((await fixture({goal:{phase:'completed',expectedPromptKey:promptKey}})).writes,0,'the completed Goal response itself stays terminal');
+
+assert.equal((await fixture({draftRecord:carry,deliveryTime:999990,native:{generating:false,nativeConversationInactive:false}})).writes,1,'exact native input-delivery failure may recover a parked draft despite stale aggregate turn state');
+assert.equal((await fixture({draftRecord:carry,deliveryTime:999980,native:{generating:false,nativeConversationInactive:false}})).writes,0,'different delivery error user is not idle proof');

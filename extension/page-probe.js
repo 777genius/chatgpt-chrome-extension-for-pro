@@ -117,7 +117,19 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         }
       }
       if(sameRecovery&&voice&&nativeVoiceIdle&&controller&&controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')return {ok:true,stopped:false,idle:true,proof:'native-voice-idle',recoveryBinding};
-      return {ok:false,stopped:false,retryable:true,reason:'Нативная остановка или свободный редактор пока не подтверждены'};
+      const send=Array.from(root.querySelectorAll('button[data-testid="send-button"],button#composer-submit-button,[data-composer-body] button[type="submit"]')).find(node=>visible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true');
+      let nativeSendIdle=false;
+      const sendFiber=send&&Object.keys(send).find(key=>key.startsWith('__reactFiber$'));
+      for(let current=sendFiber&&send[sendFiber],i=0;current&&i<12;i++,current=current.return){
+        const props=current.memoizedProps;
+        if(props?.isLoading===false&&props.disabled===false&&props.isStartButtonAllowed===false)nativeSendIdle=true;
+      }
+      const sameComposer=send&&editor&&send.closest('form,[data-composer-body]')===editor.closest('form,[data-composer-body]');
+      const editorSubmitIdle=Boolean(sameRecovery&&sameComposer&&nativeSendIdle&&controller&&controller.submitReady===true&&
+        controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null);
+      // A draft replaces Voice with Send. This is only a candidate: the worker
+      // must additionally prove this exact request's terminal transport failure.
+      return {ok:false,stopped:false,retryable:true,needsIdleProof:sameRecovery,editorSubmitIdle,reason:'Нативная остановка или свободный редактор пока не подтверждены'};
     }
     if(recoveryAction==='inspect-recovery')return {ok:true,stopped:false,idle:false,needsStop:true,recoveryBinding};
     if (stop.disabled || stop.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Остановка временно недоступна'};
@@ -314,7 +326,7 @@ function controlChatComposer(options) {
     const attachments=composer.querySelector('[data-composer-attachments]');
     const plain=typeof controller.getPlainText==='function'?controller.getPlainText():null;
     return {...inspection,ok:noSystemHints&&typeof prompt==='string'&&plain===prompt&&visibleText()===prompt&&
-      controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&ready&&!attachments?.children.length};
+      controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&(ready||prompt==='')&&!attachments?.children.length};
   }
   if(options.action==='inspect-empty-retry') {
     const attachments=composer.querySelector('[data-composer-attachments]');

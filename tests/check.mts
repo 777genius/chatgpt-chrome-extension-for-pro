@@ -274,6 +274,13 @@ async function domCheck() {
   await waitFor(()=>carried.sends.length===1);
   await waitFor(()=>carried.document.querySelector('#prompt-textarea')!.textContent==='Preserved synthetic draft');
   assert.deepEqual(carried.sends,['доделай е2е'],'carried backup is never submitted');
+  const carriedRecovery=setup('Preserved synthetic draft',true,true,'',{preparationRecovered:true,preparationDraftOperationId:'prior-recovery',preparationDraftSequence:12,
+    fixtureDraft:{operationId:'prior-recovery',savedSequence:12,attemptId:'',phase:'not-clicked',draft:'Preserved synthetic draft'}});
+  carriedRecovery.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div role="status"><span class="text-chatgpt-recovery">Recovery</span></div>');
+  await pause();carriedRecovery.advance(3500);
+  await waitFor(()=>carriedRecovery.logs.some(e=>e.kind==='draft.restored'));
+  assert.deepEqual(carriedRecovery.sends,['доделай е2е']);
+  assert.equal(carriedRecovery.document.querySelector('#prompt-textarea')!.textContent,'Preserved synthetic draft','carried recovery never doubles or submits the same owner draft');
   const historical = setup();
   historical.document.querySelector('main')!.innerHTML = `<article data-testid="conversation-turn-old" data-turn="assistant">${alertHTML('Old')}</article>${user}<article data-testid="conversation-turn-2" data-turn="assistant"><div class="markdown">${alertHTML('Example')}</div></article>`;
   await pause();

@@ -1,9 +1,9 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.46';
+  const SCRIPT_VERSION = '1.8.47';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
-  document.dispatchEvent(new Event('chatgpt-notifier-retire-invalidated'));
+  document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
@@ -603,6 +603,7 @@
     let recoveryStopped = false;
     let recoveryVerifiedIdle = false;
     let recoveryDraft = null;
+    let carriedDraftText = null;
     let readinessPhase = 'planned';
     const readiness = async (phase,details={}) => {
       if(readinessPhase===phase)return;
@@ -617,11 +618,23 @@
     try {
       await logRetry('retry.planned', {operationId,text:RETRY_TEXT,error:error.response,
         failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,promptKey},true);
+      if(state.preparationDraftOperationId) {
+        const carried=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url:sourceUrl});
+        const backup=carried?.ok&&carried.record;
+        if(!stillCurrent()||!backup||backup.operationId!==state.preparationDraftOperationId||
+            backup.savedSequence!==state.preparationDraftSequence||backup.attemptId!==attempt||backup.claimedAt||
+            !['saved','not-clicked'].includes(backup.phase)||typeof backup.draft!=='string'||!backup.draft)
+          throw new Error('Резервная копия черновика изменилась; повтор остановлен');
+        carriedDraftText=backup.draft;
+      }
       if (error.recovery) {
         if (!stillCurrent()) return;
         const beforeStop = composer();
         recoveryDraft = beforeStop ? rawEditorText(beforeStop) : null;
-        if (recoveryDraft) await logRetry('draft.saved',{operationId,draft:recoveryDraft,draftChars:recoveryDraft.length,phase:'before-recovery-stop'},true);
+        if (recoveryDraft) {
+          const saved=carriedDraftText&&carriedDraftText!==recoveryDraft?carriedDraftText+'\n\n'+recoveryDraft:recoveryDraft;
+          await logRetry('draft.saved',{operationId,draft:saved,draftChars:saved.length,phase:'before-recovery-stop'},true);
+        }
         if (!stillCurrent() || (beforeStop && rawEditorText(beforeStop) !== recoveryDraft)) return;
         const alert = currentErrors().find(node=>node.querySelector('.text-chatgpt-recovery'));
         let result;
@@ -664,19 +677,12 @@
       if (form?.querySelector('[data-testid*="attachment"], [data-testid="file-upload-progress"]') || form?.querySelector('[data-composer-attachments]')?.children.length) {
         throw new Error('В поле есть вложение');
       }
-      if(state.preparationDraftOperationId) {
-        const carried=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url:sourceUrl});
-        const backup=carried?.ok&&carried.record;
-        if(!stillCurrent()||!backup||backup.operationId!==state.preparationDraftOperationId||
-            backup.savedSequence!==state.preparationDraftSequence||backup.attemptId!==attempt||backup.claimedAt||
-            !['saved','not-clicked'].includes(backup.phase)||typeof backup.draft!=='string'||!backup.draft)
-          throw new Error('Резервная копия черновика изменилась; повтор остановлен');
-        recoveryDraft=backup.draft;
-      }
       insertedEditor = editor;
       const visibleDraft = rawEditorText(editor);
-      const draft = recoveryDraft && visibleDraft !== recoveryDraft
+      const settledDraft = recoveryDraft && visibleDraft !== recoveryDraft
         ? (visibleDraft ? `${recoveryDraft}\n\n${visibleDraft}` : recoveryDraft) : visibleDraft;
+      const draft=carriedDraftText&&settledDraft!==carriedDraftText
+        ?(settledDraft?carriedDraftText+'\n\n'+settledDraft:carriedDraftText):settledDraft;
       if (draft) {
         await logRetry('draft.saved',{operationId,draftChars:draft.length,draft},true);
         state.preparationDraftOperationId=null;state.preparationDraftSequence=null;

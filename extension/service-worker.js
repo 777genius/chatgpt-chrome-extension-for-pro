@@ -715,7 +715,8 @@ async function recoverNoClickRetry(tabId,url) {
     const tab=await chrome.tabs.get(tabId);
     if(tab.url!==url||tab.status!=='complete')return state;
     const goal=await goalController.get(url);
-    if(goal&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||
+    const protectingGoal=goal&&!(goal.phase==='completed'&&goal.expectedPromptKey!==planned.promptKey);
+    if(protectingGoal&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||
         goal.phase!=='blocked'||goal.reason!=='Восстановление запроса завершилось ошибкой'||Date.now()>=goal.deadlineAt))return state;
     const native=await inspectBoundNativeTurn(tabId,url);
     const checkpoint=native?.hasError?null:await completionCheckpointRead(tabId);
@@ -723,21 +724,37 @@ async function recoverNoClickRetry(tabId,url) {
       checkpoint.startedAt===Number(planned.attemptId)&&checkpoint.requestId===planned.requestId&&checkpoint.httpCompleted===true&&
       native?.terminalEmptyResponse===true&&native.nativeConversationInactive===true;
     if(cleanupOnly&&!terminalEmpty)return state;
-    if(carriedDraft&&(native?.generating!==false||native.nativeConversationInactive!==true))return state;
+    const [delivery]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
+    const failedRequest=await completionCheckpointRead(tabId);
+    const deliveryIdle=delivery?.result?.action==='retry'&&Number.isFinite(delivery.result.deliveryUserSentAtMs)&&
+      delivery.result.deliveryUserSentAtMs===native?.lastUserSentAtMs&&native?.hasError===true&&
+      failedRequest?.state==='active'&&failedRequest.url===url&&failedRequest.promptKey===planned.promptKey&&
+      failedRequest.requestId===planned.requestId&&String(failedRequest.startedAt)===planned.attemptId&&
+      (failedRequest.httpCompleted===true||Number.isFinite(failedRequest.requestFailedAt));
+    let verifiedIdle=native?.generating===false&&(native.nativeConversationInactive===true||deliveryIdle);
+    if(carriedDraft&&!verifiedIdle) {
+      const bound=events.filter(e=>e.kind==='recovery.stop_intent').at(-1)?.recoveryBinding;
+      if(bound?.kind!=='user'||bound.userId!==native?.userId)return state;
+      const message={url,alertIndex:0,attemptId:planned.attemptId,requestId:planned.requestId,promptKey:planned.promptKey,recoveryBinding:bound};
+      const [surface]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,
+        args:[0,false,'inspect-recovery',url,planned.promptKey,bound]});
+      verifiedIdle=Boolean(await proveInactiveRecoveryIdle(tabId,url,message,await latestRequestReceipt(tabId),surface?.result||{}));
+    }
+    if(carriedDraft&&!verifiedIdle)return state;
     if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||(!native.hasError&&!terminalEmpty)||!native.userId||
         native.promptKey!==planned.promptKey||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
         !Number.isFinite(native.lastUserSentAtMs))return state;
     const [error]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
     if(!terminalEmpty&&error?.result?.action!=='retry')return state;
     const [empty]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
-      args:[{action:terminalEmpty&&cleanupOnly?'inspect-plain-retry-draft':'inspect-empty-retry',text:'',url}]});
+      args:[{action:carriedDraft||terminalEmpty&&cleanupOnly?'inspect-plain-retry-draft':'inspect-empty-retry',text:'',url}]});
     if(empty?.result?.ok!==true)return state;
     const [runtime]=await chrome.scripting.executeScript({target:{tabId},world:'ISOLATED',
       func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
     const runtimeMatches=runtime?.result?.attemptId===planned.attemptId&&(runtime.result.requestId||null)===(planned.requestId||null);
     if(!runtimeMatches) {
       const saved=await completionCheckpointRead(tabId);
-      if(runtime?.result?.attemptId||runtime?.result?.requestId||native.generating!==false||native.nativeConversationInactive!==true||
+      if(runtime?.result?.attemptId||runtime?.result?.requestId||!verifiedIdle||
           saved?.state!=='active'||saved.url!==url||saved.promptKey!==planned.promptKey||
           saved.requestId!==planned.requestId||String(saved.startedAt)!==planned.attemptId||!Number.isFinite(saved.requestFailedAt))return state;
       const [bound]=await chrome.scripting.executeScript({target:{tabId},world:'ISOLATED',
@@ -751,6 +768,11 @@ async function recoverNoClickRetry(tabId,url) {
       if(bound?.result!==true||JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(saved))return state;
     }
     if((await chrome.tabs.get(tabId)).url!==url)return state;
+    if(deliveryIdle) {
+      const [fresh]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
+      if(fresh?.result?.action!=='retry'||fresh.result.deliveryUserSentAtMs!==delivery.result.deliveryUserSentAtMs||
+          JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(failedRequest))return state;
+    }
     if(JSON.stringify(await readRetryDraft(url))!==JSON.stringify(carriedDraft))return state;
     await appendJournal({kind:'retry.preparation_recovered',operationId:failed.operationId,sourceUrl:url,
       attemptId:planned.attemptId,promptKey:planned.promptKey,requestId:planned.requestId,
@@ -760,6 +782,28 @@ async function recoverNoClickRetry(tabId,url) {
   })();
   retryReadinessRecoveries.set(url,work);
   try{return await work;}finally{if(retryReadinessRecoveries.get(url)===work)retryReadinessRecoveries.delete(url);}
+}
+
+// Missing voice controls can mean a draft is present, not an active response.
+// Reuse exact native request/controller proof; this never clicks Stop or Send.
+async function proveInactiveRecoveryIdle(tabId,url,message,initial,surfaceProof={}) {
+  if(message.recoveryBinding?.kind!=='user'||!message.recoveryBinding.userId)return null;
+  const checkpoint=await completionCheckpointRead(tabId),native=await inspectBoundNativeTurn(tabId,url);
+  if(checkpoint?.state!=='active'||checkpoint.url!==url||checkpoint.promptKey!==message.promptKey||
+      String(checkpoint.startedAt)!==message.attemptId||checkpoint.requestId!==message.requestId||
+      !checkpoint.httpCompleted&&!Number.isFinite(checkpoint.requestFailedAt)||
+      !native?.ok||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==true||
+      native.generating!==false||native.nativeConversationInactive!==true&&surfaceProof.editorSubmitIdle!==true||native.promptKey!==message.promptKey||
+      native.userId!==message.recoveryBinding.userId||!Number.isFinite(native.lastUserSentAtMs)||
+      Math.abs(native.lastUserSentAtMs-checkpoint.startedAt)>10000)return null;
+  const [editor]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+    args:[{action:'inspect-plain-retry-draft',text:'',url}]});
+  if(editor?.result?.ok!==true)return null;
+  const [fresh]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,
+    args:[message.alertIndex,false,'inspect-recovery',url,message.promptKey,message.recoveryBinding]});
+  if(fresh?.result?.needsIdleProof!==true||native.nativeConversationInactive!==true&&fresh.result.editorSubmitIdle!==true||JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+      await latestRequestReceipt(tabId)!==initial||(await chrome.tabs.get(tabId)).url!==url)return null;
+  return {ok:true,stopped:false,idle:true,proof:'native-inactive-error-editor',recoveryBinding:message.recoveryBinding};
 }
 
 const goalAckProofs=new Map();
@@ -1062,7 +1106,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           runtime?.result?.attemptId!==message.attemptId||(runtime.result.requestId||null)!==(message.requestId||null))return refuse('Запрос перед остановкой изменился');
       const results=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',func:inspectChatError,
         args:[message.alertIndex,false,'stop-recovery',message.url,message.promptKey,message.recoveryBinding||null]});
-      const result=results[0]?.result || {ok:false,reason:'Нет подтверждения остановки'};
+      let result=results[0]?.result || {ok:false,reason:'Нет подтверждения остановки'};
+      if(result.needsIdleProof===true)result=await proveInactiveRecoveryIdle(sender.tab.id,url,message,initial,result)||result;
       await appendJournal({kind:result.ok&&(result.stopped===true||result.idle===true)?'recovery.stop_result':'recovery.stop_refused',operationId:message.operationId,attemptId:message.attemptId,requestId:message.requestId,stopped:result.stopped,idle:result.idle,proof:result.proof,recoveryBinding:result.recoveryBinding,reason:result.reason},sender.tab);
       return result;
     })().then(sendResponse).catch(error=>sendResponse({ok:false,reason:String(error.message || error)}));
