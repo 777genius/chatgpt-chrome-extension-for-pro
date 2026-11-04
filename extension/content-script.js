@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.48';
+  const SCRIPT_VERSION = '1.8.49';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -1432,6 +1432,7 @@
       };
       const release = answerWaitSlot.replace(() => finish(null));
 
+      let lastRebindCandidate='';
       const check = () => {
         if (settled) return;
         if (!runtimeAvailable()) { stopContext(); return; }
@@ -1463,6 +1464,20 @@
           stableText = '';
           stableSince = 0;
           generationEndedAt = 0;
+          return;
+        }
+
+        if(attempt.promptKey&&snapshot?.promptKey&&snapshot.promptKey!==attempt.promptKey&&
+            snapshot.promptKey!==lastRebindCandidate&&!completionProbeBusy) {
+          lastRebindCandidate=snapshot.promptKey;completionProbeBusy=true;
+          void runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:attempt.url}).then(result=>{
+            const record=result?.ok&&result.record,latest=latestPromptSnapshot();
+            if(!isCurrent()||settled||record?.state!=='active'||record.startedAt!==attempt.startedAt||
+                record.requestId!==attempt.requestId||record.promptKey!==latest?.promptKey)return;
+            attempt.promptKey=record.promptKey;attempt.baselineKey=record.baselineKey;
+            stableText='';stableSince=0;
+            void audit('completion.live_prompt_rebound',{promptKey:record.promptKey,startedAt:attempt.startedAt});
+          }).finally(()=>{completionProbeBusy=false;});
           return;
         }
 

@@ -626,6 +626,38 @@ async function inspectBoundNativeTurn(tabId,url) {
   return checked.result;
 }
 
+// Stable native identity is observation metadata; it never authorizes a send.
+async function bindCompletionNativeIdentity(tabId,url,record) {
+  if(!record||record.nativeUserId||record.state!=='active'||record.url!==url||!record.promptKey||
+      record.promptKey===record.baselineKey)return false;
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url]});
+  const n=checked?.result;
+  if(!n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.promptKey!==record.promptKey||!n.userId||
+      !Number.isFinite(n.lastUserSentAtMs)||Math.abs(n.lastUserSentAtMs-record.startedAt)>10000)return false;
+  return completionCheckpointChange(tabId,current=>JSON.stringify(current)===JSON.stringify(record)?
+    {record:{...current,nativeUserId:n.userId,nativeUserSentAtMs:n.lastUserSentAtMs},value:true}:{value:false});
+}
+
+// Legacy checkpoints need an independently accepted sender payload before a
+// reused numeric DOM key can be rebound to a different visual row number.
+async function recoverCompletionSenderIdentity(tabId,url,record,native) {
+  if(!record||!native?.ok||record.nativeUserId||native.promptKey!==record.baselineKey)return null;
+  const j=await readJournal(),requests=j.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===url&&
+    e.requestId===record.requestId&&e.eventAt===record.startedAt);
+  if(!j.ok||j.storageError||requests.length!==1||!requests[0].operationId)return null;
+  const request=requests[0],own=j.events.filter(e=>e.operationId===request.operationId&&e.tabId===tabId&&e.sourceUrl===url),
+    sends=own.filter(e=>e.kind==='send.dispatched'),started=own.filter(e=>e.kind==='request.started');
+  if(sends.length!==1||started.length!==1||typeof sends[0].text!=='string'||
+      j.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>request.sequence))return null;
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,
+    args:[url,true,null,record.startedAt]});
+  const n=checked?.result;
+  if(!n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.userId!==native.userId||n.promptKey!==native.promptKey||
+      n.userText!==sends[0].text||!Number.isFinite(n.userSentAtMs)||n.userSentAtMs!==native.lastUserSentAtMs||
+      JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(record)||(await chrome.tabs.get(tabId)).url!==url)return null;
+  return {nativeUserId:n.userId,nativeUserSentAtMs:n.userSentAtMs};
+}
+
 // Notification-only recovery. A lost MV3 receipt must not suppress a proven
 // terminal error, but this proof never releases any retry or unknown-send lock.
 async function readRestartErrorReceipt(tabId,url,message) {
@@ -1279,7 +1311,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if(sender.frameId>0||typeof tabId!=='number'||!url||completionCheckpointUrl(message.url)!==url){sendResponse?.({ok:false});return false;}
     (async()=>{
       if(message.action==='intent')return {ok:await completionCheckpointIntent(tabId,{url,baselineKey:message.baselineKey,at:message.at})};
-      if(message.action==='update')return {ok:await completionCheckpointUpdate(tabId,{url,startedAt:message.startedAt,requestId:message.requestId,baselineKey:message.baselineKey,promptKey:message.promptKey,httpCompleted:message.httpCompleted})};
+      if(message.action==='update') {
+        const ok=await completionCheckpointUpdate(tabId,{url,startedAt:message.startedAt,requestId:message.requestId,baselineKey:message.baselineKey,promptKey:message.promptKey,httpCompleted:message.httpCompleted});
+        if(ok)await bindCompletionNativeIdentity(tabId,url,await completionCheckpointRead(tabId));
+        return {ok};
+      }
       const rollback=await reconcileFailedCompletionLoading(tabId,url);
       if(rollback.changed)return {ok:false,rollback};
       let record=await completionCheckpointRead(tabId);
@@ -1324,7 +1360,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(record.promptKey?.includes('|fallback-turn-')) {
         const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
           func:inspectCompletedTurn,args:[url]});
-        const rebound=completionPromptRebindEvidence(record,url,checked?.result);
+        const identity=await recoverCompletionSenderIdentity(tabId,url,record,checked?.result);
+        const rebound=completionPromptRebindEvidence({...record,...identity},url,checked?.result);
         if(rebound) {
           const latest=await latestRequestReceipt(tabId),live=await readChatStatus(url);
           if(latest&&(latest.startedAt!==record.startedAt||latest.requestId!==record.requestId)||
@@ -1332,9 +1369,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               completionCheckpointUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
           const changed=await completionCheckpointChange(tabId,current=>
             JSON.stringify(current)===JSON.stringify(record)?
-              {record:{...current,...rebound},value:true}:{value:false});
+              {record:{...current,...identity,...rebound},value:true}:{value:false});
           if(!changed)return {ok:false};
-          record={...record,...rebound};
+          record={...record,...identity,...rebound};
           journalInBackground({kind:'completion.prompt_rebound',sourceUrl:url,attemptId:record.attemptId,
             promptKey:record.promptKey,proof:'native-user-time'}, {id:tabId,url});
         }

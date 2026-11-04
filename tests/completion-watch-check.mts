@@ -5,6 +5,7 @@ import {parseHTML} from 'linkedom';
 const {document,window}=parseHTML('<html><head></head><body><main><article data-testid="conversation-turn-0" data-turn="user">old</article><article data-testid="conversation-turn-1" data-turn="assistant">old answer</article></main><form><div id="prompt-textarea" contenteditable="true">draft</div><button data-testid="send-button">send</button></form></body></html>');
 Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return [{width:240,height:32}];}});
 let now=1000000,listener:Function=()=>{},nativeComplete=false,nativeEmpty=false;
+let rebound:any=null;let nativePrompt='/c/exact|conversation-turn-2',nativeAssistant='conversation-turn-3';
 let retryGate:Promise<any>|null=null;const retryEvents:any[]=[];
 const messages:any[]=[];
 const context=createContext({document,window,Node:window.Node,Element:window.Element,HTMLTextAreaElement:window.HTMLTextAreaElement,
@@ -13,9 +14,10 @@ const context=createContext({document,window,Node:window.Node,Element:window.Ele
  Date:class extends Date{static now(){return now;}},performance:{now:()=>now},setTimeout,clearTimeout,
  setInterval:(fn:Function)=>setInterval(()=>{now+=500;fn();},10),clearInterval,
  chrome:{runtime:{id:'test',onMessage:{addListener:(fn:Function)=>{listener=fn;},removeListener(){}},sendMessage:async(message:any)=>{
+ if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return message.action==='restore'&&rebound?{ok:true,record:rebound}:{ok:false};
  if(message.type==='CHATGPT_RETRY_STATE')return retryGate||{ok:true,state:null};
  if(message.type==='CHATGPT_COMPLETION_PROBE'&&nativeEmpty)return {ok:true,promptKey:'/c/exact|conversation-turn-2',userId:'new-user',isLatest:true,isReadOnly:false,generating:false,hasError:false,turnStatus:'complete',terminalEmptyResponse:true,nativeConversationInactive:true};
- if(message.type==='CHATGPT_COMPLETION_PROBE'){if(nativeComplete)assert.equal(message.boundPromptKey,'/c/exact|conversation-turn-2','the surviving content watcher supplies its already-bound user key');return {ok:true,url:'https://chatgpt.com/c/exact',promptKey:'/c/exact|conversation-turn-2',assistantKey:'conversation-turn-3',isLatest:true,isReadOnly:false,generating:!!document.querySelector('[data-testid=stop-button]'),hasError:false,turnStatus:nativeComplete?'complete':'in_progress',assistantCompleted:nativeComplete,assistantPhase:'final_answer'};}
+ if(message.type==='CHATGPT_COMPLETION_PROBE'){if(nativeComplete)assert.equal(message.boundPromptKey,nativePrompt,'the surviving content watcher supplies its already-bound user key');return {ok:true,url:'https://chatgpt.com/c/exact',promptKey:nativePrompt,assistantKey:nativeAssistant,isLatest:true,isReadOnly:false,generating:!!document.querySelector('[data-testid=stop-button]'),hasError:false,turnStatus:nativeComplete?'complete':'in_progress',assistantCompleted:nativeComplete,assistantPhase:'final_answer'};}
  if(message.type==='CHATGPT_LOG_EVENT'){retryEvents.push(message.event);return {ok:true};}
  if(message.type==='CHATGPT_RESPONSE_COMPLETE')messages.push(message);
  return {ok:true};
@@ -31,6 +33,11 @@ assert.equal(messages.length,0,'old complete response cannot complete the new re
 document.querySelector('main')!.insertAdjacentHTML('beforeend','<article data-testid="conversation-turn-2" data-turn="user">new</article><article data-testid="conversation-turn-3" data-turn="assistant">final</article>');
 await new Promise(r=>setTimeout(r,70));
 assert.equal(messages.length,0,'absence of Stop and stable text cannot override native in_progress');
+document.querySelector('[data-testid=conversation-turn-2]')!.setAttribute('data-testid','conversation-turn-4');
+document.querySelector('[data-testid=conversation-turn-3]')!.setAttribute('data-testid','conversation-turn-5');
+nativePrompt='/c/exact|conversation-turn-4';nativeAssistant='conversation-turn-5';
+rebound={state:'active',startedAt:1000000,attemptId:'1000000',requestId:null,url:'https://chatgpt.com/c/exact',baselineKey:'',promptKey:nativePrompt};
+await new Promise(r=>setTimeout(r,70));
 nativeComplete=true;
 // Deliberately no REQUEST_COMPLETED: the observed regression has failed/open SSE.
 listener({type:'CHATGPT_CONVERSATION_REQUEST_FAILED',startedAt:1000000});
@@ -38,7 +45,9 @@ await new Promise(r=>setTimeout(r,70));
 assert.equal(messages.length,1,'native final completion ends loading even without HTTP completed');
 assert.equal(messages[0].response,'final');assert.equal(messages[0].completionStartedAt,1000000);
 runInContext('globalThis.__chatgptNotifierDispose?.()',context);
-messages.length=0;nativeComplete=false;
+messages.length=0;nativeComplete=false;rebound=null;nativePrompt='/c/exact|conversation-turn-2';nativeAssistant='conversation-turn-3';
+document.querySelector('[data-testid=conversation-turn-4]')!.setAttribute('data-testid','conversation-turn-2');
+document.querySelector('[data-testid=conversation-turn-5]')!.setAttribute('data-testid','conversation-turn-3');
 const stop=document.createElement('button');stop.setAttribute('data-testid','stop-button');document.body.append(stop);
 runInContext(readFileSync('extension/content-script.js','utf8'),context);
 await new Promise(r=>setTimeout(r,50));
