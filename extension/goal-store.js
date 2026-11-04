@@ -542,6 +542,10 @@
       if(result.dispatch)await deliver(result.record);
       return {ok:result.ok,record:view(await getRaw(target))};
     }
+    function pendingManuals(record) {
+      return Array.isArray(record?.manualPendingQueue)?record.manualPendingQueue:
+        record?.manualPending?[record.manualPending]:[];
+    }
     async function manual({url,tabId,startedAt,requestId,eventAt,text,baselineKey}) {
       const target=canonical(url);
       if(!target)return {ok:false};
@@ -554,7 +558,7 @@
           startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
           typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'));
         if(supplement) {
-          const prior=record.manualPending||record.manualSupplementBinding;
+          const prior=pendingManuals(record).find(item=>item.requestId===requestId)||record.manualSupplementBinding;
           if(prior?.requestId===requestId) {
             if(prior.startedAt!==startedAt||prior.text!==text||prior.eventAt!==eventAt||prior.baselineKey!==baselineKey)
               throw Error('Ручное дополнение уже связано с другим текстом');
@@ -562,8 +566,9 @@
           }
           if(startedAt<=(record.manualStartedAt||0))return {ok:false};
           const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
+          const pending=[...pendingManuals(record),{tabId,requestId,startedAt,eventAt,text,baselineKey}];
           const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,
-            manualPending:{tabId,requestId,startedAt,eventAt,text,baselineKey},manualOverride:false,
+            manualPending:pending[0],manualPendingQueue:pending,manualOverride:false,
             pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
             ...(!inFlight?{operation:null}:{}),reason:'Подтверждается отправленное дополнение к цели'};
           await event('manual_supplement_pending',next,tabId,{requestId,startedAt,eventAt,text,baselineKey});
@@ -590,17 +595,19 @@
           return {ok:false};
         }
         if(!['preparing','sending','clicked','waiting','recovering','paused','blocked'].includes(old.phase)||
-            pending.tabId!==tabId||pending.requestId!==requestId||pending.startedAt!==startedAt||old.manualStartedAt!==startedAt||
+            pending.tabId!==tabId||pending.requestId!==requestId||pending.startedAt!==startedAt||
             nativeVerified!==true||typeof userId!=='string'||!userId||typeof userText!=='string'||!userText.trim()||userText.length>10000||
             !policy.submittedTextMatches(pending.text,userText,userVisibleText)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
           return {ok:false};
         if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};
         const supplement={...binding,text:pending.text,eventAt:pending.eventAt,baselineKey:pending.baselineKey};
-        const early=buffered(old,'manualEarlyCompletions','manualEarlyCompletion').find(item=>item.userId===userId&&item.promptKey===promptKey)||null;
+        const remaining=pendingManuals(old).slice(1);
+        const early=remaining.length?null:buffered(old,'manualEarlyCompletions','manualEarlyCompletion').find(item=>item.userId===userId&&item.promptKey===promptKey)||null;
         const fenced=!!old.operation||old.phase==='blocked',paused=old.phase==='paused'||old.pauseRequested;
-        const next={...old,supplements:[...(old.supplements||[]),supplement],manualPending:null,manualSupplementBinding:supplement,
-          expectedPromptKey:promptKey,handoffPending:false,manualEarlyCompletion:null,manualEarlyCompletions:[],
+        const next={...old,supplements:[...(old.supplements||[]),supplement],manualPending:remaining[0]||null,manualPendingQueue:remaining,manualSupplementBinding:supplement,
+          expectedPromptKey:promptKey,handoffPending:false,manualEarlyCompletion:null,
+          manualEarlyCompletions:remaining.length?buffered(old,'manualEarlyCompletions','manualEarlyCompletion'):[],
           earlyCompletion:early,phase:fenced?old.phase:paused?'paused':'waiting',
           reason:fenced?old.reason:paused?'Приостановлено пользователем':''};
         await event('manual_supplement_bound',next,tabId,{requestId,startedAt,promptKey,userId,text:userText,intentText:pending.text});

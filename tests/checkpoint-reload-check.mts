@@ -6,14 +6,15 @@ const url='https://chatgpt.com/c/reload',tabUrl=url+'/?view=test#fragment';
 const storage:Record<string,any>={'chatgpt-status:migration':{schema:1}};
 const {document,window}=parseHTML('<html><body><main></main><form><div id="prompt-textarea" contenteditable="true">KEEP PRIVATE DRAFT</div><button data-testid="send-button">Send</button></form></body></html>');
 Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
-let clock=Date.now(),finished=false,worker:Context;
+let clock=Date.now(),finished=false;
+let worker!:Context;
 let content!:Context;
-let restoreRace=false;
+let restoreRace=false,nativeSentAtOffset=0;
 let messageHandler:Function=()=>{},beforeRequest:Function=()=>{},notifications=0;
 let contentListeners=new Set<Function>();
 const timers=new Set<ReturnType<typeof setInterval>>();
 const tab={id:7,url:tabUrl,active:false,windowId:1};
-const native=()=>({ok:true,url,firstTurn:true,firstUserSentAtMs:clock,promptKey:'/c/reload/|conversation-turn-1',userId:'user-id',assistantKey:finished?'conversation-turn-2':'',assistantId:finished?'assistant-id':'',isLatest:true,isReadOnly:false,hasError:false,generating:!finished,turnStatus:finished?'complete':'in_progress',assistantCompleted:finished,assistantPhase:'final_answer'});
+const native=()=>({ok:true,url,firstTurn:true,firstUserSentAtMs:clock,lastUserSentAtMs:clock+nativeSentAtOffset,promptKey:'/c/reload/|conversation-turn-1',userId:'user-id',assistantKey:finished?'conversation-turn-2':'',assistantId:finished?'assistant-id':'',isLatest:true,isReadOnly:false,hasError:false,generating:!finished,turnStatus:finished?'complete':'in_progress',assistantCompleted:finished,assistantPhase:'final_answer'});
 function bootWorker(){
  const event=(name:string)=>({addListener:(fn:Function)=>{if(name==='message')messageHandler=fn;if(name==='before')beforeRequest=fn;}});
  const chrome={runtime:{id:'test',getManifest:()=>({version:'1.5.1'}),getURL:(p:string)=>'chrome-extension://test/'+p,getContexts:async()=>[{}],sendMessage:async()=>{},onMessage:event('message'),onInstalled:event('install'),onStartup:event('startup')},
@@ -46,7 +47,6 @@ try{
  assert.equal(storage[key].state,'active');assert.equal(storage[key].promptKey,'/c/reload/|conversation-turn-1');assert.equal(storage[key].requestId,'actual-request-1');
  assert.equal(JSON.stringify(storage[key]).includes('KEEP PRIVATE DRAFT'),false,'checkpoint never stores draft text');
  runInContext('globalThis.__chatgptNotifierDispose()',content);
- const originalReceipts=structuredClone(storage['chatgpt-request-receipts']);
  delete storage['chatgpt-request-receipts']; // Full extension reload also loses the session receipt cache.
  bootWorker();bootContent(startedAt-100);await pause();
  assert.equal(notifications,0,'an in-flight reload keeps observing without producing an early completion');
@@ -74,9 +74,9 @@ try{
  const allocation=await restore();
  assert.equal(allocation.ok,true,'a completed first prompt adopts its allocated chat URL after reload');
  assert.equal(storage[key].url,url);assert.equal(storage[key].promptKey,native().promptKey);
- const receipts=storage['chatgpt-request-receipts']||originalReceipts;
- assert.ok(receipts?.some((item:any)=>item.requestId==='actual-request-1'));
- storage['chatgpt-request-receipts']=receipts.map((item:any)=>({...item,url:'https://chatgpt.com/'}));
+ const recoveredReceipt=await runInContext('latestRequestReceipt(7)',worker);
+ assert.equal(recoveredReceipt.requestId,'actual-request-1','actual worker reconstruction supplies request binding after reload');
+ assert.equal(recoveredReceipt.startedAt,startedAt);
  bootWorker();bootContent();await pause();await pause();
  assert.equal(storage[key].state,'complete','the existing completion pipeline finalizes the allocated request');
  assert.equal(notifications,2,'allocated completion is reported once');
@@ -85,6 +85,11 @@ try{
  finished=false;document.body.append(stop);
  storage[key]={...storage[key],url:'https://chatgpt.com/',state:'active',baselineKey:null,promptKey:''};
  storage['chatgpt-status:'+url].status={kind:'loading',eventAt:startedAt,receipt:{epoch:'fixture',order:3}};
+ bootWorker();
+ nativeSentAtOffset=60000;
+ assert.equal((await restore()).ok,false,'a later native request cannot acquire the older unbound checkpoint');
+ assert.equal(storage[key].baselineKey,null,'foreign native request leaves checkpoint unchanged');
+ nativeSentAtOffset=0;
  bootWorker();bootContent();await pause();await pause();
  assert.equal(storage[key].url,url,'an observed live retry without documentUrl binds to the exact live chat');
  assert.equal(storage[key].baselineKey,'');

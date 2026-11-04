@@ -47,7 +47,7 @@ for(const patch of [{userText:'Other text'},{userSentAtMs:80000},{userId:''},{pr
  const h=await fixture('paused');await h.manual();
  const original=structuredClone(h.record());
  h.setRequest(null);
- h.setNative({isLatest:false,userText:'[Additional task](https://example.com) keep exact',
+ h.setNative({isLatest:false,historicalUserBound:true,userText:'[Additional task](https://example.com) keep exact',
    userVisibleText:'  Additional task\n\nkeep exact  '});
  assert.equal((await h.bind()).pending,false,'historic native user survives superseded request cache');
  assert.equal(h.record().supplements.length,1);
@@ -106,3 +106,39 @@ for(const confirmed of [false,true]) {
  assert.equal(h.record().phase,'paused','unsupported unverified payload fails closed without silently appending text');assert.equal(h.messages.length,0);
 }
 console.log('Manual Goal follow-ups: exact native request/text binding, immutable original, chronological payloads, pause/budget retention, early ACK/reload and unknown-send fences passed.');
+
+{
+ const h=await fixture('paused');await h.manual();
+ h.setRequest({requestId:'manual-3',startedAt:130040,url});h.clock(130050);
+ await h.store.manual({...h.args(),eventAt:130035,text:'Second pending follow-up',baselineKey:'/c/manual-goal-fixture|u-followup'});
+ assert.equal(h.record().manualPending.requestId,'manual-2','earliest unbound request must survive a second send');
+ h.setNative({isLatest:false,historicalUserBound:true});
+ assert.equal((await h.bind()).pending,true,'drain pauses safely when next native user is not yet available');
+ assert.equal(h.record().supplements.length,1);
+ h.setNative({isLatest:true,userId:'u-second',userText:'Second pending follow-up',userSentAtMs:130040,promptKey:'/c/manual-goal-fixture|second'});
+ assert.equal((await h.bind()).pending,false);
+ assert.deepEqual(h.record().supplements.map((item:Value)=>item.text),['  Additional task\nkeep exact  ','Second pending follow-up']);
+ assert.equal(h.record().phase,'paused');assert.equal(h.messages.length,0);
+}
+
+{
+ const h=await fixture('paused');await h.manual();h.setRequest(null);
+ h.setNative({isLatest:true,historicalUserBound:true});
+ assert.equal((await h.bind()).pending,false,'exact historical user can share the latest native aggregate');
+ assert.equal(h.record().supplements.length,1);assert.equal(h.messages.length,0);
+}
+
+{
+ const h=await fixture();await h.manual();
+ h.setRequest({requestId:'manual-3',startedAt:130040,url});h.clock(130050);
+ await h.store.manual({...h.args(),eventAt:130035,text:'Second pending follow-up',baselineKey:'/c/manual-goal-fixture|u-followup'});
+ const latestPrompt='/c/manual-goal-fixture|second';
+ await h.store.completion({url,tabId:7,promptKey:latestPrompt,completionKey:latestPrompt+'|answer',response:'GOAL_COMPLETE',userId:'u-second',nativeVerified:true,rawExact:true});
+ h.context.goalController=h.fresh();
+ h.setNative({isLatest:false,historicalUserBound:true});await h.bind();
+ assert.equal(h.record().manualPending.requestId,'manual-3','reload preserves the remaining request');
+ assert.equal(h.messages.length,0,'binding earlier clarification never dispatches while newer one awaits proof');
+ h.setNative({isLatest:true,userId:'u-second',userText:'Second pending follow-up',userSentAtMs:130040,promptKey:latestPrompt});
+ await h.bind();assert.equal(h.record().phase,'completed','only latest buffered completion replays after all clarifications bind');
+ assert.equal(h.record().supplements.length,2);assert.equal(h.messages.length,0);
+}

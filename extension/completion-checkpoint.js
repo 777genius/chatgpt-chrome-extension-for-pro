@@ -97,7 +97,8 @@ function completionPromptRebindEvidence(record,url,native) {
       !Number.isFinite(native.lastUserSentAtMs)||Math.abs(native.lastUserSentAtMs-record.startedAt)>10000||
       typeof record.promptKey!=='string'||typeof native.promptKey!=='string'||
       record.promptKey===native.promptKey||native.promptKey===record.baselineKey)return null;
-  const prefix=new URL(url).pathname+'|fallback-turn-';
-  if(!record.promptKey.startsWith(prefix)||!native.promptKey.startsWith(prefix))return null;
+  const path=new URL(url).pathname.replace(/\/$/,'');
+  const fallbackPath=key=>{const at=key.indexOf('|fallback-turn-');return at>0?key.slice(0,at).replace(/\/$/,''):'';};
+  if(fallbackPath(record.promptKey)!==path||fallbackPath(native.promptKey)!==path)return null;
   return {promptKey:native.promptKey};
 }

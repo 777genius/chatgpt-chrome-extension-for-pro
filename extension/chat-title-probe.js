@@ -199,8 +199,9 @@ function controlChatTitle(options) {
     state.saved=true;
     save.click();
     state.input=null;
-    // Keep only sidebar cleanup state until the worker observes the server ACK.
-    if(!state.sidebarToggle)delete globalThis.__chatgptNotifierTitleOperation;
+    // The server ACK may arrive before document.title updates, including with
+    // an already visible sidebar. Keep this operation for guarded sync-title;
+    // the worker always releases it through cancel after confirmation/failure.
     return {ok:true,clicked:true};
   }
   return {ok:false,reason:'unknown-title-action'};

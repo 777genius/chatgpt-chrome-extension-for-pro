@@ -1188,6 +1188,7 @@
       const history=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
         alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),
         captureHistory:true,captureRetryHistory:true});
+      if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId || (globalThis.__chatgptNotifierRequestId||null)!==requestId) return;
       if(history?.ok&&history.action==='retry'&&!history.incomplete&&history.messages?.length) {
         await audit('retry.escalated',{promptKey,attemptId,reason:'Три неудачных повтора; перенос истории'});
         try {await beginHandoff({...error,escalated:true},{...history,action:'new-chat'},alert);}

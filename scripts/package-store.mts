@@ -74,9 +74,9 @@ const output=resolve(args[1]||resolve(root,'work',`chatgpt-completion-alert-${ma
 requireValid(output.endsWith('.zip'),'Output must end in .zip');
 requireValid(!output.startsWith(resolve(root,'extension')+'/'),'Output must be outside extension/');
 mkdirSync(dirname(output),{recursive:true});writeFileSync(output,zip);
-const source={gitHead:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),
-  dirtyPaths:execFileSync('git',['status','--porcelain=v1','--untracked-files=all'],{cwd:root,encoding:'utf8'}).trimEnd().split('\n').filter(Boolean),
-  status:'Preparatory package; Git HEAD alone does not identify dirty runtime bytes. Rebuild after the final commit.'};
+const dirtyPaths=execFileSync('git',['status','--porcelain=v1','--untracked-files=all'],{cwd:root,encoding:'utf8'}).trimEnd().split('\n').filter(Boolean);
+const source={gitHead:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),dirtyPaths,
+  status:dirtyPaths.length?'Preparatory package; Git HEAD alone does not identify dirty runtime bytes. Rebuild after the final commit.':'Clean source checkout; runtime bytes packaged from the recorded Git HEAD.'};
 const receipt={source,version:manifest.version,files:entries.size,bytes:zip.length,sha256:createHash('sha256').update(zip).digest('hex'),
   entries:[...entries.keys()].sort(),note:'Static package validation only; Chrome Web Store review and live ChatGPT behavior are separate.'};
 writeFileSync(output+'.json',JSON.stringify(receipt,null,2)+'\n');

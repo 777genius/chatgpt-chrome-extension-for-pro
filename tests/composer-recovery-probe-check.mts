@@ -18,6 +18,18 @@ try{
  entries[1].conversationId='other';assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).recoveryTimeline,null);
  entries[1].conversationId=entries[0].conversationId;entries[1].isReadOnly=true;
  assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).recoveryTimeline,null);
+ entries[1].isReadOnly=false;
+ entries[1].timestampTurns[0].sentAtMs=100005;
+ assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).ok,false,'ambiguous time alone remains refused');
+ const matched=inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000,null,'Message 0');
+ assert.equal(matched.userId,'user-0');assert.equal(matched.historicalUserBound,true,'exact text disambiguates native historical user');
+ entries[1].timestampTurns[0].sentAtMs=120000;
+ entries[1].timestampTurns.push({role:'user',sentAtMs:140000});
+ entries[1].turn.items.push({type:'user-message',messageId:'user-2',message:'Message 2'});
+ rows[1].insertAdjacentHTML('beforeend','<div data-chatgpt-search-unit-key="turn-1:1:user"></div>');
+ const aggregate=inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,120000,null,'Message 1');
+ assert.equal(aggregate.isLatest,true);assert.equal(aggregate.userId,'user-1');assert.equal(aggregate.historicalUserBound,true,
+   'historical-user proof is independent from latest aggregate identity');
  entries[1].isReadOnly=false;rows[0].remove();
  assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).ok,false,'unrendered history cannot authorize recovery');
 }finally{g.document=old.document;g.location=old.location;}

@@ -48,3 +48,8 @@ for(const change of [{lastUserSentAtMs:20000},{isLatest:false},{isReadOnly:true}
 }
 context.stopped={...context.rebindRecord,state:'stopped'};
 assert.equal(await run('completionPromptRebindEvidence(stopped,stopped.url,rebindNative)'),null);
+
+context.slashRecord={...context.rebindRecord,promptKey:context.rebindRecord.promptKey.replace('/c/a|','/c/a/|')};
+context.slashNative={...context.rebindNative,promptKey:context.rebindNative.promptKey.replace('/c/a|','/c/a/|')};
+assert.ok(await run('completionPromptRebindEvidence(slashRecord,slashRecord.url,slashNative)'),
+ 'trailing-slash native keys retain the same canonical chat during renumbering');

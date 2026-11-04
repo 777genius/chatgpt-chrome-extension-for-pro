@@ -526,7 +526,7 @@ async function handleHandoffMessage(message, tabId) {
 // the composer, and does not infer a new chat from its URL alone.
 async function recoverNativeComposerGoal(tabId,url,pending) {
   const waiting=()=>({ok:true,pending:true,url,composer:pending});
-  if(!ChatGPTGoalPolicy.canonical(url)||pending.url!=='https://chatgpt.com/'||
+  if(!ChatGPTGoalPolicy.canonical(url)||(pending.url!=='https://chatgpt.com/'&&pending.url!==url)||
       !Number.isFinite(pending.intent?.eventAt)||Date.now()-pending.intent.eventAt<30000)return waiting();
   const journal=await readJournal();
   const requests=journal.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&!e.operationId&&
@@ -535,16 +535,23 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
   if(candidates.length!==1)return waiting();
   const request=candidates[0];
   const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
-    func:inspectCompletedTurn,args:[url,true,null,request.eventAt]});
-  const native=checked?.result,timeline=native?.recoveryTimeline;
+    func:inspectCompletedTurn,args:[url,true,null,request.eventAt,null,pending.intent.text]});
+  const native=checked?.result,allUsers=native?.recoveryTimeline;
+  const start=Array.isArray(allUsers)?allUsers.findIndex(item=>item.userId===native.userId):-1;
+  const timeline=start>=0?allUsers.slice(start):null;
   if(!native?.ok||native.url!==url||native.isReadOnly!==false||!Array.isArray(timeline)||!timeline.length||
       timeline[0].userId!==native.userId||!ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText)||
       !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-request.eventAt)>10000)return waiting();
-  const supplements=[];
-  for(const user of timeline.slice(1)) {
-    const found=requests.filter(e=>e.sourceUrl===url&&e.eventAt>request.eventAt&&Math.abs(e.eventAt-user.userSentAtMs)<=10000);
-    if(found.length!==1)return waiting();
-    supplements.push({...user,requestId:found[0].requestId,startedAt:found[0].eventAt});
+  const supplements=[],following=requests.filter(e=>e.sourceUrl===url&&e.eventAt>request.eventAt)
+    .sort((a,b)=>a.eventAt-b.eventAt);
+  // Match the full chronological timeline one-to-one. Overlapping timestamp
+  // windows alone must not turn two legitimate close follow-ups ambiguous;
+  // missing/duplicate/extra requests still refuse the entire adoption.
+  if(following.length!==timeline.length-1||new Set(following.map(e=>e.requestId)).size!==following.length)return waiting();
+  for(const [index,user] of timeline.slice(1).entries()) {
+    const found=following[index];
+    if(Math.abs(found.eventAt-user.userSentAtMs)>10000)return waiting();
+    supplements.push({...user,requestId:found.requestId,startedAt:found.eventAt});
   }
   const [currentNative]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
   const latest=currentNative?.result,last=timeline.at(-1),current=await goalController.composerGet({tabId});
@@ -576,6 +583,8 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   }
   const waiting=()=>({ok:true,pending:true,url:currentUrl,composer:pending});
   const latest=await latestRequestReceipt(tabId);
+  if(latest&&pending.request&&latest.requestId!==pending.request.requestId)
+    return recoverNativeComposerGoal(tabId,canonical||currentUrl,pending);
   const request=latest||pending.request;
   if(!Number.isFinite(pending.intent?.eventAt)||!request||request.startedAt<pending.intent?.eventAt||request.startedAt-pending.intent?.eventAt>10000)
     return typeof recoverNativeComposerGoal==='function'?recoverNativeComposerGoal(tabId,canonical||currentUrl,pending):waiting();
@@ -838,6 +847,16 @@ async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,started
 }
 
 async function bindNativeManualSupplement(tabId,url) {
+  // Drain persisted requests chronologically; never drop an older unbound
+  // clarification when a newer request supersedes the volatile receipt.
+  for(let count=0;count<100;count++) {
+    const result=await bindNextNativeManualSupplement(tabId,url);
+    if(result.pending||result.ok===false)return result;
+    if(!(await goalController.get(url))?.manualPending)return result;
+  }
+  return {ok:true,pending:true};
+}
+async function bindNextNativeManualSupplement(tabId,url) {
   const record=await goalController.get(url),pending=record?.manualPending;
   if(!pending)return {ok:true,pending:false};
   if(pending.tabId!==tabId)return {ok:false,pending:true};
@@ -848,9 +867,9 @@ async function bindNativeManualSupplement(tabId,url) {
     // user clarification still awaits adoption. Recover only its exact native
     // timestamp and rendered sent text, never the current composer draft.
     const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
-      func:inspectCompletedTurn,args:[url,true,null,pending.startedAt]});
+      func:inspectCompletedTurn,args:[url,true,null,pending.startedAt,null,pending.text]});
     const native=checked?.result,current=await goalController.get(url);
-    if(!native?.ok||native.isLatest!==false||native.isReadOnly!==false||native.url!==url||!native.userId||!native.promptKey||
+    if(!native?.ok||native.historicalUserBound!==true||native.isReadOnly!==false||native.url!==url||!native.userId||!native.promptKey||
         !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-pending.startedAt)>10000||
         !ChatGPTGoalPolicy.submittedTextMatches(pending.text,native.userText,native.userVisibleText)||
         current?.id!==record.id||JSON.stringify(current.manualPending)!==JSON.stringify(pending)||
@@ -916,11 +935,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(result?.ok===false)return result;
       const url=ChatGPTGoalPolicy.canonical(live);
       if(message.action==='get'&&url&&typeof reconcileNativeGoalAcknowledgement==='function')
-        await reconcileNativeGoalAcknowledgement(tabId,url);
+        await reconcileNativeGoalAcknowledgement(tabId,url).catch(()=>null);
       if(message.action==='get'&&url&&typeof reconcileAcceptedHandoffGoal==='function')
-        await reconcileAcceptedHandoffGoal(tabId,url);
+        await reconcileAcceptedHandoffGoal(tabId,url).catch(()=>null);
       if(message.action==='get'&&url&&typeof reconcileGoalPreparation==='function')
-        await reconcileGoalPreparation(tabId,url);
+        await reconcileGoalPreparation(tabId,url).catch(()=>null);
       return {ok:true,tabId,url:live,record:url?await goalController.get(url):null,
         composer:result?.record||await goalController.composerGet({tabId})};
     })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));return true;
@@ -953,7 +972,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     (async()=>{
       if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
-      if(message.type==='CHATGPT_GOAL_RECOVER'){await bindNativeManualSupplement(tabId,url);await reconcileGoalPromptBinding(tabId,url);return goalController.recoverTab({id:tabId,url});}
+      if(message.type==='CHATGPT_GOAL_RECOVER'){await bindNativeManualSupplement(tabId,url);await reconcileGoalPromptBinding(tabId,url).catch(()=>({ok:false}));return goalController.recoverTab({id:tabId,url});}
       if(message.type==='CHATGPT_GOAL_CONTEXT'){await bindNativeManualSupplement(tabId,url);return {ok:true,text:await goalController.context(url)};}
       if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
         url,tabId,id:message.goalId,operationId:message.operationId});
@@ -1137,7 +1156,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return event; // Legacy/temporarily unavailable native data retains the existing guarded claim.
       return {...event,retryUserId:native.userId};
     };
-    prepareEvent().then(verified=>appendJournal(verified,sender.tab)).then(async result=>{
+    prepareEvent().catch(()=>event).then(verified=>appendJournal(verified,sender.tab)).then(async result=>{
       if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked','draft.restore_failed'].includes(event.kind)) {
         const observed=event.kind==='retry.confirmed'?await latestRequestReceipt(sender.tab.id):null;
         const confirmedAttempt=observed?.operationId===event.operationId&&Number.isFinite(observed.startedAt)
@@ -1233,7 +1252,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const native=checked?.result;
         if(!native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||
             native.turnStatus!=='in_progress'||native.generating!==true||native.hasError||
-            !native.promptKey||!native.userId)return {ok:false};
+            !native.promptKey||!native.userId||!Number.isFinite(native.lastUserSentAtMs)||
+            Math.abs(native.lastUserSentAtMs-record.startedAt)>10000)return {ok:false};
         const fresh=await latestRequestReceipt(tabId),status=await readChatStatus(url);
         if(fresh?.requestId!==known.requestId||fresh.startedAt!==known.startedAt||
             status.status?.kind!=='loading'||status.status.eventAt!==record.startedAt||
@@ -1388,8 +1408,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         promptKey:message.goalPromptKey,response:message.response,nativeVerified:message.goalNativeVerified,
         rawExact:message.goalRawExact,userId:message.goalNativeUserId};
       try {
-        await reconcileNativeGoalAcknowledgement(tabId,sourceUrl);
-        await bindNativeManualSupplement(tabId,sourceUrl);
+        await reconcileNativeGoalAcknowledgement(tabId,sourceUrl).catch(()=>null);
+        await bindNativeManualSupplement(tabId,sourceUrl).catch(()=>({ok:false,pending:true}));
         const armed=await goalController.composerGet({tabId});
         if(armed?.phase==='intent')await bindNativeComposerGoal(tabId,sourceUrl,armed.id);
         if(goalAnswer.nativeVerified===true&&typeof message.response==='string'&&

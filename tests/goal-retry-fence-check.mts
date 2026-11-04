@@ -227,4 +227,67 @@ function fixture() {
  assert.equal(env.data[goalKey].phase,'blocked','unresolved send retains its fence');
 }
 
+// A transient prompt probe failure must not prevent the coordinator from
+// recovering its persisted state and buffered completion.
+{
+ let recovered=0;
+ let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
+ const context=createContext({
+  chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
+  ChatGPTGoalPolicy:{canonical:(value:string)=>value},
+  bindNativeManualSupplement:async()=>({ok:true}),
+  reconcileGoalPromptBinding:async()=>{throw Error('fixture native probe unavailable');},
+  goalController:{recoverTab:async()=>{recovered++;return {ok:true};}}
+ });
+ runInContext(listenerSource,context);
+ const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
+ assert.equal(result.ok,true,JSON.stringify(result));assert.equal(recovered,1,'native reconciliation failure must still reach durable recovery');
+}
+
+// Pause/Stop may arrive after recovery preflight or after its durable intent.
+for(const action of ['pause','stop']) {
+ for(const afterIntent of [false,true]) {
+  const env=fixture();await env.waitingGoal();
+  const event={operationId:'recovered-retry',attemptId:'1000010',promptKey:env.data[goalKey].expectedPromptKey};
+  await env.append({kind:'retry.planned',...event});
+  if(afterIntent)await env.append({kind:'retry.send_intent',...event});
+  await env.evaluate('goalController.control(options)',{options:{action,url,tabId:7}});
+  env.boot();
+  await assert.rejects(()=>env.append({kind:afterIntent?'send.authorized':'retry.send_intent',...event}),
+    `${action} must fence recovered retries at ${afterIntent?'authorization':'intent'} after restart`);
+  assert.notEqual(env.active()?.consumed,true,'refused retry never consumes a click grant');
+ }
+}
+
 console.log('Goal/retry fences: confirmed manual supersession, stale callbacks, restart, exact consumed grants and new Goal binding passed.');
+
+// The second history probe can yield while a newer manual request starts.
+{
+ const content=readFileSync('extension/content-script.js','utf8');
+ const route=content.slice(content.indexOf('  async function routeError('),content.indexOf('  function scheduleHandoffReadiness('));
+ let handoffs=0,probes=0;
+ const context=createContext({location:{pathname:'/c/source'},__chatgptNotifierAttemptId:'old',__chatgptNotifierRequestId:'old-request',
+  document:{querySelectorAll:()=>[]},ERROR_SELECTOR:'error',normalize:(v:string)=>v,
+  retryState:()=>({repeatedError:'failure',sameErrorCount:3,blocked:false}),audit:async()=>{},
+  beginHandoff:async()=>{handoffs++;},notifyOperationWarning:()=>{},
+  runtimeMessage:async()=>{if(++probes===2){context.__chatgptNotifierAttemptId='new';context.__chatgptNotifierRequestId='new-request';}
+    return {ok:true,action:'retry',messages:[{role:'user',text:'Synthetic context'}]};}
+ });
+ runInContext(route,context);
+ await runInContext("routeError({response:'failure'},'/c/source|old',{})",context);
+ assert.equal(handoffs,0,'a newer request during history inspection cancels stale escalation');
+}
+
+{
+ const env=fixture();
+ env.evaluate(`chrome.scripting={executeScript:async()=>{throw Error('fixture native unavailable');}};inspectCompletedTurn=()=>{};`);
+ const result=await env.log({kind:'retry.planned',operationId:'probe-fallback',attemptId:'1000010',promptKey:'/c/manual-retry-fence|user'});
+ assert.equal(result.ok,true,'optional native claim enrichment cannot cancel guarded retry planning');
+}
+{
+ const env=fixture();await env.waitingGoal();
+ env.evaluate(`reconcileNativeGoalAcknowledgement=reconcileAcceptedHandoffGoal=reconcileGoalPreparation=async()=>{throw Error('fixture unavailable');};`);
+ const result=await env.message({type:'CHATGPT_GOAL_INLINE',action:'get',url});
+ assert.equal(result.ok,true,'failed opportunistic reconciliation must retain Goal controls');
+ assert.equal(result.record.id,env.data[goalKey].id);
+}

@@ -15,7 +15,7 @@ async function fixture(){
   sourceUrl:i===0?'https://chatgpt.com/':url,operationId:null}));
  const original:V={ok:true,url,isReadOnly:false,isLatest:false,...users[0],userVisibleText:'Original objective\n',firstTurn:false,recoveryTimeline:users};
  const latest:V={ok:true,url,isReadOnly:false,isLatest:true,...users[2],turnStatus:'in_progress',generating:true,hasError:false};
- const ctx=createContext({URL,Date,console,readJournal:async()=>({events:requests}),inspectCompletedTurn:function(){},
+ const ctx=createContext({URL,Date,console,latestRequestReceipt:async()=>({requestId:requests.at(-1)!.requestId,startedAt:requests.at(-1)!.eventAt,url}),readJournal:async()=>({events:requests}),inspectCompletedTurn:function(){},
   chrome:{tabs:{get:async()=>({id:7,url:live})},scripting:{executeScript:async({args}:V)=>{
    const result=structuredClone(args.length>2?original:latest);await afterProbe?.();return [{result}];
   }}}});
@@ -33,8 +33,10 @@ async function fixture(){
  await historical.composerIntent({tabId:7,url:'https://chatgpt.com/',armId:arm.record.id,eventAt:100010,text:'Original objective',baselineKey:''});
  const pending=structuredClone(data['chatgpt-goal-composer:7']);ctx.pending=pending;
  runInContext(source,ctx);
+ runInContext(worker.slice(worker.indexOf('async function bindNativeComposerGoal('),worker.indexOf('// An initial native conversation')),ctx);
  return {data,events,messages,users,requests,original,latest,store,pending,
   recover:()=>runInContext(`recoverNativeComposerGoal(7,'${url}',pending)`,ctx),
+  bind:()=>runInContext(`bindNativeComposerGoal(7,'${url}',pending.id)`,ctx),
   route:(v:string)=>{live=v;},after:(f:()=>Promise<void>|void)=>{afterProbe=f;},failSave:(value:boolean)=>{failSave=value;}};
 }
 {
@@ -87,3 +89,29 @@ for(const scenario of ['ambiguous-request','missing-followup','hidden-history','
  assert.equal(f.messages.length,0);
 }
 console.log('Late Goal recovery: atomic original+all supplements, original limits/deadline, latest-only dispatch, marker, duplicate/request/route/disarm/history fences passed.');
+
+{
+ const f=await fixture();
+ f.users[2].userSentAtMs=140005;f.requests[2].eventAt=140005;
+ f.latest.userSentAtMs=140005;
+ const result=await f.recover();assert.equal(result.ok,true);
+ assert.ok(f.data['chatgpt-goal:'+url],'close follow-ups must adopt the Goal');
+ assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2,'close chronological requests bind one-to-one');
+}
+
+{
+ const f=await fixture();
+ f.pending.url=url;f.data['chatgpt-goal-composer:7'].url=url;
+ f.requests[0].sourceUrl=url;
+ const result=await f.recover();assert.equal(result.ok,true,'saved-chat intent survives later native sends');
+ assert.equal(f.data['chatgpt-goal:'+url].goal,'Original objective');
+ assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+}
+
+{
+ const f=await fixture();f.pending.url=url;f.data['chatgpt-goal-composer:7'].url=url;f.requests[0].sourceUrl=url;
+ f.data['chatgpt-goal-composer:7'].request={requestId:f.requests[0].requestId,startedAt:f.requests[0].eventAt,url};
+ f.pending.request=f.data['chatgpt-goal-composer:7'].request;
+ assert.equal((await f.bind()).ok,true,'saved original receipt survives newer tab receipt through native timeline');
+ assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+}

@@ -255,6 +255,15 @@ function appendJournal(event, tab = {}) {
         Object.entries(active).some(([owner,entry])=>entry&&
           (entry.chatUrl||entry.sourceUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===retrySource)))
       throw Object.assign(new Error('В этом чате уже готовится или выполняется автоматическая отправка'),{journalPolicy:true});
+    // Recovery preflight and Goal writes have separate lifetimes. A user can
+    // Pause/Stop after preparation or intent; consult the durable Goal again
+    // at each grant boundary, before reserving or consuming a retry click.
+    if(retrySource&&(event.kind==='retry.send_intent'||
+        event.kind==='send.authorized'&&active[tabId]?.kind==='retry.send_intent')) {
+      const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
+      if(goal&&(goal.stopRequested||goal.pauseRequested||['stopped','paused'].includes(goal.phase)))
+        throw Object.assign(new Error('Цель остановлена или приостановлена; автоповтор отменён'),{journalPolicy:true});
+    }
     if(['retry.planned','retry.send_intent'].includes(event.kind)&&retrySource){
       // The Goal's persisted reservation wins over legacy retry planning.
       // Refuse before reserving a retry or touching the user's draft.

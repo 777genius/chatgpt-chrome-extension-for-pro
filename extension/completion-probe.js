@@ -3,7 +3,7 @@
 // Serialized into MAIN. Metadata by default; an armed Goal may explicitly
 // request already-sent message text. Never reads drafts or invokes handlers.
 // The expected attempt is bound by the extension caller.
-function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null) {
+function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null, sentText = null) {
   function plainGoalMarkerDOM(rendered,sourceMessageId='') {
     if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
     const plain=node=>{
@@ -64,9 +64,11 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   if(!entry)return {ok:false,reason:'native-turn-missing'};
   let historicalUserIndex=null;
   if(Number.isFinite(sentAt)&&includeGoalText===true) {
-    const candidates=(nativeEntries||[]).flatMap(candidate=>
+    let candidates=(nativeEntries||[]).flatMap(candidate=>
       (candidate.timestampTurns||[]).filter(item=>item.role==='user').map((time,index)=>({candidate,index,at:time.sentAtMs})))
       .filter(item=>Number.isFinite(item.at)&&Math.abs(item.at-sentAt)<=10000);
+    if(candidates.length>1&&typeof sentText==='string')candidates=candidates.filter(item=>
+      (item.candidate.turn?.items||[]).filter(value=>value.type==='user-message')[item.index]?.message===sentText);
     if(candidates.length!==1)return {ok:false,reason:'historical-user-ambiguous'};
     entry=candidates[0].candidate;
     historicalUserIndex=candidates[0].index;
@@ -105,7 +107,9 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   if(!user?.messageId||!userKey)return {ok:false,reason:'bound-messages-missing'};
   const visible=node=>!!node.getClientRects().length;
   const generating=Array.from(root.querySelectorAll('button[data-testid="stop-button"],button[data-testid="fruitjuice-stop-button"],[data-composer-body] button:has(svg.icon-primary-action path[d^="M4.5 5.75C4.5"])')).some(visible);
-  const hasError=Boolean(entry.errorMessage)||Array.from(element.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(visible);
+  const hasError=Boolean(entry.errorMessage)||Array.from(root.querySelectorAll('aside[role="alert"].text-danger,[role="status"]:has(.text-chatgpt-recovery)')).some(alert=>
+    visible(alert)&&!alert.closest('.markdown,pre,code,[data-markdown-text-style="assistant-message"]')&&
+    !domUser.contains(alert)&&Boolean(domUser.compareDocumentPosition(alert)&4));
   const userTimes=(entry.timestampTurns||[]).filter(item=>item.role==='user');
   const firstUserSentAtMs=entryCount===1&&users.length===1&&userTimes.length===1?userTimes[0].sentAtMs:null;
   // Native turn aggregation can remain in_progress after an aborted stream,
@@ -227,7 +231,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     }
     const sentAtMs=(historicalUserIndex===null?userTimes.at(-1):userTimes[historicalUserIndex])?.sentAtMs;
     goalText={userText:typeof user.message==='string'?user.message:'',userVisibleText,userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
-      ...(historicalUserIndex!==null?{recoveryTimeline}:{}),
+      ...(historicalUserIndex!==null?{recoveryTimeline,historicalUserBound:true}:{}),
       goalResponse,goalRawExact};
   }
   // Failure rollback is separate from completion. Require the real idle

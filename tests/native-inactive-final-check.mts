@@ -6,6 +6,12 @@ const source=readFileSync('extension/completion-probe.js','utf8');
 const url='https://chatgpt.com/c/inactive-fixture';
 function fixture(extra:any={}) {
  const {document,window}=parseHTML(`<html><body><div data-app-shell-active-page="true"><main><section data-turn-key="turn"><article data-content-search-turn-key="turn"><div data-chatgpt-search-unit-key="turn:0:user" data-chatgpt-search-message-ids="user"><div data-testid="turn:0:user" data-message-author-role="user">Request</div></div><div data-chatgpt-search-unit-key="turn:2:assistant" data-chatgpt-search-message-ids="assistant"><div data-testid="turn:2:assistant" data-message-author-role="assistant"><p>Final answer</p></div></div></article></section></main><div data-composer-body><div id="editor-wrap"><div id="prompt-textarea" contenteditable="true"></div></div><button id="voice"><svg><use href="#codex-icon-voice-regular-20"></use></svg></button></div></div></body></html>`);
+ // Linkedom reverses document ordering for nodes in different subtrees.
+ // Supply the browser's following/preceding contract for this fixture.
+ Object.defineProperty(window.HTMLElement.prototype,'compareDocumentPosition',{configurable:true,value(other:Element){
+  const nodes=Array.from(document.querySelectorAll('*'));
+  return nodes.indexOf(this)<nodes.indexOf(other)?4:2;
+ }});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{configurable:true,value(){return this.hidden?[]:[{width:200,height:30}];}});
  const item={type:'assistant-message',messageId:'assistant',phase:'final_answer',completed:true,content:'Final answer',...extra.assistant};
  const entry:any={id:'turn',conversationId:'inactive-fixture',isMostRecentTurn:true,isReadOnly:false,timestampTurns:[{role:'user',sentAtMs:1000}],turn:{status:'in_progress',items:[{type:'user-message',messageId:'user',message:'Request'},{type:'chatgpt-reasoning-group',completed:false,items:[]},item]},...extra.entry};
@@ -25,6 +31,8 @@ function fixture(extra:any={}) {
  if(extra.historicalTask)document.querySelector('main')!.insertAdjacentHTML('afterbegin','<section data-turn-key="earlier"><div data-automation-card="true"><button>Task</button></div></section>');
  if(extra.userMismatch)document.querySelector('[data-chatgpt-search-unit-key="turn:0:user"]')!.setAttribute('data-chatgpt-search-message-ids','other');
  if(extra.assistantMismatch)document.querySelector('[data-chatgpt-search-unit-key="turn:2:assistant"]')!.setAttribute('data-chatgpt-search-message-ids','other');
+ if(extra.pageError)document.querySelector('main')!.insertAdjacentHTML('beforeend','<aside role="alert" class="text-danger">Current recovery error</aside>');
+ if(extra.oldPageError)document.querySelector('main')!.insertAdjacentHTML('afterbegin','<aside role="alert" class="text-danger">Historical recovery error</aside>');
  const ctx=createContext({document,URL,location:{origin:'https://chatgpt.com',href:url,pathname:'/c/inactive-fixture'}});
  runInContext(source,ctx);return JSON.parse(JSON.stringify(runInContext(`inspectCompletedTurn(${JSON.stringify(url)},false,null,null,${JSON.stringify(extra.binding||null)})`,ctx)));
 }
@@ -48,3 +56,6 @@ assert.equal(fixture(aliased).terminalEmptyResponse,false,'an unbound local alia
 assert.equal(fixture({...aliased,binding}).terminalEmptyResponse,true);
 for(const change of [{url:'https://chatgpt.com/c/other'},{alias:'local-chatgpt:other'},{userId:'other'},{userText:'other'},{userSentAtMs:1001}])
  assert.equal(fixture({...aliased,binding:{...binding,...change}}).terminalEmptyResponse,false);
+
+assert.equal(fixture({pageError:true}).hasError,true,'page-level error after latest user blocks native completion');
+assert.equal(fixture({oldPageError:true}).hasError,false,'historical error before latest user is ignored');
