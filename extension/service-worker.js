@@ -506,11 +506,12 @@ async function handleHandoffMessage(message, tabId) {
     if(message.stage==='sent'&&(!ChatGPTHandoffTitle.chatUrl(message.targetUrl)||
         ChatGPTHandoffTitle.chatUrl(message.targetUrl)===ChatGPTHandoffTitle.chatUrl(current.sourceUrl)))throw new Error('Handoff destination is not a new permanent chat');
     const record = { ...current, stage: message.stage, targetUrl: message.targetUrl || current.targetUrl, reason: message.reason || '',
+      ...(['editor','upload'].includes(message.preparationPhase)?{preparationPhase:message.preparationPhase}:{}),
       ...(message.stage==='awaiting-confirmation'?{awaitingNotifiedAt:current.awaitingNotifiedAt||Date.now()}:{}),
       ...(acceptance?{acceptance:{messageId:acceptance.messageId,entryId:acceptance.entryId,targetUrl:acceptance.targetUrl,confirmedAt:Date.now()}}:{}),
       ...(message.stage==='sent'?{sentAt:Date.now()}: {}) };
     await appendJournal({kind:`handoff.${message.stage}`,operationId:record.id,sourceUrl:record.sourceUrl,
-      targetUrl:record.targetUrl,reason:record.reason}, {id:tabId});
+      targetUrl:record.targetUrl,reason:record.reason,...(record.preparationPhase?{preparationPhase:record.preparationPhase}:{})}, {id:tabId});
     const lineageUrl=message.stage==='sent'&&record.naming?ChatGPTHandoffTitle.chatUrl(record.targetUrl):'';
     await chrome.storage.local.set({ [key]: record,
       ...(lineageUrl?{[`chatgpt-handoff-title:${lineageUrl}`]:{...record.naming,targetUrl:lineageUrl,transferred:true,confirmed:false}}:{}) });
@@ -1374,7 +1375,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'CHATGPT_INSPECT_ATTACHMENT') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     chrome.scripting.executeScript({ target: { tabId: sender.tab.id }, world: 'MAIN',
-      func: inspectChatAttachment, args: [message.fileName]
+      func: controlChatComposer, args: [{action:'inspect-attachment',fileName:message.fileName,url:sender.tab.url}]
     }).then((results) => sendResponse({ ok: true, ...results[0]?.result }))
       .catch(() => sendResponse({ ok: false, status: 'unknown' }));
     return true;

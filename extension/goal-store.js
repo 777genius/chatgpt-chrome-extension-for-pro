@@ -769,7 +769,7 @@
       if(!source)return {ok:false};
       return serialize(async()=>{
         const record=await read(source);
-        if(!record)return {ok:true};
+        if(!record||record.phase==='completed'&&!record.operation&&!record.pauseRequested&&!record.stopRequested&&!record.manualPending)return {ok:true};
         if(record.handoffId!==handoffId||record.handoffTabId!==tabId||record.operation||
             record.pauseRequested||record.stopRequested||record.manualPending||
             record.preHandoffPhase==='paused'||now()>=record.deadlineAt)return {ok:false};

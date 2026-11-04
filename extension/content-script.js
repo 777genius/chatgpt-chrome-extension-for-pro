@@ -968,15 +968,16 @@
   window.addEventListener('popstate',scheduleHandoffCheck,{signal:listeners.signal});
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){scheduleHandoffCheck();void renameHandoff();}},{signal:listeners.signal});
 
-  async function waitHandoff(check, timeoutMs = 20000) {
+  async function waitHandoff(check, timeoutMs = 20000, preparationPhase = 'editor') {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!runtimeAvailable()) throw new Error('Расширение обновлено');
       const result = await check();
       if (result) return result;
-      await sleepUntilNextCheck();
+      if(preparationPhase==='upload'){const waited=await runtimeMessage({type:'CHATGPT_WAIT',delayMs:1000});if(!waited?.ok)throw new Error('Ожидание расширения недоступно');}
+      else await sleepUntilNextCheck();
     }
-    throw new Error('Не удалось дождаться готовности нового чата');
+    throw Object.assign(new Error('Не удалось дождаться готовности нового чата'),{preparationPhase});
   }
 
   async function submitHandoff() {
@@ -1040,7 +1041,7 @@
           }
           if (file?.status === 'error') throw new Error('Ошибка загрузки файла истории');
           return file?.ok && file.status === 'ready';
-        }, 60000);
+        }, 180000, 'upload');
         if (!nativeSeed) {
           const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
           verifyPreparation();
@@ -1082,7 +1083,7 @@
       if(clicked) {
         try {await awaitHandoffConfirmation(String(cause.message||cause));}catch{}
       } else {
-        try { await updateHandoff('failed', { reason: String(cause.message || cause) }); } catch {}
+        try { await updateHandoff('failed', { reason: String(cause.message || cause),preparationPhase:cause.preparationPhase||null }); } catch {}
         notifyOperationWarning({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
       }
     } finally {
@@ -1229,7 +1230,7 @@
     handoffReadinessTimer=setTimeout(()=>{
       handoffReadinessTimer=null;
       if(runtimeAvailable())void resumeSavedHandoff();
-    },300000);
+    },handoffRecord.preparationPhase==='upload'?5000:300000);
   }
 
   async function resumeSavedHandoff() {
