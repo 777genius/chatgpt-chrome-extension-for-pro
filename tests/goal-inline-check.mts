@@ -106,7 +106,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
     const event=new window.Event('click',{bubbles:true,cancelable:true});
     Object.defineProperty(event,'isTrusted',{value:true});target.dispatchEvent(event);
   }
-  return {document,window,calls,state,instance,element,click,
+  return {document,window,calls,state,instance,element,click,context,
     now:()=>clock,timers:()=>timers.size,advance:async(ms:number)=>{clock+=ms;for(const [id,timer] of Array.from(timers))if(timer.at<=clock){timers.delete(id);timer.run();}await tick();},
     composerState:()=>composerState,setComposer:(value:Composer|null)=>{composerState=value;},bindable:(value=true)=>{bindable=value;},
     toggle:()=>element('[role=switch]'),details:()=>element('[aria-label="Goal settings"]'),panel:()=>element<HTMLElement>('[data-chatgpt-goal-inline=panel]'),
@@ -458,3 +458,19 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
  assert.equal(objective.localName,'p');assert.equal(f.state.nativeSends,0);f.instance.dispose();
 }
 console.log('Inline Goal native arming, explicit intent, bounded confirmation, draft isolation, route fences, layout and disposal passed.');
+
+// Reloaded isolated worlds share DOM but cannot rely on the old JS disposer.
+{
+ const f=fixture();await tick();const oldCalls=f.calls.length;
+ runInContext(source,f.context);
+ const replacement:Instance=runInContext('ChatGPTGoalInline',f.context).create({document:f.document,getUrl:()=>chat,
+   alive:()=>true,request:async()=>({ok:true,url:chat,record:null,composer:null})});
+ await tick();await tick();
+ assert.equal(f.document.querySelectorAll('[data-chatgpt-goal-inline=controls]').length,1);
+ assert.equal(f.document.querySelectorAll('[data-chatgpt-goal-inline=style]').length,1);
+ await f.instance.refresh();assert.equal(f.calls.length,oldCalls,'superseded world cannot resume its requests');
+ f.instance.dispose();await replacement.refresh();
+ assert.equal(f.document.querySelectorAll('[data-chatgpt-goal-inline=controls]').length,1,'old disposal cannot remove new controls');
+ assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
+ replacement.dispose();assert.equal(f.document.querySelector('[data-chatgpt-goal-inline]'),null);
+}

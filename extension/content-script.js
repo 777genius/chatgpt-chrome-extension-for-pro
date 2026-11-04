@@ -1,8 +1,9 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.45';
+  const SCRIPT_VERSION = '1.8.46';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
+  document.dispatchEvent(new Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
@@ -52,6 +53,9 @@
   }
   globalThis.__chatgptNotifierDispose = stopContext;
   globalThis.__chatgptNotifierAlive = runtimeAvailable;
+  document.addEventListener('chatgpt-notifier-retire-invalidated',()=>{
+    if(!runtimeAvailable())stopContext();
+  },{signal:listeners.signal});
   async function runtimeMessage(message) {
     if (!runtimeAvailable()) { stopContext(); return null; }
     try { return await chrome.runtime.sendMessage(message); }
