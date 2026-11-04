@@ -17,7 +17,7 @@ const durable:Record<string,any>={};
 let now=1000000;let revision=1;const sent:Message[]=[],listeners:Array<(message:Message)=>void>=[];
 const location={href:'https://chatgpt.com/c/example',pathname:'/c/example'};
 const world=createContext({document,window,location,URL,AbortController,crypto:globalThis.crypto,
- Node:window.Node,Element:window.Element,MutationObserver:window.MutationObserver,performance,
+ Event:window.Event,Node:window.Node,Element:window.Element,MutationObserver:window.MutationObserver,performance,
  Date:class extends Date{static now(){return now;}},
  setInterval:()=>1,clearInterval:()=>{},setTimeout:()=>1,clearTimeout:()=>{},
  chrome:{storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,durable[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(durable,structuredClone(value))}},runtime:{id:'test',getManifest:()=>({version:'fixture'}),onMessage:{addListener:(fn:(m:Message)=>void)=>listeners.push(fn),removeListener:()=>{}},
