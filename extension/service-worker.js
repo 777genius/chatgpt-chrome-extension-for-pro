@@ -485,6 +485,47 @@ async function handleHandoffMessage(message, tabId) {
 
 // Adopt only a user-submitted native message. This path never clicks or edits
 // the composer, and does not infer a new chat from its URL alone.
+async function recoverNativeComposerGoal(tabId,url,pending) {
+  const waiting=()=>({ok:true,pending:true,url,composer:pending});
+  if(!ChatGPTGoalPolicy.canonical(url)||pending.url!=='https://chatgpt.com/'||
+      !Number.isFinite(pending.intent?.eventAt)||Date.now()-pending.intent.eventAt<30000)return waiting();
+  const journal=await readJournal();
+  const requests=journal.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&!e.operationId&&
+    typeof e.requestId==='string'&&e.requestId&&Number.isFinite(e.eventAt));
+  const candidates=requests.filter(e=>e.sourceUrl===pending.url&&e.eventAt>=pending.intent.eventAt&&e.eventAt-pending.intent.eventAt<=10000);
+  if(candidates.length!==1)return waiting();
+  const request=candidates[0];
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
+    func:inspectCompletedTurn,args:[url,true,null,request.eventAt]});
+  const native=checked?.result,timeline=native?.recoveryTimeline;
+  if(!native?.ok||native.url!==url||native.isReadOnly!==false||!Array.isArray(timeline)||!timeline.length||
+      timeline[0].userId!==native.userId||!ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText)||
+      !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-request.eventAt)>10000)return waiting();
+  const supplements=[];
+  for(const user of timeline.slice(1)) {
+    const found=requests.filter(e=>e.sourceUrl===url&&e.eventAt>request.eventAt&&Math.abs(e.eventAt-user.userSentAtMs)<=10000);
+    if(found.length!==1)return waiting();
+    supplements.push({...user,requestId:found[0].requestId,startedAt:found[0].eventAt});
+  }
+  const [currentNative]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const latest=currentNative?.result,last=timeline.at(-1),current=await goalController.composerGet({tabId});
+  if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url||current?.id!==pending.id||
+      current.phase!=='intent'||JSON.stringify(current)!==JSON.stringify(pending)||
+      !latest?.ok||latest.isLatest!==true||latest.isReadOnly!==false||latest.userId!==last.userId||
+      latest.promptKey!==last.promptKey||latest.userText!==last.userText||latest.userSentAtMs!==last.userSentAtMs)return waiting();
+  const result=await goalController.composerBind({tabId,armId:pending.id,url,requestId:request.requestId,startedAt:request.eventAt,
+    promptKey:native.promptKey,userId:native.userId,userText:native.userText,userVisibleText:native.userVisibleText,
+    userSentAtMs:native.userSentAtMs,firstTurn:native.firstTurn,nativeVerified:true,
+    recovery:{nativeVerified:true,firstUserId:timeline[0].userId,supplements}});
+  // Only the latest fully completed answer may continue a recovered Goal.
+  // Earlier answers are historical context, never independent send triggers.
+  if(result.ok&&latest.turnStatus==='complete'&&latest.generating===false&&!latest.hasError&&
+      latest.assistantCompleted===true&&latest.assistantPhase==='final_answer'&&latest.assistantKey)
+    await goalController.completion({url,tabId,completionKey:latest.promptKey+'|'+latest.assistantKey,
+      promptKey:latest.promptKey,userId:latest.userId,response:latest.goalResponse||'',
+      rawExact:latest.goalRawExact===true,nativeVerified:true});
+  return {ok:result.ok,url,tabId,composer:result.record,record:await goalController.get(url)};
+}
 async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   const pending=await goalController.composerGet({tabId});
   const canonical=ChatGPTGoalPolicy.canonical(currentUrl);
@@ -497,7 +538,8 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   const waiting=()=>({ok:true,pending:true,url:currentUrl,composer:pending});
   const latest=await latestRequestReceipt(tabId);
   const request=latest||pending.request;
-  if(!Number.isFinite(pending.intent?.eventAt)||!request||request.startedAt<pending.intent?.eventAt||request.startedAt-pending.intent?.eventAt>10000)return waiting();
+  if(!Number.isFinite(pending.intent?.eventAt)||!request||request.startedAt<pending.intent?.eventAt||request.startedAt-pending.intent?.eventAt>10000)
+    return typeof recoverNativeComposerGoal==='function'?recoverNativeComposerGoal(tabId,canonical||currentUrl,pending):waiting();
   if(!pending.request)await goalController.composerRequest({tabId,armId,requestId:request.requestId,
     startedAt:request.startedAt,url:request.url});
   if(!canonical)return waiting();

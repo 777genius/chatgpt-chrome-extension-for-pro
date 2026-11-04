@@ -63,6 +63,27 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     element=turns.find(node=>(node.getAttribute('data-content-search-turn-key')||node.getAttribute('data-testid'))===entry.id);
     if(!element)return {ok:false,reason:'historical-user-not-rendered'};
   }
+  let recoveryTimeline=null;
+  if(historicalUserIndex!==null) {
+    const timeline=[];
+    let complete=true;
+    for(const candidate of nativeEntries) {
+      const items=(candidate.turn?.items||[]).filter(item=>item.type==='user-message');
+      const times=(candidate.timestampTurns||[]).filter(item=>item.role==='user');
+      if(items.length!==times.length||candidate.isReadOnly!==false||typeof entry.conversationId!=='string'||
+          !entry.conversationId||candidate.conversationId!==entry.conversationId){complete=false;break;}
+      const row=turns.find(node=>(node.getAttribute('data-content-search-turn-key')||node.getAttribute('data-testid'))===candidate.id);
+      const dom=Array.from(row?.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]')||[]);
+      for(let i=0;i<items.length;i++) {
+        const key=dom[i]?.getAttribute('data-testid')||dom[i]?.getAttribute('data-chatgpt-search-unit-key');
+        if(!key||!items[i].messageId||typeof items[i].message!=='string'||!Number.isFinite(times[i]?.sentAtMs)) {complete=false;break;}
+        timeline.push({userId:items[i].messageId,userText:items[i].message,userSentAtMs:times[i].sentAtMs,
+          promptKey:location.pathname+'|'+key});
+      }
+      if(!complete)break;
+    }
+    if(complete)recoveryTimeline=timeline;
+  }
   const users=(entry.turn?.items||[]).filter(item=>item.type==='user-message');
   const assistants=(entry.turn?.items||[]).filter(item=>item.type==='assistant-message'&&item.phase==='final_answer');
   const user=historicalUserIndex===null?users.at(-1):users[historicalUserIndex],assistant=assistants.at(-1);
@@ -161,6 +182,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     }
     const sentAtMs=(historicalUserIndex===null?userTimes.at(-1):userTimes[historicalUserIndex])?.sentAtMs;
     goalText={userText:typeof user.message==='string'?user.message:'',userVisibleText,userSentAtMs:Number.isFinite(sentAtMs)?sentAtMs:null,
+      ...(historicalUserIndex!==null?{recoveryTimeline}:{}),
       goalResponse,goalRawExact};
   }
   // Failure rollback is separate from completion. Require the real idle

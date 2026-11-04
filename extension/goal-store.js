@@ -139,7 +139,7 @@
         return {ok:true,record};
       });
     }
-    async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,firstTurn,nativeVerified}) {
+    async function composerBind({tabId,armId,url,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,firstTurn,nativeVerified,recovery}) {
       requireTab(tabId);
       const target=requireUrl(url);
       return serialize(async()=>{
@@ -156,14 +156,33 @@
             typeof promptKey!=='string'||promptKey===intent.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|'))
           throw Error('Нативная ручная отправка Goal не подтверждена точным запросом и текстом');
-        if(current.url==='https://chatgpt.com/'?firstTurn!==true:current.url!==target)
+        const supplements=[];
+        if(recovery!==undefined) {
+          if(recovery?.nativeVerified!==true||recovery.firstUserId!==userId||!Array.isArray(recovery.supplements)||recovery.supplements.length>100)
+            throw Error('История ручной цели не подтверждена');
+          let previousAt=startedAt;
+          const ids=new Set([userId]),requests=new Set([requestId]);
+          for(const item of recovery.supplements) {
+            if(!item||typeof item.userId!=='string'||!item.userId||ids.has(item.userId)||
+                typeof item.requestId!=='string'||!item.requestId||requests.has(item.requestId)||
+                !Number.isFinite(item.startedAt)||item.startedAt<=previousAt||!Number.isFinite(item.userSentAtMs)||
+                Math.abs(item.userSentAtMs-item.startedAt)>10000||typeof item.userText!=='string'||!item.userText.trim()||
+                item.userText.length>10000||typeof item.promptKey!=='string'||!item.promptKey.startsWith(new URL(target).pathname+'|'))
+              throw Error('Дополнения ручной цели не подтверждены в исходном порядке');
+            ids.add(item.userId);requests.add(item.requestId);previousAt=item.startedAt;
+            supplements.push({...item,tabId,text:item.userText,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
+          }
+        }
+        if(current.url==='https://chatgpt.com/'?firstTurn!==true&&recovery?.firstUserId!==userId:current.url!==target)
           throw Error('Ручная отправка Goal относится к другому чату или не является первым сообщением');
         // Native Markdown may retain link targets absent from the visible
         // composer text. The worker proves the exact rendered submitted turn;
         // keep both forms so a replay cannot substitute a different payload.
         const binding={url:target,requestId,startedAt,promptKey,userId,userSentAtMs,
-          userText,userVisibleText:typeof userVisibleText==='string'?userVisibleText:null};
-        const sameBinding=value=>value&&Object.keys(binding).every(name=>value[name]===binding[name]);
+          userText,userVisibleText:typeof userVisibleText==='string'?userVisibleText:null,
+          ...(recovery?{recovery}: {})};
+        const sameBinding=value=>value&&Object.keys(binding).every(name=>name==='recovery'?
+          JSON.stringify(value[name])===JSON.stringify(binding[name]):value[name]===binding[name]);
         const name=composerBindingKey(armId),prior=(await storage.get(name))[name];
         const previous=await read(target);
         if(current.phase==='bound') {
@@ -176,12 +195,14 @@
         const record={...current,phase:'bound',binding};
         const next={schema:1,id:armId,url:target,originUrl:target,goal:userText,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
-          startedAt,manualStartedAt:startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
-          expectedPromptKey:promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
+          startedAt,manualStartedAt:supplements.at(-1)?.startedAt||startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
+          expectedPromptKey:supplements.at(-1)?.promptKey||promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
+          ...(recovery?{supplements}:{}),
           handoffPending:false,handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
         await event('manual_started',next,tabId,{text:userText,intentText:intent.text,userVisibleText:binding.userVisibleText,rules:next.rules,
           maxContinuations:next.maxContinuations,maxMinutes:next.maxMinutes,deadlineAt:next.deadlineAt,
-          requestId,startedAt,promptKey,userId,userSentAtMs,composerSourceUrl:current.url});
+          requestId,startedAt,promptKey,userId,userSentAtMs,composerSourceUrl:current.url,
+          ...(recovery?{recoveredSupplements:supplements}: {})});
         await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId}});
         return {ok:true,record,goal:view(next)};
       });
