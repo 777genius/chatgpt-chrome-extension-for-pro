@@ -1124,6 +1124,74 @@
     if(result.record)handoffRecord=result.record;
   }
 
+  function handoffNavigationButton(alert,info,escalated=false) {
+    const root=pageRoot();
+    if(!alert||!root.contains(alert)||!isElementVisible(alert)||!escalated&&info?.action!=='new-chat')return null;
+    const enabled=node=>isElementVisible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true';
+    const local=alert.querySelector('button');
+    // An explicit disabled native control is a refusal, not permission to use
+    // a different button. Escalation still selects navigation, never Retry.
+    if(local&&!enabled(local))return null;
+    if(local&&!escalated)return local;
+    return Array.from(document.querySelectorAll('a[href="/"],button.button-toolbar:has(svg path[d^="M8.16675 2.501"])')).find(node=>{
+      const owner=node.closest('[data-app-shell-active-page]');
+      return (!owner||owner===root)&&enabled(node);
+    })||null;
+  }
+
+  const handoffNavigationClaims=new Set();
+  const handoffNavigationRecoveryClaims=new Set();
+  async function navigateHandoffSource(record,alert,info,{sourceEditor,draft,sourceEffort,sourceModel,sameSource,escalated=false}) {
+    if(handoffNavigationClaims.has(record.id))return;
+    let button;
+    const unchanged=mode=>sameSource()&&handoffRecord?.id===record.id&&handoffRecord.stage==='navigating'&&
+      !isGenerating()&&composer()===sourceEditor&&mode.value===sourceEffort&&mode.model===sourceModel&&
+      (!sourceEditor||rawEditorText(sourceEditor)===draft&&!composerHasAttachments(sourceEditor));
+    try {
+      button=handoffNavigationButton(alert,info,escalated);
+      if(!button)throw new Error('Кнопка нового чата недоступна');
+      if(!unchanged(await reasoningMode()))throw new Error('Исходный чат или черновик изменились; переход отменён');
+      if(handoffNavigationClaims.has(record.id))return;
+      handoffNavigationClaims.add(record.id);
+      await audit('handoff.navigation_intent',{operationId:record.id,sourceUrl:record.sourceUrl},true);
+      if(!runtimeAvailable())return;
+      if(!unchanged(await reasoningMode())||handoffNavigationButton(alert,info,escalated)!==button)
+        throw new Error('Исходный чат, черновик или кнопка изменились; переход отменён');
+    } catch(cause) {
+      if(cause?.code==='RETRY_DUPLICATE')return; // Another context owns this navigation; do not overwrite its stage.
+      // A refused pre-click preparation is durable. A persisted navigation
+      // intent remains a fence even if a later observer cannot prove a click.
+      await updateHandoff('failed',{reason:String(cause.message||cause)});
+      throw cause;
+    }
+    if(!runtimeAvailable())return;
+    button.click();
+    await audit('handoff.navigation_clicked',{operationId:record.id,sourceUrl:record.sourceUrl},true);
+    await waitHandoff(()=>location.href!==record.sourceUrl);
+    await submitHandoff();
+  }
+
+  async function resumeHandoffSourceNavigation(message) {
+    if(!runtimeAvailable()||message.url!==location.href||handoffNavigationRecoveryClaims.has(message.id))return;
+    handoffNavigationRecoveryClaims.add(message.id);
+    const promptKey=latestPromptSnapshot()?.promptKey||location.pathname,attempt=globalThis.__chatgptNotifierAttemptId||'',request=globalThis.__chatgptNotifierRequestId||null;
+    const sameSource=()=>runtimeAvailable()&&location.href===message.url&&
+      (latestPromptSnapshot()?.promptKey||location.pathname)===promptKey&&
+      (globalThis.__chatgptNotifierAttemptId||'')===attempt&&(globalThis.__chatgptNotifierRequestId||null)===request;
+    const saved=await runtimeMessage({type:'CHATGPT_HANDOFF_GET'}),record=saved?.record;
+    if(!sameSource()||!saved?.ok||record?.id!==message.id||record.sourceUrl!==message.url||
+        record.stage!=='navigating'||record.navigationRecoveries!==1)return;
+    const alert=currentErrors().find(node=>node.matches('aside[role="alert"].text-danger'));
+    if(!alert)return;
+    const info=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
+    if(!sameSource()||!info?.ok||info.action!=='new-chat'||info.incomplete||!info.messages?.length)return;
+    const editor=composer();
+    if(!editor||rawEditorText(editor)!==record.draft||composerHasAttachments(editor))return;
+    handoffRecord=record;
+    await navigateHandoffSource(record,alert,info,{sourceEditor:editor,draft:record.draft,
+      sourceEffort:record.reasoningEffort,sourceModel:record.reasoningModel,sameSource:()=>sameSource()&&alert.isConnected});
+  }
+
   async function beginHandoff(error, info, alert) {
     if (handoffBusy) return;
     const sourceUrl = location.href;
@@ -1173,27 +1241,7 @@
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_BEGIN', record });
     if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить передачу');
     handoffRecord = result.record;
-    let button;
-    try {
-      button = error.escalated
-        ?Array.from(document.querySelectorAll('a[href="/"],button.button-toolbar:has(svg path[d^="M8.16675 2.50127C8.53391"])')).find(isElementVisible)
-        :alert.querySelector('button');
-      if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
-      const liveMode=await reasoningMode();
-      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || (liveMode.value !== sourceEffort || liveMode.model !== sourceModel) ||
-          sourceEditor && (rawEditorText(sourceEditor) !== draft || composerHasAttachments(sourceEditor))) {
-        throw new Error('Исходный чат или черновик изменились; переход отменён');
-      }
-    } catch (cause) {
-      // Cancellation before the native click must also survive reinjection.
-      await updateHandoff('failed', { reason: String(cause.message || cause) });
-      throw cause;
-    }
-    // Use the real page action to preserve its mode/model behavior.
-    if (!runtimeAvailable()) return;
-    button.click();
-    await waitHandoff(() => location.href !== sourceUrl);
-    await submitHandoff();
+    await navigateHandoffSource(handoffRecord,alert,info,{sourceEditor,draft,sourceEffort,sourceModel,sameSource,escalated:Boolean(error.escalated)});
   }
 
   function notifySuppressedError(error,state,promptKey,attemptId) {
@@ -1805,6 +1853,11 @@
 
   function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_HANDOFF_NAVIGATION_READY'){
+      sendResponse?.({ok:true});
+      void resumeHandoffSourceNavigation(message).catch(cause=>notifyOperationWarning({sourceUrl:message.url,sessionTitle:document.title,response:String(cause.message||cause)},'Переход в новый чат остановлен'));
+      return;
+    }
     if(message?.type==='CHATGPT_GOAL_MARKER_PENDING'){
       if(ChatGPTHandoffTitle.chatUrl(location.href)===message.url)void recoverGoalState();
       sendResponse?.({ok:true});return;

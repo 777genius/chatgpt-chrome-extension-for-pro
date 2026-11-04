@@ -225,6 +225,7 @@ function appendJournal(event, tab = {}) {
     const retryReleasedOperations = { ...meta.retryReleasedOperations };
     const retryPreparingByChat = { ...meta.retryPreparingByChat };
     const handoffSourceClaims = { ...meta.handoffSourceClaims };
+    const handoffNavigationClaims={...meta.handoffNavigationClaims};
     const requests = { ...meta.requests };
     let operationId = event.operationId || null;
     const savedDraft=meta.retryDraftByChat[retryDraftUrl(sourceUrl)];
@@ -308,6 +309,14 @@ function appendJournal(event, tab = {}) {
       } else if(source&&operationId&&!claim) {
         handoffSourceClaims[source]={operationId,tabId,at:Date.now()};
       }
+    }
+    if(event.kind==='handoff.navigation_intent') {
+      const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
+      if(!operationId||!source||!claim||claim.operationId!==operationId||claim.tabId!==tabId||
+          active[tabId]||retryPreparingByChat[source]||Object.values(active).some(a=>a.chatUrl===source||a.sourceUrl===source)||
+          Object.hasOwn(handoffNavigationClaims,operationId))
+        throw Object.assign(new Error('Переход в новый чат уже запускался или не принадлежит этой передаче'),{journalPolicy:true,code:'RETRY_DUPLICATE'});
+      handoffNavigationClaims[operationId]={tabId,sourceUrl:source,at:Date.now()};
     }
     if (event.kind === 'send.authorized') {
       if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
@@ -395,7 +404,7 @@ function appendJournal(event, tab = {}) {
     if (event.kind === 'tab.closed') delete tabs[tabId];
     const retryDraftByChat=staleDraftSave?meta.retryDraftByChat:reduceRetryDraft(meta.retryDraftByChat,entry,meta.retryByChat?.[journalChatId(entry.sourceUrl)]?.manualStartedAt);
     await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
-      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, requests, tabs, lastAt: entry.recordedAt,
+      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, handoffNavigationClaims, requests, tabs, lastAt: entry.recordedAt,
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims } });
     journalFailure = '';

@@ -773,18 +773,25 @@
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
           next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,reason:''};
         if(['retry.failed','retry.blocked','draft.restore_failed'].includes(kind))
-          next={...record,phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'};
+          next={...record,phase:record.phase==='paused'||record.pauseRequested?'paused':'blocked',reason:'Восстановление запроса завершилось ошибкой'};
         if(next===record)return;
         await event('recovery',next,tabId,{recoveryKind:kind});
         await save(next);
       });
+    }
+    // A failed ordinary retry is recoverable through the native new-chat
+    // path; model-declared blocks and unknown Goal sends remain terminal.
+    function retryBlockedForHandoff(record) {
+      return record?.phase==='blocked'&&record.reason==='Восстановление запроса завершилось ошибкой'&&
+        !record.operation&&!record.manualPending&&!record.pauseRequested&&!record.stopRequested&&!record.manualOverride;
     }
     async function handoffBegin({sourceUrl,handoffId,tabId}) {
       const source=canonical(sourceUrl);
       if(!source)return;
       await serialize(async()=>{
         const record=await read(source);
-        if(!record||['completed','stopped','blocked','moved'].includes(record.phase))return;
+        const recoveryBlocked=retryBlockedForHandoff(record);
+        if(!record||['completed','stopped','moved'].includes(record.phase)||record.phase==='blocked'&&!recoveryBlocked)return;
         // The handoff record is persisted before the Goal phase. A worker can
         // stop in between; GET must be able to replay this exact transition.
         if(record.phase==='handoff'&&record.handoffId===handoffId) {
@@ -795,8 +802,8 @@
           return;
         }
         if(record.manualPending)throw Error('Дополнение к цели ещё не подтверждено; handoff остановлен');
-        if(!['waiting','paused','recovering'].includes(record.phase))throw Error('Goal отправляет сообщение; handoff остановлен');
-        const next={...record,preHandoffPhase:record.phase,phase:'handoff',handoffId,handoffTabId:tabId};
+        if(!['waiting','paused','recovering'].includes(record.phase)&&!recoveryBlocked)throw Error('Goal отправляет сообщение; handoff остановлен');
+        const next={...record,preHandoffPhase:recoveryBlocked?'recovering':record.phase,phase:'handoff',handoffId,handoffTabId:tabId};
         await event('handoff_begin',next,tabId,{handoffId});
         await save(next);
       });
@@ -815,7 +822,7 @@
         return {ok:true,record:view(next)};
       });
     }
-    async function handoffPreparationReady({sourceUrl,handoffId,tabId}) {
+    async function handoffPreparationReady({sourceUrl,handoffId,tabId,reason='Не удалось дождаться готовности нового чата'}) {
       const source=canonical(sourceUrl);
       if(!source)return {ok:false};
       return serialize(async()=>{
@@ -825,9 +832,10 @@
             record.pauseRequested||record.stopRequested||record.manualPending||
             record.preHandoffPhase==='paused'||now()>=record.deadlineAt)return {ok:false};
         if(record.phase==='handoff')return {ok:true};
-        if(record.phase!=='blocked'||record.reason!=='Передача Goal остановлена: Не удалось дождаться готовности нового чата')return {ok:false};
+        if(!['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна'].includes(reason)||
+            record.phase!=='blocked'||record.reason!=='Передача Goal остановлена: '+reason)return {ok:false};
         const next={...record,phase:'handoff',reason:''};
-        await event('handoff_preparation_ready',next,tabId,{handoffId});
+        await event('handoff_preparation_ready',next,tabId,{handoffId,preparationReason:reason});
         await save(next);
         return {ok:true};
       });
@@ -895,7 +903,7 @@
       if(early)await completion(early);
     }
     return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
-      context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
+      context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
   root.ChatGPTGoalStore=api;

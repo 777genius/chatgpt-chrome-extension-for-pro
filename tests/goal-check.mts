@@ -652,3 +652,91 @@ console.log('Terminal marker render-settle: persisted pending, no continuation, 
  await env.store.completion({...payload,rawExact:true,nativeMarkerPending:false});
  assert.equal(state(env).phase,'blocked');assert.equal(env.messages.length,1);
 }
+// A native new-chat action may carry a Goal whose ordinary retry failed.
+// It must not drop the original objective/clarifications or reset its budget.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',continuations:1,
+  supplements:[{userId:'saved-user',userText:'Keep this clarification',text:'Keep this clarification'}]});
+ const before=structuredClone(state(env));
+ assert.match(await env.store.context(URL_A),/Complete review, CI and merge/);
+ assert.match(await env.store.context(URL_A),/Keep this clarification/);
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'recoverable-retry-handoff',tabId:7});
+ assert.equal(state(env).phase,'handoff');assert.equal(state(env).preHandoffPhase,'recovering');
+ await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'recoverable-retry-handoff',tabId:7,acceptedUserId:'accepted-transfer-user'});
+ const moved=state(env,URL_B);assert.equal(moved.phase,'waiting');
+ for(const k of ['id','goal','rules','startedAt','deadlineAt','continuations','maxContinuations','maxMinutes','supplements'])
+  assert.deepEqual(moved[k],before[k],k+' survives retry-blocked handoff unchanged');
+ assert.equal(env.messages.length,1,'carrying recovery context does not authorize an extra send');
+}
+for(const patch of [
+ {reason:'Модель ответила точным маркером GOAL_BLOCKED'},
+ {reason:'Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён'},
+ {operation:{id:'unknown-click',status:'clicked'}},
+ {operation:{id:'reserved-goal-send',status:'reserved'}},
+ {manualPending:{requestId:'pending-manual'}},{pauseRequested:true},{stopRequested:true},{manualOverride:true},
+ {phase:'stopped'}, {phase:'completed'}
+]){
+ const env=fixture();await begin(env);await confirm(env);
+ Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',...patch});
+ const before=structuredClone(state(env));
+ assert.equal(await env.store.context(URL_A),'','terminal/uncertain state cannot inject Goal context');
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'refused-handoff',tabId:7});
+ assert.deepEqual(state(env),before,'terminal/uncertain state cannot migrate');assert.equal(env.messages.length,1);
+}
+console.log('Retry-blocked Goal handoff: shared exact eligibility, immutable objective/limits and model/unknown/manual stop fences passed');
+
+// Retry failure after an actual user Pause cannot silently resume the Goal
+// when a conversation-length error later moves it to a new chat.
+for(const kind of ['retry.failed','retry.blocked','draft.restore_failed']) {
+ const env=fixture();await begin(env);await confirm(env);
+ await env.store.control({url:URL_A,tabId:7,action:'pause'});
+ assert.equal(state(env).phase,'paused');const before=structuredClone(state(env));
+ await env.store.retry({url:URL_A,tabId:7,kind,attemptId:String(env.time)});
+ assert.equal(state(env).phase,'paused',kind+' preserves explicit pause');
+ assert.match(await env.store.context(URL_A),/Complete review, CI and merge/);
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId:'paused-retry-handoff',tabId:7});
+ assert.equal(state(env).preHandoffPhase,'paused');
+ await env.store.handoffConfirm({sourceUrl:URL_A,targetUrl:URL_B,handoffId:'paused-retry-handoff',tabId:7,acceptedUserId:'paused-accepted-user'});
+ assert.equal(state(env,URL_B).phase,'paused');
+ for(const k of ['id','goal','rules','startedAt','deadlineAt','continuations','maxContinuations','maxMinutes'])
+  assert.deepEqual(state(env,URL_B)[k],before[k],k+' remains unchanged through paused recovery');
+ await env.store.completion({url:URL_B,tabId:7,promptKey:'/c/goal-fixture-b|paused-user',completionKey:'/c/goal-fixture-b|paused-user|answer',
+  userId:'paused-accepted-user',response:'More work remains',nativeVerified:true,rawExact:false});
+ assert.equal(state(env,URL_B).phase,'paused');assert.equal(state(env,URL_B).operation,null);assert.equal(env.messages.length,1,'paused transferred reply never auto-continues');
+}
+console.log('Actual Pause → retry failure → handoff preserves paused state and original limits');
+
+// Only a positively identified failure before navigation can re-arm the same
+// Goal handoff when its native new-chat control becomes available again.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ const original=structuredClone(state(env));const handoffId='no-navigation-button';
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId,tabId:7});
+ await env.store.handoffFailed({sourceUrl:URL_A,handoffId,tabId:7,reason:'Кнопка нового чата недоступна'});
+ const before=structuredClone(state(env));
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:URL_A,handoffId,tabId:7})).ok,false,'old generic wait path cannot reclassify a navigation failure');
+ assert.deepEqual(state(env),before);
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:URL_A,handoffId,tabId:7,reason:'Кнопка нового чата недоступна'})).ok,true);
+ assert.equal(state(env).phase,'handoff');
+ for(const k of ['id','goal','startedAt','deadlineAt','maxMinutes','maxContinuations','continuations'])assert.deepEqual(state(env)[k],original[k]);
+ assert.equal(env.messages.length,1,'Goal readiness alone creates no send or navigation');
+}
+for(const scenario of ['wrong-id','wrong-tab','operation','manual','pause','stop','prepaused','deadline','draft-changed','model-blocked','generic-reason']){
+ const env=fixture();await begin(env);await confirm(env);const handoffId='navigation-fence';
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId,tabId:7});
+ await env.store.handoffFailed({sourceUrl:URL_A,handoffId,tabId:7,reason:'Кнопка нового чата недоступна'});
+ if(scenario==='operation')state(env).operation={id:'unknown',status:'clicked'};
+ if(scenario==='manual')state(env).manualPending={requestId:'owner-edit'};
+ if(scenario==='pause')state(env).pauseRequested=true;
+ if(scenario==='stop')state(env).stopRequested=true;
+ if(scenario==='prepaused')state(env).preHandoffPhase='paused';
+ if(scenario==='deadline')env.time=state(env).deadlineAt;
+ if(scenario==='draft-changed')state(env).reason='Передача Goal остановлена: Черновик изменился';
+ if(scenario==='model-blocked')state(env).reason='Модель ответила точным маркером GOAL_BLOCKED';
+ const before=structuredClone(state(env));
+ const result=await env.store.handoffPreparationReady({sourceUrl:URL_A,handoffId:scenario==='wrong-id'?'other':handoffId,
+  tabId:scenario==='wrong-tab'?8:7,reason:scenario==='generic-reason'?'Любая другая ошибка':'Кнопка нового чата недоступна'});
+ assert.equal(result.ok,false,scenario);assert.deepEqual(state(env),before,scenario);assert.equal(env.messages.length,1);
+}
+console.log('No-navigation handoff Goal recovery: explicit reason allowlist and same operation/tab/manual/Pause/Stop/deadline fences passed');

@@ -396,6 +396,56 @@ async function recoverHandoffReadiness(tabId, expected) {
   try{return await write;}finally{if(handoffWrites.get(tabId)===write)handoffWrites.delete(tabId);}
 }
 
+// A positively refused pre-navigation action may retry its native navigation,
+// never its message send. The same handoff and durable one-click claim survive.
+async function recoverHandoffNavigation(tabId,expected) {
+  const previous=handoffWrites.get(tabId)||Promise.resolve();
+  const work=previous.catch(()=>{}).then(async()=>{
+    const key=handoffKey(tabId),h=(await chrome.storage.local.get(key))[key];
+    if(h?.id!==expected.id||h.stage!=='failed'||h.reason!=='Кнопка нового чата недоступна'||
+        h.sendReceipt||(h.navigationRecoveries||0)>=1)return {ok:false,record:h};
+    const t=await chrome.tabs.get(tabId),u=ChatGPTGoalPolicy.canonical(t.url);
+    if(u!==h.sourceUrl||t.status!=='complete')return {ok:false,record:h};
+    const j=await readJournal();
+    if(!j.ok||j.storageError)return {ok:false,record:h};
+    if(j.meta?.active?.[tabId]||j.meta?.retryPreparingByChat?.[u]||
+        Object.values(j.meta?.active||{}).some(a=>a.chatUrl===u||a.sourceUrl===u))return {ok:false,record:h};
+    const own=j.events.filter(e=>e.operationId===h.id),request=await latestRequestReceipt(tabId);
+    if(!own.some(e=>e.kind==='handoff.navigating'&&e.sourceUrl===u)||
+        !own.some(e=>e.kind==='handoff.failed'&&e.reason===h.reason)||
+        own.some(e=>e.kind==='handoff.sending'||e.kind==='handoff.sent'||e.kind==='handoff.awaiting-confirmation'||
+          e.kind==='handoff.navigation_intent'||e.kind==='handoff.navigation_clicked'||e.kind==='handoff.clicked'||e.kind.startsWith('send.')||e.kind==='request.started')||
+        j.events.some(e=>e.tabId===tabId&&e.kind==='request.started'&&e.recordedAt>=h.createdAt))return {ok:false,record:h};
+    const [a]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[u,true]});
+    const n=a?.result;
+    const [b]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,true]});
+    const [c]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+      args:[{action:'inspect-plain-retry-draft',url:u,text:h.draft||''}]});
+    const p=c?.result;
+    if(!n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.generating!==false||!n.hasError||
+        b?.result?.action!=='new-chat'||b.result.incomplete||!n.userId||n.userText!==h.lastUserText||
+        !p?.ok||!p.matches||p.effort!==h.reasoningEffort||p.model!==h.reasoningModel)return {ok:false,record:h};
+    const [fresh]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[u,true]});
+    if(JSON.stringify((await chrome.storage.local.get(key))[key])!==JSON.stringify(h)||
+        (await chrome.tabs.get(tabId)).url!==u||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(request)||
+        !fresh?.result?.ok||fresh.result.isLatest!==true||fresh.result.isReadOnly!==false||
+        fresh.result.userId!==n.userId||fresh.result.userText!==n.userText||fresh.result.promptKey!==n.promptKey||
+        fresh.result.userSentAtMs!==n.userSentAtMs||fresh.result.generating!==false||!fresh.result.hasError)return {ok:false,record:h};
+    const ready=await goalController.handoffPreparationReady({sourceUrl:u,handoffId:h.id,tabId,reason:h.reason});
+    if(!ready.ok)return {ok:false,record:h};
+    const record={...h,stage:'navigating',reason:'',navigationRecoveries:1,
+      navigationRecovery:{url:u,promptKey:n.promptKey,userId:n.userId,requestId:request?.requestId||null,startedAt:request?.startedAt||null}};
+    await appendJournal({kind:'handoff.navigation_recovered',operationId:h.id,sourceUrl:u,
+      promptKey:n.promptKey,userId:n.userId,reason:'Подтверждён отказ до перехода; отправка сообщения не повторяется'},{id:tabId});
+    await chrome.storage.local.set({[key]:record});
+    return {ok:true,record};
+  });
+  handoffWrites.set(tabId,work);
+  let result;try{result=await work;}finally{if(handoffWrites.get(tabId)===work)handoffWrites.delete(tabId);}
+  if(result.ok)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_NAVIGATION_READY',id:result.record.id,url:result.record.sourceUrl}).catch(()=>{});
+  return result;
+}
+
 async function handleHandoffMessage(message, tabId) {
   const key = handoffKey(tabId);
   if (message.type === 'CHATGPT_HANDOFF_GET') {
