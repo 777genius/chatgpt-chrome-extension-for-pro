@@ -105,7 +105,7 @@ function lifecycleSetup(runtimeId: string | null = 'test-extension') {
     }
   };
   const world = createContext({document, window, location, chrome: {runtime}, AbortController, URL,
-    Node: window.Node, Element: window.Element, MutationObserver: OwnedObserver, performance,
+    Event: window.Event, Node: window.Node, Element: window.Element, MutationObserver: OwnedObserver, performance,
     Date: class extends Date {static now() {return clock;}},
     setInterval(callback: () => void) { const id = ++timerId; intervals.set(id, callback); return id; },
     clearInterval(id: number) {intervals.delete(id);},
