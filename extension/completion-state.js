@@ -27,8 +27,14 @@ if (typeof module !== 'undefined') module.exports = { completedAttemptEvidence, 
 // The MAIN probe carries the same self-contained predicate for serialization.
 function plainGoalMarkerDOM(rendered,sourceMessageId='') {
   if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
-  const plain=node=>node?.tagName==='P'&&!node.children.length&&node.childNodes.length===1&&
-    node.firstChild.nodeType===3&&node.firstChild.textContent==='GOAL_COMPLETE';
+  const plain=node=>{
+    if(node?.tagName!=='P'||node.childNodes.length!==1)return false;
+    const text=node.firstChild;
+    if(text.nodeType===3)return text.textContent==='GOAL_COMPLETE';
+    // ChatGPT's ordinary renderer wraps unformatted text in an attribute-free span.
+    return text.tagName==='SPAN'&&text.attributes.length===0&&text.childNodes.length===1&&
+      text.firstChild.nodeType===3&&text.firstChild.textContent==='GOAL_COMPLETE';
+  };
   let paragraph=rendered;
   while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&paragraph.children.length===1)paragraph=paragraph.firstElementChild;
   if(plain(paragraph))return true;

@@ -222,10 +222,12 @@ console.log('stuck-loader native latest-turn binding: passed');
    rendered.innerHTML=`<${tag}>GOAL_COMPLETE</${tag}>`;
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,`${tag} is not a plain paragraph in native catch-up`);
   }
-  for(const tag of ['del','s','b','i','u','mark','small','sup','sub','span','unknown-rich-node']) {
+  for(const tag of ['del','s','b','i','u','mark','small','sup','sub','unknown-rich-node']) {
    rendered.innerHTML=`<p><${tag}>GOAL_COMPLETE</${tag}></p>`;
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,`${tag} markup cannot complete native catch-up`);
   }
+  rendered.innerHTML='<p><span>GOAL_COMPLETE</span></p>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'neutral span native fallback marker is plain text');
   for(const content of ['<p>GOAL_COMPLETE<br></p>','<p>GOAL_COMPLETE</p><p></p>','<p>GOAL_COMPLETE<!--extra node--></p>']) {
    rendered.innerHTML=content;
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'only one text-only paragraph can complete native catch-up');

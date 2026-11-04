@@ -43,7 +43,7 @@ assert.equal(match('<p><strong>GOAL_COMPLETE</strong></p>'),false,'strong markup
 assert.equal(match('<p><a href="#">GOAL_COMPLETE</a></p>'),false,'link is not the marker');
 for(const tag of ['h1','h2','h3','h4','h5','h6','pre','blockquote','div','span'])
   assert.equal(match(`<${tag}>GOAL_COMPLETE</${tag}>`),false,`${tag} is not a plain paragraph`);
-for(const tag of ['del','s','b','i','u','mark','small','sup','sub','span','unknown-rich-node'])
+for(const tag of ['del','s','b','i','u','mark','small','sup','sub','unknown-rich-node'])
   assert.equal(match(`<p><${tag}>GOAL_COMPLETE</${tag}></p>`),false,`${tag} markup is not the marker`);
 assert.equal(match('<p>GOAL_COMPLETE<br></p>'),false,'a line break is additional answer content');
 assert.equal(match('<p>GOAL_COMPLETE</p><p></p>'),false,'a second empty paragraph is not the exact marker');
@@ -112,7 +112,7 @@ const probeUntil=probe.indexOf('  const url=location.origin',probeFrom);
 assert.ok(probeFrom>0&&probeUntil>probeFrom);
 const mainPredicate=probe.slice(probeFrom,probeUntil);
 function mainMatch(html:string,id=dil.messageId) {
- const {document}=parseHTML('<html><body><div id="answer">'+html+'</div></body></html>');
+ const {document}=parseHTML('<html><body><div id="answer" class="markdown">'+html+'</div></body></html>');
  const context=createContext({document,sourceMessageId:id});
  runInContext(mainPredicate,context);
  return runInContext('plainGoalMarkerDOM(document.querySelector("#answer"),sourceMessageId)',context);
@@ -123,3 +123,15 @@ for(const invalid of [directDIL.replace('GOAL_COMPLETE','<code>GOAL_COMPLETE</co
  directDIL.replace('GOAL_COMPLETE','Маркер GOAL_COMPLETE не выдаю.'),
  directDIL.replace('</p>','</p><p>More</p>'),directDIL.replace('<p class=','<p hidden class=')])
  assert.equal(mainMatch(invalid),false,'MAIN probe keeps the same plain-text DIL refusals');
+
+// Ordinary Markdown renderer: a single neutral span is plain text, not quotation.
+assert.equal(match('<p><span>GOAL_COMPLETE</span></p>'),true);
+assert.equal(fallback('<p class="Paragraph-fixture" dir="auto"><span>GOAL_COMPLETE</span></p>'),true);
+for(const attrs of ['hidden','aria-hidden="true"','style="font-weight:bold"','class="rich"','role="code"'])
+ assert.equal(match('<p><span '+attrs+'>GOAL_COMPLETE</span></p>'),false);
+for(const text of ['Маркер GOAL_COMPLETE не выдаю.','GOAL_COMPLETE не выдаю.','GOAL_COMPLETE '])
+ assert.equal(match('<p><span>'+text+'</span></p>'),false);
+assert.equal(match('<p><span><code>GOAL_COMPLETE</code></span></p>'),false);
+assert.equal(match('<p><span>GOAL_COMPLETE</span><span></span></p>'),false);
+assert.equal(mainMatch('<div class="markdown"><p><span>GOAL_COMPLETE</span></p></div>'),true);
+assert.equal(mainMatch('<div class="markdown"><p><span hidden>GOAL_COMPLETE</span></p></div>'),false);
