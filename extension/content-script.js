@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.40';
+  const SCRIPT_VERSION = '1.8.41';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -16,6 +16,8 @@
   let goalDispatchBusy = false;
   let goalDispatchQueue = Promise.resolve();
   let completionRecoveryTimer = null;
+  let completionRecoveryLastProbeAt = -Infinity;
+  let completionRecoveryInFlight = false;
   let handoffReadinessTimer = null;
   let retryReadinessTimer = null;
   let returnedPageUrl = '';
@@ -1326,6 +1328,7 @@
   }
 
   errorObserver = new MutationObserver((records) => {
+    wakePendingCompletionRecovery();
     if(['sending','awaiting-confirmation'].includes(handoffRecord?.stage))scheduleHandoffCheck();
     if(!replacingDraft&&draftRestorePath!==location.pathname)void restoreDraft(null,true).catch(()=>{});
     // Ignore unrelated streaming mutations unless an error is already visible
@@ -1578,7 +1581,15 @@
     void renameHandoff();
   }
 
-  function scheduleActiveCompletionRecovery() {
+  // Late first-turn allocation can mount after the startup polling grace.
+  // Reuse native checkpoint validation on DOM activity, without idle polling.
+  function wakePendingCompletionRecovery() {
+    if(completionAttempt||completionRecoveryInFlight||completionRecoveryTimer!==null||!globalThis.__chatgptNotifierAttemptId||
+        !runtimeAvailable()||Date.now()-completionRecoveryLastProbeAt<5000)return;
+    scheduleActiveCompletionRecovery(false);
+  }
+
+  function scheduleActiveCompletionRecovery(allowStartupGrace=true) {
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
     const id=globalThis.__chatgptNotifierAttemptId,path=location.pathname,token=watchToken;
     const scheduledAt=Date.now();
@@ -1586,18 +1597,20 @@
     const retry=async()=>{
       completionRecoveryTimer=null;
       if(!runtimeAvailable()||id!==globalThis.__chatgptNotifierAttemptId||path!==location.pathname||token!==watchToken)return;
+      completionRecoveryLastProbeAt=Date.now();
+      completionRecoveryInFlight=true;
       let recovered=false,pendingRestore=false;
       try{
         if(!completionAttempt||completionAttempt.path!==location.pathname){
           const restored=await restoreCompletionCheckpoint();recovered=restored===true;pendingRestore=restored==='pending'||Boolean(globalThis.__chatgptNotifierAttemptId);
         }
         if(!recovered)recovered=await recoverActiveCompletion()===true;
-      }catch{}
+      }catch{}finally{completionRecoveryInFlight=false;}
       const generating=isGenerating();
       observedGeneration ||= generating;
       // Keep observing a long-running request through temporary probe failures.
       // Before controls mount, allow only a short startup grace period.
-      if(!recovered&&!currentErrors().length&&(generating||pendingRestore&&!observedGeneration&&Date.now()-scheduledAt<30000))
+      if(!recovered&&!currentErrors().length&&(generating||allowStartupGrace&&pendingRestore&&!observedGeneration&&Date.now()-scheduledAt<30000))
         completionRecoveryTimer=setTimeout(retry,Date.now()-scheduledAt<5000?1000:5000);
     };
     void retry();
