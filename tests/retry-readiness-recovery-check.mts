@@ -17,7 +17,7 @@ async function fixture(extra:any={}) {
  const chrome={tabs:{get:async()=>({url:extra.url||url,status:extra.status||'complete'})},scripting:{executeScript:async(o:any)=>{
   calls++;
   if(o.func===inspectCompletedTurn)return [{result:native}];
-  if(o.func===inspectChatError)return [{result:{ok:true,action:extra.action||'retry'}}];
+  if(o.func===inspectChatError)return [{result:{action:extra.action||'retry'}}];
   if(o.func===controlChatComposer)return [{result:{ok:extra.empty!==false}}];
   return [{result:{attemptId:extra.runtimeAttempt||attemptId,requestId:'request'}}];
  }}};

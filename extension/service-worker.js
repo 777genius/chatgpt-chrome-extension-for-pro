@@ -637,7 +637,7 @@ async function recoverNoClickRetry(tabId,url) {
         native.promptKey!==planned.promptKey||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
         !Number.isFinite(native.lastUserSentAtMs))return state;
     const [error]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
-    if(!error?.result?.ok||error.result.action!=='retry')return state;
+    if(error?.result?.action!=='retry')return state;
     const [empty]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
       args:[{action:'inspect-empty-retry',text:'',url}]});
     if(empty?.result?.ok!==true)return state;
