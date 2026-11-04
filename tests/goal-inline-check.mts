@@ -478,3 +478,18 @@ console.log('Inline Goal native arming, explicit intent, bounded confirmation, d
  assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
  replacement.dispose();assert.equal(f.document.querySelector('[data-chatgpt-goal-inline]'),null);
 }
+// A legacy unconfirmed intent remains reviewable and requires a fresh trusted
+// Restore action. Neither background refresh nor a page-created click consents.
+{
+ const f=fixture(chat);await tick();
+ const saved:Composer={id:'saved-arm',phase:'intent',url:'https://chatgpt.com/',
+  config:{rules:'Original criteria',maxContinuations:10,maxMinutes:1440},
+  intent:{text:'Saved original objective',baselineKey:'',eventAt:f.now()-40000}};
+ f.setComposer(saved);await f.instance.refresh();f.click(f.details());
+ assert.equal(f.action('restore').hidden,false);assert.match(f.panel().textContent!,/Saved original objective/);
+ const count=f.calls.length;f.action('restore').click();await tick();assert.equal(f.calls.length,count,'untrusted Restore is ignored');
+ f.respond(value=>value.action==='restore'?{ok:true,url:chat,record:{...goal(chat),goal:saved.intent!.text},
+  composer:{...saved,phase:'bound',binding:{url:chat}}}:{ok:true,url:chat,composer:saved});
+ f.click(f.action('restore'));await tick();assert.equal(f.calls.at(-1)!.action,'restore');assert.equal(f.calls.at(-1)!.armId,'saved-arm');
+ assert.equal(f.action('restore').hidden,true);assert.equal(f.state.nativeSends,0);assert.equal(f.state.draftReads,0);f.instance.dispose();
+}

@@ -135,3 +135,12 @@ assert.equal(match('<p><span><code>GOAL_COMPLETE</code></span></p>'),false);
 assert.equal(match('<p><span>GOAL_COMPLETE</span><span></span></p>'),false);
 assert.equal(mainMatch('<div class="markdown"><p><span>GOAL_COMPLETE</span></p></div>'),true);
 assert.equal(mainMatch('<div class="markdown"><p><span hidden>GOAL_COMPLETE</span></p></div>'),false);
+// Current native renderer paints stream text through a color-only custom
+// property. It does not turn a plain completion signal into rich text.
+const inkDIL=dil.html.replace('<span data-d-stream-run','<span style="--d-stream-ink: rgb(237, 237, 237);" data-d-stream-run');
+assert.equal(matchTurn(dilTurn(inkDIL)),true);assert.equal(mainMatch(inkDIL),true);
+for(const style of ['--d-stream-ink: rgb(237,237,237); display:none','--d-stream-ink: rgb(237,237,237); font-weight:bold',
+ '--d-stream-ink: transparent','--d-stream-ink: rgb(999,0,0)','--d-stream-ink: url(https://example.test/)','opacity:0']) {
+ const html=dil.html.replace('<span data-d-stream-run',`<span style="${style}" data-d-stream-run`);
+ assert.equal(matchTurn(dilTurn(html)),false,style);assert.equal(mainMatch(html),false,style);
+}

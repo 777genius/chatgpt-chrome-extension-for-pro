@@ -14,6 +14,7 @@ importScripts('chat-title-probe.js');
 importScripts('handoff-renamer.js');
 importScripts('goal-policy.js');
 importScripts('goal-store.js');
+importScripts('goal-request-proof.js');
 const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal,
   beforeDispatch:async goal=>{
     const tabId=goal.operation?.tabId;
@@ -316,7 +317,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
     } else {
       const pending=await goalController.composerGet({tabId:details.tabId});
       if(pending?.phase==='intent')await goalController.composerRequest({tabId:details.tabId,armId:pending.id,
-        requestId:request.requestId,startedAt:request.startedAt,url:request.url});
+        requestId:request.requestId,startedAt:request.startedAt,url:request.url,submission:ChatGPTGoalRequestProof.read(details)});
     }
     const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl);
     if(url)await broadcastChatStatus(await markChatLoading(url,details.timeStamp,receipt));
@@ -326,7 +327,7 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
     func: (startedAt,requestId,receipt) => { const prior=globalThis.__chatgptNotifierRequestReceipt;if(!(globalThis.__chatgptNotifierRequestStartedAt>startedAt)&&!(prior?.epoch===receipt.epoch&&prior.order>receipt.order)){globalThis.__chatgptNotifierRequestStartedAt = startedAt; globalThis.__chatgptNotifierAttemptId = `${startedAt}`;globalThis.__chatgptNotifierRequestId=requestId;globalThis.__chatgptNotifierRequestReceipt=receipt;} },
     args: [details.timeStamp,request.requestId,receipt]
   }).then(()=>signalConversationRequestEvent(details.tabId,{type:'CHATGPT_CONVERSATION_REQUEST_STARTED',startedAt:details.timeStamp,requestId:request.requestId})).catch(() => {});
-}, CHATGPT_REQUEST_FILTER);
+}, CHATGPT_REQUEST_FILTER, ['requestBody']);
 
 chrome.webRequest.onCompleted.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
@@ -539,7 +540,9 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
   const native=checked?.result,timeline=native?.recoveryTimeline;
   if(!native?.ok||native.url!==url||native.isReadOnly!==false||!Array.isArray(timeline)||!timeline.length||
       timeline[0].userId!==native.userId||!ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText)||
-      !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-request.eventAt)>10000)return waiting();
+      !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-request.eventAt)>10000)
+    return pending.request?.submission&&typeof restoreMissingComposerGoal==='function'?
+      restoreMissingComposerGoal(tabId,url,pending.id):waiting();
   const supplements=[];
   for(const user of timeline.slice(1)) {
     const found=requests.filter(e=>e.sourceUrl===url&&e.eventAt>request.eventAt&&Math.abs(e.eventAt-user.userSentAtMs)<=10000);
@@ -564,6 +567,54 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
       promptKey:latest.promptKey,userId:latest.userId,response:latest.goalResponse||'',
       rawExact:latest.goalRawExact===true,nativeVerified:true});
   return {ok:result.ok,url,tabId,composer:result.record,record:await goalController.get(url)};
+}
+// Restoring a legacy intent is a fresh explicit user action. A captured exact
+// request body plus the native server message ID can provide automatic consent.
+async function restoreMissingComposerGoal(tabId,url,armId,userConfirmed=false) {
+  const pending=await goalController.composerGet({tabId}),wait=()=>({ok:true,pending:true,url,composer:pending});
+  if(pending?.id!==armId||pending.phase!=='intent'||pending.url!=='https://chatgpt.com/'||
+      pending.intent?.baselineKey!==''||!pending.request||!ChatGPTGoalPolicy.canonical(url))return wait();
+  const witness=pending.request.submission;
+  if(!userConfirmed&&!witness)return wait();
+  const j=await readJournal();
+  if(!j.ok||j.storageError||j.events.length!==j.meta?.sequence||
+      j.events.some((e,i)=>e.sequence!==i+1))return wait();
+  const requests=j.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId);
+  const initial=requests.filter(e=>!e.operationId&&e.sourceUrl===pending.url&&e.requestId===pending.request.requestId&&
+    e.eventAt===pending.request.startedAt&&e.eventAt>=pending.intent.eventAt&&e.eventAt-pending.intent.eventAt<=10000);
+  if(initial.length!==1)return wait();
+  const firstAllocation=j.events.find(e=>e.kind==='tab.updated'&&e.tabId===tabId&&
+    e.recordedAt>=initial[0].eventAt&&ChatGPTGoalPolicy.canonical(e.changes?.url));
+  if(firstAllocation?.changes?.url!==url)return wait();
+  const probe=async args=>(await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args}))[0]?.result;
+  const latest=await probe([url,true]);
+  if(!latest?.ok||latest.isLatest!==true||latest.isReadOnly!==false||latest.url!==url||!latest.userId||
+      !Number.isFinite(latest.userSentAtMs)||!latest.promptKey||
+      !userConfirmed&&latest.firstServerMessageId!==witness.userId)return wait();
+  const history=await probe([url,true,null,latest.userSentAtMs]),timeline=history?.recoveryTimeline;
+  if(!history?.ok||history.url!==url||history.isReadOnly!==false||!Array.isArray(timeline)||!timeline.length||history.userId!==latest.userId)return wait();
+  const later=requests.filter(e=>e.sourceUrl===url&&e.eventAt>initial[0].eventAt),supplements=[];
+  for(const u of timeline) {
+    if(Math.abs(u.userSentAtMs-initial[0].eventAt)<=10000&&
+        ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,u.userText,null))continue;
+    const matches=later.filter(e=>!e.operationId&&Math.abs(e.eventAt-u.userSentAtMs)<=10000);
+    if(matches.length!==1)return wait();
+    supplements.push({...u,requestId:matches[0].requestId,startedAt:matches[0].eventAt});
+  }
+  if(!supplements.length||supplements.length!==later.length||supplements.at(-1).userId!==latest.userId||
+      supplements.at(-1).promptKey!==latest.promptKey)return wait();
+  const fresh=await probe([url,true]);
+  if(!fresh?.ok||fresh.url!==url||fresh.isLatest!==true||fresh.isReadOnly!==false||fresh.userId!==latest.userId||fresh.userText!==latest.userText||fresh.promptKey!==latest.promptKey||
+      fresh.userSentAtMs!==latest.userSentAtMs||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url||
+      JSON.stringify(await goalController.composerGet({tabId}))!==JSON.stringify(pending))return wait();
+  const result=await goalController.composerRestore({tabId,armId,url,expectedComposer:pending,
+    requestId:initial[0].requestId,startedAt:initial[0].eventAt,supplements,nativeVerified:true,
+    userConfirmed,requestBodyConfirmed:!userConfirmed});
+  if(result.ok&&fresh.turnStatus==='complete'&&fresh.generating===false&&!fresh.hasError&&fresh.assistantCompleted===true&&
+      fresh.assistantPhase==='final_answer'&&fresh.assistantKey)
+    await goalController.completion({url,tabId,completionKey:fresh.promptKey+'|'+fresh.assistantKey,promptKey:fresh.promptKey,
+      userId:fresh.userId,response:fresh.goalResponse||'',rawExact:fresh.goalRawExact===true,nativeVerified:true});
+  return {...result,url,tabId,record:await goalController.get(url)};
 }
 async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   const pending=await goalController.composerGet({tabId});
@@ -1033,7 +1084,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if(message?.type==='CHATGPT_GOAL_INLINE') {
     const tabId=sender.tab?.id,source=ChatGPTGoalPolicy.pageUrl(sender.tab?.url);
     const requested=ChatGPTGoalPolicy.pageUrl(message.url);
-    const actions=['get','arm','disarm','intent','bind','start','pause','resume','stop'];
+    const actions=['get','arm','disarm','intent','bind','restore','start','pause','resume','stop'];
     if(sender.frameId>0||typeof tabId!=='number'||!source||!requested||!actions.includes(message.action)) {
       sendResponse?.({ok:false,error:'Goal chat binding mismatch'});return false;
     }
@@ -1045,6 +1096,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if((source!==requested||live!==requested)&&!allocatedIntent)throw Error('Чат изменился');
       let result;
       if(message.action==='bind')return bindNativeComposerGoal(tabId,live,message.armId);
+      if(message.action==='restore')return restoreMissingComposerGoal(tabId,live,message.armId,true);
       if(message.action==='get'&&pending?.phase==='intent'&&ChatGPTGoalPolicy.canonical(live))
         return bindNativeComposerGoal(tabId,live,pending.id);
       if(message.action==='arm')result=await goalController.composerArm({tabId,url:live,rules:message.rules,

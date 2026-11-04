@@ -124,7 +124,7 @@
     }
     // Keep the observed request with the consent intent, independent of the
     // bounded session cache. This grants no click and never adopts draft text.
-    async function composerRequest({tabId,armId,requestId,startedAt,url}) {
+    async function composerRequest({tabId,armId,requestId,startedAt,url,submission}) {
       requireTab(tabId);
       return serialize(async()=>{
         const current=await readComposer(tabId),intent=current?.intent;
@@ -132,8 +132,15 @@
             typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
             startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
             (url&&requirePage(url)!==current.url))return {ok:false};
-        const request={requestId,startedAt,url:url||current.url};
-        if(current.request)return {ok:JSON.stringify(current.request)===JSON.stringify(request),record:current};
+        const witness=submission&&typeof submission.userId==='string'&&
+          policy.submittedTextMatches(intent.text,submission.userText,null)?{userId:submission.userId,userText:submission.userText}:null;
+        const request={requestId,startedAt,url:url||current.url,...(witness?{submission:witness}:{})};
+        if(current.request) {
+          if(current.request.requestId!==requestId||current.request.startedAt!==startedAt||current.request.url!==request.url)
+            return {ok:false,record:current};
+          if(!current.request.submission&&witness){const next={...current,request};await storage.set({[composerKey(tabId)]:next});return {ok:true,record:next};}
+          return {ok:!witness||JSON.stringify(current.request.submission)===JSON.stringify(witness),record:current};
+        }
         const record={...current,request};
         await storage.set({[composerKey(tabId)]:record});
         return {ok:true,record};
@@ -205,6 +212,51 @@
           ...(recovery?{recoveredSupplements:supplements}: {})});
         await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId}});
         return {ok:true,record,goal:view(next)};
+      });
+    }
+    // A fresh explicit user action can restore the saved objective without
+    // pretending that the missing original message has been acknowledged.
+    // Automatic restoration additionally needs an exact submitted-body witness.
+    async function composerRestore({tabId,armId,url,expectedComposer,requestId,startedAt,supplements,
+        nativeVerified,userConfirmed=false,requestBodyConfirmed=false}) {
+      requireTab(tabId);const target=requireUrl(url);
+      return serialize(async()=>{
+        const current=await readComposer(tabId),intent=current?.intent,request=current?.request;
+        if(current?.id!==armId||current.phase!=='intent'||JSON.stringify(current)!==JSON.stringify(expectedComposer)||
+            current.url!=='https://chatgpt.com/'||!intent||intent.baselineKey!==''||
+            request?.requestId!==requestId||request.startedAt!==startedAt||nativeVerified!==true||
+            !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
+            !(userConfirmed===true||requestBodyConfirmed===true&&request.submission&&
+              policy.submittedTextMatches(intent.text,request.submission.userText,null))||
+            !Array.isArray(supplements)||!supplements.length||supplements.length>100)
+          throw Error('Восстановление сохранённой цели не подтверждено');
+        if(await read(target)||(await storage.get(composerBindingKey(armId)))[composerBindingKey(armId)])
+          throw Error('В этом чате уже есть Goal или прежняя привязка');
+        let previous=startedAt;const ids=new Set(),requests=new Set();
+        for(const item of supplements) {
+          if(!item||typeof item.userId!=='string'||!item.userId||ids.has(item.userId)||
+              typeof item.requestId!=='string'||!item.requestId||requests.has(item.requestId)||
+              !Number.isFinite(item.startedAt)||item.startedAt<=previous||
+              !Number.isFinite(item.userSentAtMs)||Math.abs(item.startedAt-item.userSentAtMs)>10000||
+              typeof item.userText!=='string'||!item.userText.trim()||item.userText.length>10000||
+              typeof item.promptKey!=='string'||!item.promptKey.startsWith(new URL(target).pathname+'|'))
+            throw Error('Отправленные дополнения к сохранённой цели не подтверждены');
+          previous=item.startedAt;ids.add(item.userId);requests.add(item.requestId);
+        }
+        const last=supplements.at(-1),deadlineAt=startedAt+current.config.maxMinutes*60000;
+        const binding={url:target,requestId,startedAt,restored:true,
+          confirmation:userConfirmed?'explicit-user':'request-body',anchorUserId:last.userId};
+        const next={schema:1,id:armId,url:target,originUrl:target,goal:intent.text,rules:current.config.rules,
+          maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
+          startedAt,manualStartedAt:last.startedAt,deadlineAt,phase:now()>=deadlineAt?'stopped':'waiting',
+          reason:now()>=deadlineAt?'Время Goal истекло':'',continuations:0,expectedPromptKey:last.promptKey,
+          lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
+          supplements:supplements.map(s=>({...s,text:s.userText,tabId,eventAt:Math.min(s.startedAt,s.userSentAtMs)})),
+          manualSupplementBinding:last,handoffPending:false,handoffId:null,operation:null,restoredIntent:binding};
+        await event('composer_restored',next,tabId,{requestId,startedAt,confirmation:binding.confirmation,anchorUserId:last.userId});
+        await storage.set({[key(target)]:next,[composerKey(tabId)]:{...current,phase:'bound',binding},
+          [composerBindingKey(armId)]:{...binding,tabId}});
+        return {ok:true,record:view(next),composer:{...current,phase:'bound',binding}};
       });
     }
     function view(record) {
@@ -790,7 +842,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,composerRestore,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

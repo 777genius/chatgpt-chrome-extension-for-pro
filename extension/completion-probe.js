@@ -23,11 +23,13 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     if(roots.length!==1||roots[0].getAttribute('data-dil-message-id')!==sourceMessageId)return false;
     const dil=roots[0],p=dil.firstElementChild,run=p?.firstElementChild;
     const neutral=node=>!Array.from(node.attributes).some(a=>/^(?:role|href|contenteditable|aria-hidden|hidden)$/i.test(a.name));
+    const ink=run?.getAttribute('style'),color=ink?.trim().match(/^--d-stream-ink:\s*rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)\s*;?$/);
+    const inkOnly=!run?.hasAttribute('style')||Boolean(color&&color.slice(1).every(v=>Number(v)<=255));
     const streamed=p?.children.length===1&&p.childNodes.length===1&&run?.tagName==='SPAN'&&
       run.hasAttribute('data-d-stream-run')&&run.getAttribute('data-d-text-flow')==='run'&&
       !run.children.length&&run.childNodes.length===1&&run.firstChild.nodeType===3&&
       run.firstChild.textContent==='GOAL_COMPLETE'&&neutral(run)&&
-      Array.from(run.attributes).every(a=>['data-d-stream-run','data-d-text-flow'].includes(a.name));
+      inkOnly&&Array.from(run.attributes).every(a=>['data-d-stream-run','data-d-text-flow','style'].includes(a.name));
     // Completed DIL paragraphs can retain a stream run or flatten it to text.
     if(dil.tagName!=='DIV'||dil.children.length!==1||dil.childNodes.length!==1||p?.tagName!=='P'||
         p.getAttribute('data-d-component')!=='text'||!p.hasAttribute('data-d-text-flow')||!neutral(p)||
@@ -264,7 +266,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     entry.isReadOnly===false&&boundUnit(domUser,user,'user');
   const terminalEmptyResponse=entry.turn.status==='complete'&&inactiveProof&&!generating&&!hasError&&!domAssistant&&users.length>0&&
     entry.turn.items.every(item=>['user-message','chatgpt-reasoning-group'].includes(item.type));
-  return {ok:true,url,firstUserSentAtMs,lastUserSentAtMs:userTimes.at(-1)?.sentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
+  return {ok:true,url,firstServerMessageId:nativeEntries?.[0]?.turn?.firstServerMessageId||null,firstUserSentAtMs,lastUserSentAtMs:userTimes.at(-1)?.sentAtMs,firstTurn:entryCount===1,promptKey:location.pathname+'|'+userKey,assistantKey:assistantKey||'',userId:user.messageId,
     assistantId:assistant?.messageId||'',isLatest:entry.isMostRecentTurn===true,isReadOnly:entry.isReadOnly,
     reasoningFailed:entry.turn.status==='cancelled'&&
       entry.turn.items.some(item=>item.type==='chatgpt-reasoning-group')&&

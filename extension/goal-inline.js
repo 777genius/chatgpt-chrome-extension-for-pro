@@ -68,7 +68,7 @@
     panel.append(limits);
     panel.append(node('p',{class:'cggi-note'},'Write the goal in the message box and send it yourself. Goal checks completion after the first answer. GOAL_COMPLETE is the model’s declaration of completion.'));
     const actions=node('div',{class:'cggi-actions'}),buttons={};
-    for(const [action,title] of [['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
+    for(const [action,title] of [['restore','Restore saved goal'],['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
       const button=node('button',{type:'button','data-goal-action':action},title);
       buttons[action]=button;actions.append(button);
       // Shared page DOM is not authority to change durable Goal state.
@@ -109,14 +109,17 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused'||
         record?.phase==='blocked'&&!record.operation&&record.reason==='Восстановление запроса завершилось ошибкой';
       for(const input of Object.values(fields))input.disabled=!editable;
+      const restorable=!record&&composer?.phase==='intent'&&Boolean(policy.canonical(route));
+      buttons.restore.hidden=!restorable;
+      buttons.restore.disabled=busy||loading||!loaded;
       buttons.pause.hidden=!active()||paused;
       buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
       buttons.pause.disabled=busy||loading||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
       buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
-      objective.hidden=!record?.goal;
-      objective.textContent=record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
+      objective.hidden=!record?.goal&&!(restorable&&composer.intent?.text);
+      objective.textContent=restorable?'Saved objective: '+(composer.intent?.text||''):record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
       if(record) {
         message=(phases[record.phase]||record.phase)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
@@ -128,7 +131,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
       }
       if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
-      if(composer?.phase==='intent')message='Waiting to confirm the message you sent. Goal will follow this message after confirmation.';
+      if(composer?.phase==='intent')message='Waiting to confirm your sent message. If ChatGPT no longer shows it, Restore saved goal keeps the objective and sent follow-ups without sending the original message again.';
       status.textContent=error||(busy?'Saving Goal…':message);
       toggle.setAttribute('aria-description',status.textContent);
       if(open)position();
@@ -270,7 +273,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function scheduleBind() {
       if(!binding||binding.stopped||!binding.persisted||binding.inFlight||bindTimer!==null||!valid())return;
       if(Date.now()>=binding.deadline) {
-        bindingFailure('Message confirmation timed out. Goal has not adopted the message. Turn Goal off and check this chat.');
+        bindingFailure('Message confirmation timed out. The saved objective is preserved. Open Goal settings to restore it without resending the original message.');
         render();return;
       }
       const token=binding.token;
@@ -366,6 +369,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
             maxContinuations:Number(fields.maxContinuations.value),maxMinutes:Number(fields.maxMinutes.value)});
         } catch(cause){error=String(cause?.message||cause);render();return;}
       }
+      if(action==='restore'){if(record||composer?.phase!=='intent')return;input={armId:composer.id};stopBinding();}
       if(action==='disarm') {
         if(!composer?.id)return;
         input={armId:composer.id};
