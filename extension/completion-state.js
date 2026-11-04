@@ -38,11 +38,15 @@ function plainGoalMarkerDOM(rendered,sourceMessageId='') {
   if(roots.length!==1||roots[0].getAttribute('data-dil-message-id')!==sourceMessageId)return false;
   const dil=roots[0],p=dil.firstElementChild,run=p?.firstElementChild;
   const neutral=node=>!Array.from(node.attributes).some(a=>/^(?:role|href|contenteditable|aria-hidden|hidden)$/i.test(a.name));
+  const streamed=p?.children.length===1&&p.childNodes.length===1&&run?.tagName==='SPAN'&&
+    run.hasAttribute('data-d-stream-run')&&run.getAttribute('data-d-text-flow')==='run'&&
+    !run.children.length&&run.childNodes.length===1&&run.firstChild.nodeType===3&&
+    run.firstChild.textContent==='GOAL_COMPLETE'&&neutral(run)&&
+    Array.from(run.attributes).every(a=>['data-d-stream-run','data-d-text-flow'].includes(a.name));
+  // Completed DIL paragraphs can retain a stream run or flatten it to text.
   if(dil.tagName!=='DIV'||dil.children.length!==1||dil.childNodes.length!==1||p?.tagName!=='P'||
-      p.getAttribute('data-d-component')!=='text'||!p.hasAttribute('data-d-text-flow')||p.children.length!==1||p.childNodes.length!==1||
-      run?.tagName!=='SPAN'||!run.hasAttribute('data-d-stream-run')||run.getAttribute('data-d-text-flow')!=='run'||
-      run.children.length||run.childNodes.length!==1||run.firstChild.nodeType!==3||run.firstChild.textContent!=='GOAL_COMPLETE'||!neutral(p)||!neutral(run)||
-      Array.from(run.attributes).some(a=>!['data-d-stream-run','data-d-text-flow'].includes(a.name)))return false;
+      p.getAttribute('data-d-component')!=='text'||!p.hasAttribute('data-d-text-flow')||!neutral(p)||
+      (!plain(p)&&!streamed))return false;
   // Only native DIV layout wrappers and truly empty hidden placeholders may
   // surround the one DIL paragraph; no hidden/interactive meaning is ignored.
   for(const node of rendered.querySelectorAll('*')) {

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.39';
+  const SCRIPT_VERSION = '1.8.40';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -1444,6 +1444,8 @@
         if (!text) {
           stableText = '';
           stableSince = 0;
+          // Native failures share the durable retry policy, including during startup.
+          if(!retryStateReady())return;
           const promptKey=attempt.promptKey;
           const now=Date.now();
           if(!promptKey||snapshot?.promptKey!==promptKey||!attempt.requestId||

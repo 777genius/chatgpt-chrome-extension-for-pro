@@ -90,3 +90,36 @@ for(const html of [dil.html.replace('<p ','<h1 ').replace('</p>','</h1>'),
 assert.equal(matchTurn(dilTurn(dil.html,'other')),false,'DIL source requires the rendered assistant native identity');
 
 console.log('Exact Goal marker DOM, visible extra content and Copy/Share toolbar passed.');
+
+// Real DIL may flatten the completed stream span into a plain text paragraph.
+const directDIL=dil.html.replace('<span data-d-stream-run="" data-d-text-flow="run">GOAL_COMPLETE</span>','GOAL_COMPLETE');
+assert.notEqual(directDIL,dil.html,'the direct-text fixture differs from the stream-run fixture');
+assert.equal(matchTurn(dilTurn(directDIL)),true,'source-bound DIL plain text paragraph is an exact marker');
+for(const html of [directDIL.replace('GOAL_COMPLETE','<strong>GOAL_COMPLETE</strong>'),
+ directDIL.replace('GOAL_COMPLETE','<code>GOAL_COMPLETE</code>'),
+ directDIL.replace('GOAL_COMPLETE','Маркер GOAL_COMPLETE не выдаю.'),
+ directDIL.replace('GOAL_COMPLETE','GOAL_COMPLETE '),
+ directDIL.replace('</p>','</p><p>Additional answer</p>'),
+ directDIL.replace('<p class=','<p hidden class='),
+ directDIL.replace('<div hidden=""></div>','<div hidden="">Hidden meaning</div>')])
+ assert.equal(matchTurn(dilTurn(html)),false,'plain-text DIL retains markup, hidden content and exact-text fences');
+assert.equal(matchTurn(dilTurn(directDIL,'other')),false,'plain-text DIL remains source-message bound');
+
+// The serialized MAIN probe must carry the same exact contract.
+const probe=readFileSync('extension/completion-probe.js','utf8');
+const probeFrom=probe.indexOf('  function plainGoalMarkerDOM(');
+const probeUntil=probe.indexOf('  const url=location.origin',probeFrom);
+assert.ok(probeFrom>0&&probeUntil>probeFrom);
+const mainPredicate=probe.slice(probeFrom,probeUntil);
+function mainMatch(html:string,id=dil.messageId) {
+ const {document}=parseHTML('<html><body><div id="answer">'+html+'</div></body></html>');
+ const context=createContext({document,sourceMessageId:id});
+ runInContext(mainPredicate,context);
+ return runInContext('plainGoalMarkerDOM(document.querySelector("#answer"),sourceMessageId)',context);
+}
+assert.equal(mainMatch(dil.html),true);assert.equal(mainMatch(directDIL),true);
+assert.equal(mainMatch(directDIL,'other'),false);
+for(const invalid of [directDIL.replace('GOAL_COMPLETE','<code>GOAL_COMPLETE</code>'),
+ directDIL.replace('GOAL_COMPLETE','Маркер GOAL_COMPLETE не выдаю.'),
+ directDIL.replace('</p>','</p><p>More</p>'),directDIL.replace('<p class=','<p hidden class=')])
+ assert.equal(mainMatch(invalid),false,'MAIN probe keeps the same plain-text DIL refusals');
