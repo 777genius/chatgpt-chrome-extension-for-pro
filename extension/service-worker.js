@@ -606,6 +606,46 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   return {ok:result.ok,url:canonical,tabId,composer:result.record,record:await goalController.get(canonical)};
 }
 
+async function reconcileGoalPromptBinding(tabId,url) {
+  const goal=await goalController.get(url);
+  if(goal?.phase!=='waiting'||goal.operation||goal.manualPending||goal.pauseRequested||goal.stopRequested)return {ok:false};
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const native=checked?.result;
+  if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||native.hasError||!native.userId||
+      !native.promptKey||native.promptKey===goal.expectedPromptKey||!Number.isFinite(native.userSentAtMs))return {ok:false};
+  const journal=await readJournal();
+  if(!journal.ok||journal.storageError)return {ok:false};
+  const confirmed=journal.events.filter(e=>e.sourceUrl===url&&e.goalId===goal.id&&e.kind==='goal.confirmed').at(-1);
+  if(!confirmed||confirmed.tabId!==tabId||confirmed.promptKey!==goal.expectedPromptKey&&
+      (goal.confirmedPromptBinding?.operationId!==confirmed.operationId||goal.confirmedPromptBinding.userId!==native.userId))return {ok:false};
+  const own=journal.events.filter(e=>e.operationId===confirmed.operationId&&e.tabId===tabId&&e.sourceUrl===url);
+  const sends=own.filter(e=>e.kind==='send.dispatched'),requests=own.filter(e=>e.kind==='request.started');
+  if(sends.length!==1||requests.length!==1||!requests[0].requestId||
+      !Number.isFinite(requests[0].eventAt)||Math.abs(requests[0].eventAt-native.userSentAtMs)>10000||
+      sends[0].text!==native.userText||
+      journal.events.filter(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
+        Number.isFinite(e.eventAt)&&Math.abs(e.eventAt-native.userSentAtMs)<=10000).length!==1||
+      journal.events.some(e=>(e.tabId===tabId||e.sourceUrl===url)&&e.kind==='request.started'&&e.sequence>requests[0].sequence)||
+      ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+  const result=await goalController.rebindPrompt({url,tabId,id:goal.id,oldPromptKey:goal.expectedPromptKey,
+    promptKey:native.promptKey,userId:native.userId,operationId:confirmed.operationId});
+  if(!result.ok)return result;
+  await completionCheckpointChange(tabId,current=>current?.url===url&&current.state==='active'&&
+    current.promptKey===goal.expectedPromptKey&&current.startedAt===requests[0].eventAt
+      ?{record:{...current,promptKey:native.promptKey},value:true}:{value:false});
+  const receipt=manualRequestReceiptsByTab.get(tabId);
+  if(receipt?.url===url&&receipt.startedAt===requests[0].eventAt&&receipt.recoveredPromptKey===goal.expectedPromptKey)
+    manualRequestReceiptsByTab.set(tabId,{...receipt,recoveredPromptKey:native.promptKey});
+  // Rebinding alone never authorizes a send. Only a fully completed native
+  // answer may enter the existing coordinator and its protected sender.
+  if(native.turnStatus==='complete'&&native.generating===false&&native.assistantCompleted===true&&
+      native.assistantPhase==='final_answer'&&native.assistantKey)
+    await goalController.completion({url,tabId,promptKey:native.promptKey,
+      completionKey:native.promptKey+'|'+native.assistantKey,userId:native.userId,
+      response:native.goalResponse||'',rawExact:native.goalRawExact===true,nativeVerified:true});
+  return {ok:true,promptKey:native.promptKey,userId:native.userId};
+}
+
 const retryReadinessRecoveries=new Map();
 async function recoverNoClickRetry(tabId,url) {
   if(retryReadinessRecoveries.has(url))return retryReadinessRecoveries.get(url);
@@ -860,7 +900,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     (async()=>{
       if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
-      if(message.type==='CHATGPT_GOAL_RECOVER'){await bindNativeManualSupplement(tabId,url);return goalController.recoverTab({id:tabId,url});}
+      if(message.type==='CHATGPT_GOAL_RECOVER'){await bindNativeManualSupplement(tabId,url);await reconcileGoalPromptBinding(tabId,url);return goalController.recoverTab({id:tabId,url});}
       if(message.type==='CHATGPT_GOAL_CONTEXT'){await bindNativeManualSupplement(tabId,url);return {ok:true,text:await goalController.context(url)};}
       if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
         url,tabId,id:message.goalId,operationId:message.operationId});

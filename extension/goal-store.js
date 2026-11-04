@@ -386,6 +386,22 @@
       if(outcome.dispatch)await deliver(outcome.record);
       return {ok:true,record:view(await getRaw(target))};
     }
+    // DOM fallback indices can change after the native conversation is fetched.
+    // The worker supplies a journal/native proof for the already confirmed send.
+    async function rebindPrompt({url,tabId,id,oldPromptKey,promptKey,userId,operationId}) {
+      return serialize(async()=>{
+        const record=await read(url),prefix=canonical(url)&&new URL(url).pathname+'|';
+        if(!record||record.id!==id||record.phase!=='waiting'||record.operation||record.manualPending||
+            record.pauseRequested||record.stopRequested||now()>=record.deadlineAt||
+            record.expectedPromptKey!==oldPromptKey||record.lastCompletionKey?.startsWith(oldPromptKey+'|')||
+            !prefix||!oldPromptKey?.startsWith(prefix)||!promptKey?.startsWith(prefix)||oldPromptKey===promptKey||
+            !userId||!operationId||record.confirmedPromptBinding?.operationId===operationId&&
+            record.confirmedPromptBinding.userId!==userId)return {ok:false};
+        const next={...record,expectedPromptKey:promptKey,confirmedPromptBinding:{operationId,userId}};
+        await event('prompt_rebound',next,tabId,{oldPromptKey,promptKey,userId,confirmedOperationId:operationId});
+        await save(next);return {ok:true};
+      });
+    }
     async function retryPreparation({url,tabId,id,operationId}) {
       const outcome=await serialize(async()=>{
         const record=await read(url),op=record?.operation;
@@ -455,7 +471,7 @@
             .find(item=>item.promptKey===newPromptKey)||null;
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
-            expectedPromptKey:expected,handoffPending:false,operation:null,
+            expectedPromptKey:expected,confirmedPromptBinding:null,handoffPending:false,operation:null,
             earlyCompletion:stop?null:early,earlyCompletions:[],
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
@@ -736,7 +752,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,retryPreparation,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

@@ -185,3 +185,18 @@ console.log('Goal lifecycle: handoff pause/resume/failure, legacy binding and fi
  await env.store.retry({url:source,tabId:7,kind:'draft.restore_failed',attemptId:'1000000'});
  assert.equal(env.state().phase,'blocked','failed native cleanup cannot leave Goal pretending recovery is active');
 }
+
+// A verified native reload can renumber an already confirmed user turn.
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|fallback-7');
+ const before=structuredClone(env.state());
+ const args={url:source,tabId:7,id:before.id,oldPromptKey:before.expectedPromptKey,
+  promptKey:'/c/goal-edge-source|fallback-4',userId:'stable-user',operationId:'confirmed-send'};
+ assert.equal((await env.store.rebindPrompt({...args,id:'other'})).ok,false);
+ assert.equal((await env.store.rebindPrompt({...args,promptKey:'/c/other|user'})).ok,false);
+ assert.equal((await env.store.rebindPrompt(args)).ok,true);
+ assert.equal(env.state().expectedPromptKey,args.promptKey);
+ for(const key of ['goal','deadlineAt','continuations','id','phase'])assert.equal(env.state()[key],before[key]);
+ assert.equal(env.messages.length,1,'key migration never sends');
+ assert.equal((await env.store.rebindPrompt(args)).ok,false,'stale repeated migration cannot rewrite state');
+}
