@@ -402,13 +402,13 @@
         await save(next);return {ok:true};
       });
     }
-    async function retryPreparation({url,tabId,id,operationId}) {
+    async function retryPreparation({url,tabId,id,operationId,noGrantVerified=false}) {
       const outcome=await serialize(async()=>{
         const record=await read(url),op=record?.operation;
         if(record?.id!==id||record.phase!=='blocked'||op?.id!==operationId||op.tabId!==tabId||
-            op.status!=='reserved'||record.pauseRequested||record.stopRequested||record.manualOverride||
+            !(op.status==='reserved'||op.status==='intent'&&noGrantVerified===true)||record.pauseRequested||record.stopRequested||record.manualOverride||
             record.manualPending||now()>=record.deadlineAt)return {ok:false};
-        const next={...record,phase:'preparing',reason:'',operation:{...op,createdAt:now()}};
+        const next={...record,phase:'preparing',reason:'',operation:{...op,status:'reserved',createdAt:now()}};
         await event('preparation_retried',next,tabId);await save(next);
         return {ok:true,record:next};
       });
@@ -492,6 +492,44 @@
       // confirmed new user turn. Recovery can replay the same record safely.
       if(result.replay)await completion(result.replay);
       return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason};
+    }
+    // Observation-only recovery: consume an already accepted click, including
+    // sent manual follow-ups. This method never dispatches or changes limits.
+    async function recoverAcknowledgement({url,tabId,expectedRecord,operationId,promptKey,userId,supplements=[],nativeVerified}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{
+        const old=await read(target),op=old?.operation,prefix=new URL(target).pathname+'|';
+        if(nativeVerified!==true||JSON.stringify(old)!==JSON.stringify(expectedRecord)||old?.phase!=='blocked'||
+            op?.id!==operationId||!['intent','clicked'].includes(op.status)||old.pauseRequested||old.stopRequested||
+            old.manualOverride||old.manualPending||old.manualStartedAt>op.createdAt||
+            typeof userId!=='string'||!userId||typeof promptKey!=='string'||!promptKey.startsWith(prefix)||
+            promptKey===op.baselineKey||!Array.isArray(supplements))return {ok:false};
+        let previous=op.createdAt;
+        const ids=new Set([userId]),requests=new Set();
+        for(const item of supplements) {
+          if(!item||typeof item.userId!=='string'||!item.userId||ids.has(item.userId)||
+              typeof item.requestId!=='string'||!item.requestId||requests.has(item.requestId)||
+              !Number.isFinite(item.startedAt)||item.startedAt<=previous||
+              !Number.isFinite(item.userSentAtMs)||Math.abs(item.userSentAtMs-item.startedAt)>10000||
+              typeof item.text!=='string'||!item.text.trim()||item.text.length>10000||
+              typeof item.promptKey!=='string'||!item.promptKey.startsWith(prefix)||item.promptKey===promptKey||
+              (old.supplements||[]).some(s=>s.userId===item.userId||s.requestId===item.requestId))return {ok:false};
+          previous=item.startedAt;ids.add(item.userId);requests.add(item.requestId);
+        }
+        const last=supplements.at(-1),expired=now()>=old.deadlineAt;
+        const next={...old,phase:expired?'stopped':'waiting',reason:expired?'Время Goal истекло':'',operation:null,
+          expectedPromptKey:last?.promptKey||promptKey,confirmedPromptBinding:last?null:{operationId,userId},
+          continuations:old.continuations+(op.kind==='continuation'?1:0),
+          supplements:[...(old.supplements||[]),...supplements],
+          ...(last?{manualStartedAt:last.startedAt,manualSupplementBinding:last}:{}),
+          handoffPending:false,earlyCompletion:null,earlyCompletions:[],pendingCompletion:null};
+        // Reuse the ordinary confirmed event on the original owner: this also
+        // retires its consumed journal grant after a tab ID changes.
+        await event('confirmed',next,op.tabId,{operationId,promptKey,userId,observedTabId:tabId,recovered:true});
+        await event('acknowledgement_recovered',next,tabId,{operationId,ownerTabId:op.tabId,promptKey,userId,
+          recoveredSupplements:supplements.map(s=>({requestId:s.requestId,userId:s.userId,promptKey:s.promptKey}))});
+        await save(next);return {ok:true,record:view(next)};
+      });
     }
     async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId}) {
       const target=canonical(url);
@@ -752,7 +790,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

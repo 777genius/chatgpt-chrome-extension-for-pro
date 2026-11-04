@@ -52,3 +52,17 @@ for(const kind of ['duplicate-send','duplicate-request','other-tab','other-url',
  assert.equal(sent.length,before);assert.equal((await store.report({...args,nativeConfirmed:true})).ok,false,'spent confirmation cannot increment budgets again');
 }
 console.log('Goal ACK receipts: immutable native serialization, unique operation/request/URL/tab evidence, bounded cache and guarded blocked confirmation passed.');
+{
+ const h=fixture();h.events[0].recordedAt=3000;
+ h.events.push({kind:'send.authorized',tabId:7,sourceUrl:url,operationId:h.op.id,recordedAt:2000});
+ assert.deepEqual(JSON.parse(JSON.stringify((await h.proof()).sendWindow)),{notBefore:2000,notAfter:3000});
+}
+for(const scenario of ['duplicate-grant','grant-before-operation','dispatch-before-grant','missing-time']) {
+ const h=fixture();h.events[0].recordedAt=3000;
+ h.events.push({kind:'send.authorized',tabId:7,sourceUrl:url,operationId:h.op.id,recordedAt:2000});
+ if(scenario==='duplicate-grant')h.events.push({...h.events[2]});
+ if(scenario==='grant-before-operation')h.events[2].recordedAt=900;
+ if(scenario==='dispatch-before-grant')h.events[0].recordedAt=1500;
+ if(scenario==='missing-time')delete h.events[2].recordedAt;
+ assert.equal((await h.proof()).sendWindow,null,scenario);
+}

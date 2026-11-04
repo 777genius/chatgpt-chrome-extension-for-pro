@@ -63,10 +63,15 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   }
   if(!entry)return {ok:false,reason:'native-turn-missing'};
   let historicalUserIndex=null;
-  if(Number.isFinite(sentAt)&&includeGoalText===true) {
+  const sendWindow=sentAt&&typeof sentAt==='object'&&Number.isFinite(sentAt.notBefore)&&Number.isFinite(sentAt.notAfter)&&
+    sentAt.notAfter>=sentAt.notBefore&&typeof sentAt.userText==='string'?sentAt:null;
+  if((Number.isFinite(sentAt)||sendWindow)&&includeGoalText===true) {
     const candidates=(nativeEntries||[]).flatMap(candidate=>
       (candidate.timestampTurns||[]).filter(item=>item.role==='user').map((time,index)=>({candidate,index,at:time.sentAtMs})))
-      .filter(item=>Number.isFinite(item.at)&&Math.abs(item.at-sentAt)<=10000);
+      .filter(item=>Number.isFinite(item.at)&&(sendWindow?
+        item.at>=sendWindow.notBefore&&item.at<=sendWindow.notAfter&&
+          [sendWindow.userText,sendWindow.submittedText].includes((item.candidate.turn?.items||[]).filter(x=>x.type==='user-message')[item.index]?.message):
+        Math.abs(item.at-sentAt)<=10000));
     if(candidates.length!==1)return {ok:false,reason:'historical-user-ambiguous'};
     entry=candidates[0].candidate;
     historicalUserIndex=candidates[0].index;

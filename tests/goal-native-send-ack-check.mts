@@ -78,3 +78,20 @@ for(const change of [{manualStartedAt:1200},{manualPending:{requestId:'manual-ne
  h.setProof({submittedText:'Original URL https://example.test/task'});
  assert.equal((await h.run()).ok,false);assert.equal(h.reports.length,0,'receipt comparison is exact and does not discard link targets');
 }
+// A throttled renderer may timestamp its accepted message long before the
+// browser starts its request. The durable one-click interval replaces guessing.
+for(const at of [2000,2500,3000]) {
+ const h=fixture();h.setRequest({requestId:'actual-request',startedAt:20000,url,operationId:'operation'});
+ h.native.userSentAtMs=at;
+ h.setProof({submittedText:h.record().operation.text,sendWindow:{notBefore:2000,notAfter:3000},
+  request:{requestId:'actual-request',startedAt:20000,url,operationId:'operation'}});
+ assert.equal((await h.run({startedAt:20000})).ok,true,'accepted within the exact committed authorization/click window');
+}
+for(const at of [1999,3001]) {
+ const h=fixture();h.setRequest({requestId:'actual-request',startedAt:20000,url,operationId:'operation'});
+ h.native.userSentAtMs=at;
+ h.setProof({submittedText:h.record().operation.text,sendWindow:{notBefore:2000,notAfter:3000},
+  request:{requestId:'actual-request',startedAt:20000,url,operationId:'operation'}});
+ assert.equal((await h.run({startedAt:20000})).ok,false,'an earlier repeated payload or a later send cannot borrow this click');
+ assert.equal(h.reports.length,0);
+}

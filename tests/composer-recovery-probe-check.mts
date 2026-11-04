@@ -15,6 +15,13 @@ try{
  assert.deepEqual(n.recoveryTimeline.map((u:any)=>u.userId),['user-0','user-1']);
  assert.equal(n.userId,'user-0');assert.equal(n.isLatest,false);assert.equal(n.firstTurn,false,'history recovery does not falsify latest-only allocation evidence');
  assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery').recoveryTimeline,undefined,'metadata-only probes never expose sent text');
+ const window={notBefore:99000,notAfter:101000,userText:'Message 0',submittedText:'Serialized Message 0'};
+ assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,window).userId,'user-0');
+ assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,{...window,notBefore:100001}).ok,false);
+ assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,{...window,userText:'Different',submittedText:'Also different'}).ok,false);
+ entries[1].timestampTurns[0].sentAtMs=100000;entries[1].turn.items[0].message='Message 0';
+ assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,window).reason,'historical-user-ambiguous');
+ entries[1].timestampTurns[0].sentAtMs=120000;entries[1].turn.items[0].message='Message 1';
  entries[1].conversationId='other';assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).recoveryTimeline,null);
  entries[1].conversationId=entries[0].conversationId;entries[1].isReadOnly=true;
  assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).recoveryTimeline,null);

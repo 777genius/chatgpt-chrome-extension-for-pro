@@ -848,19 +848,63 @@ async function readGoalAckProof(tabId,url,op) {
   const requests=journal.events.filter(e=>own(e)&&e.kind==='request.started'&&typeof e.requestId==='string'&&
     e.requestId&&Number.isFinite(e.eventAt)&&e.eventAt>=op.createdAt);
   if(sends.length!==1||requests.length!==1)return null;
-  const proof={tabId,url,text:op.text,createdAt:op.createdAt,submittedText:sends[0].text,
+  const grants=journal.events.filter(e=>own(e)&&e.kind==='send.authorized');
+  const grantAt=grants.length===1?grants[0].recordedAt:null,dispatchAt=sends[0].recordedAt;
+  const sendWindow=Number.isFinite(grantAt)&&Number.isFinite(dispatchAt)&&grantAt>=op.createdAt&&
+    dispatchAt>=grantAt?{notBefore:grantAt,notAfter:dispatchAt}:null;
+  const proof={tabId,url,text:op.text,createdAt:op.createdAt,submittedText:sends[0].text,sendWindow,
     request:{requestId:requests[0].requestId,startedAt:requests[0].eventAt,url,operationId:op.id}};
   goalAckProofs.set(op.id,proof);
   if(goalAckProofs.size>16)goalAckProofs.delete(goalAckProofs.keys().next().value);
   return proof;
 }
 async function reconcileNativeGoalAcknowledgement(tabId,url) {
-  const record=(await chrome.storage.local.get('chatgpt-goal:'+url))['chatgpt-goal:'+url],op=record?.operation;
-  if(record?.phase!=='blocked'||!op||!['intent','clicked'].includes(op.status)||op.tabId!==tabId)return;
-  const proof=await readGoalAckProof(tabId,url,op);
+  const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
+  if(record?.phase!=='blocked'||!op||!['intent','clicked'].includes(op.status)||
+      record.pauseRequested||record.stopRequested||record.manualOverride||record.manualPending)return;
+  const proof=await readGoalAckProof(op.tabId,url,op);
   if(!proof)return;
-  return confirmNativeGoalSend({url,tabId,id:record.id,operationId:op.id,
-    requestId:proof.request.requestId,startedAt:proof.request.startedAt});
+  if(op.tabId===tabId) {
+    const result=await confirmNativeGoalSend({url,tabId,id:record.id,operationId:op.id,
+      requestId:proof.request.requestId,startedAt:proof.request.startedAt});
+    if(result?.ok)return result;
+  }
+  if(!proof.sendWindow)return;
+  // A later manual send or a reopened tab does not erase a server-accepted
+  // operation. Prove the historical turn and every later sent message first.
+  const probe=async args=>(await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args}))[0]?.result;
+  const historical=await probe([url,true,null,{...proof.sendWindow,userText:op.text,submittedText:proof.submittedText}]);
+  const timeline=historical?.recoveryTimeline;
+  if(!historical?.ok||historical.url!==url||historical.nativeConversationId!==new URL(url).pathname.split('/').at(-1)||historical.isReadOnly!==false||
+      !historical.userId||historical.promptKey===op.baselineKey||
+      ![op.text,proof.submittedText].includes(historical.userText)||!Array.isArray(timeline))return;
+  const index=timeline.findIndex(u=>u.userId===historical.userId);
+  if(index<0||timeline.filter(u=>u.userId===historical.userId).length!==1)return;
+  const latest=await probe([url,true]);
+  if(!latest?.ok||latest.url!==url||latest.nativeConversationId!==historical.nativeConversationId||latest.isLatest!==true||latest.isReadOnly!==false||
+      timeline.at(-1)?.userId!==latest.userId||timeline.at(-1)?.promptKey!==latest.promptKey)return;
+  const journal=await readJournal();
+  const later=journal.events.filter(e=>e.kind==='request.started'&&e.sourceUrl===url&&e.eventAt>proof.request.startedAt);
+  const suffix=timeline.slice(index+1),supplements=[];
+  if(later.length!==suffix.length)return;
+  for(let i=0;i<suffix.length;i++) {
+    const u=suffix[i],matches=later.filter(e=>!e.operationId&&typeof e.requestId==='string'&&e.requestId&&
+      Number.isFinite(e.eventAt)&&Number.isFinite(u.userSentAtMs)&&Math.abs(e.eventAt-u.userSentAtMs)<=10000);
+    if(matches.length!==1||later.filter(e=>e.requestId===matches[0].requestId).length!==1)return;
+    const request=matches[0];
+    if(i&&request.eventAt<=supplements.at(-1).startedAt||typeof u.userText!=='string'||!u.userText.trim())return;
+    supplements.push({...u,text:u.userText,tabId:request.tabId,requestId:request.requestId,startedAt:request.eventAt});
+  }
+  const fresh=await probe([url,true]);
+  if(!fresh?.ok||fresh.userId!==latest.userId||fresh.promptKey!==latest.promptKey||fresh.userText!==latest.userText||
+      fresh.userSentAtMs!==latest.userSentAtMs||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
+  const result=await goalController.recoverAcknowledgement({url,tabId,expectedRecord:record,operationId:op.id,
+    promptKey:historical.promptKey,userId:historical.userId,supplements,nativeVerified:true});
+  if(result?.ok&&fresh.turnStatus==='complete'&&fresh.generating===false&&!fresh.hasError&&fresh.assistantCompleted===true&&
+      fresh.assistantPhase==='final_answer'&&fresh.assistantKey)
+    await goalController.completion({url,tabId,completionKey:fresh.promptKey+'|'+fresh.assistantKey,promptKey:fresh.promptKey,
+      userId:fresh.userId,response:fresh.goalResponse||'',rawExact:fresh.goalRawExact===true,nativeVerified:true});
+  return result;
 }
 async function reconcileAcceptedHandoffGoal(tabId,url) {
   const key='chatgpt-goal:'+url,values=await chrome.storage.local.get([key,handoffKey(tabId)]);
@@ -882,18 +926,29 @@ async function reconcileAcceptedHandoffGoal(tabId,url) {
 }
 async function reconcileGoalPreparation(tabId,url) {
   const key='chatgpt-goal:'+url,goal=(await chrome.storage.local.get(key))[key],op=goal?.operation;
-  if(goal?.phase!=='blocked'||op?.status!=='reserved'||op.tabId!==tabId||goal.pauseRequested||goal.stopRequested)return;
+  if(goal?.phase!=='blocked'||!['reserved','intent'].includes(op?.status)||op.tabId!==tabId||goal.pauseRequested||goal.stopRequested)return;
   const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
-  // A reserved operation may be retried only before any journal send intent.
-  // Intent/clicked/unknown outcomes remain fenced even if the editor is idle.
-  if(!meta||meta.active?.[tabId]||Object.values(meta.active||{}).some(a=>a.operationId===op.id))return;
+  if(!meta||meta.active?.[tabId]||Object.values(meta.active||{}).some(a=>a.operationId===op.id||a.chatUrl===url))return;
+  // intent is persisted before journal admission. A positively failed
+  // pre-admission write is recoverable only with a complete, gap-free journal.
+  const noGrant=async()=>{
+    const j=await readJournal();
+    if(!j.ok||j.storageError||j.events.length!==j.meta?.sequence||
+        j.events.some((e,i)=>e.sequence!==i+1))return false;
+    const own=j.events.filter(e=>e.operationId===op.id);
+    return own.some(e=>e.kind==='goal.blocked')&&own.some(e=>e.kind==='goal.dispatch_failed')&&
+      !own.some(e=>['goal.send_intent','send.authorized','send.dispatched','request.started'].includes(e.kind))&&
+      !j.events.some(e=>e.kind==='request.started'&&e.sourceUrl===url&&e.eventAt>=op.createdAt);
+  };
+  if(op.status==='intent'&&!await noGrant())return;
   const ready=await chrome.tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url});
   if(!ready?.ok||ready.idle!==true||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
   const current=(await chrome.storage.local.get(key))[key];
   const freshMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
   if(JSON.stringify(current)!==JSON.stringify(goal)||!freshMeta||freshMeta.active?.[tabId]||
-      Object.values(freshMeta.active||{}).some(a=>a.operationId===op.id))return;
-  return goalController.retryPreparation({url,tabId,id:goal.id,operationId:op.id});
+      Object.values(freshMeta.active||{}).some(a=>a.operationId===op.id||a.chatUrl===url))return;
+  if(op.status==='intent'&&!await noGrant())return;
+  return goalController.retryPreparation({url,tabId,id:goal.id,operationId:op.id,noGrantVerified:op.status==='intent'});
 }
 async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,startedAt}) {
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
@@ -913,7 +968,8 @@ async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,started
   if(!native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||
       typeof native.userId!=='string'||!native.userId||typeof native.promptKey!=='string'||
       !native.promptKey.startsWith(new URL(url).pathname+'|')||native.promptKey===op.baselineKey||
-      !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-startedAt)>10000||
+      !Number.isFinite(native.userSentAtMs)||!(Math.abs(native.userSentAtMs-startedAt)<=10000||
+        proof?.sendWindow&&native.userSentAtMs>=proof.sendWindow.notBefore&&native.userSentAtMs<=proof.sendWindow.notAfter)||
       (native.userText!==op.text&&native.userVisibleText!==op.text&&native.userText!==proof?.submittedText))return {ok:false,pending:true};
   const current=(await chrome.storage.local.get(key))[key],fresh=await latestRequestReceipt(tabId)||proof?.request;
   if(!sameOperation(current)||current.phase!==record.phase||!matches(fresh)||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)

@@ -75,3 +75,22 @@ assert.equal((await log('retry.send_intent','retry-9',8)).ok,true);
 assert.equal((await api.readJournal()).events.some((e:any)=>
   e.kind==='goal.confirmed'&&e.operationId==='goal-1'),true);
 console.log('Journal: cross-tab Goal fences, tab-close uncertainty, exact grant clearing and unrelated chats passed.');
+// Reopened-tab acknowledgement must release the old owner through the same
+// normal confirmed event, not just change the Goal's UI state.
+for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),sandbox);
+sandbox.deps={storage:local,tabs:{get:async()=>({id:17,url:'https://chatgpt.com/c/reopened-fence'}),sendMessage:async()=>({ok:true})},
+ appendJournal:api.appendJournal,now:()=>1000,uuid:()=> 'reopened-operation'};
+const store=runInContext('ChatGPTGoalStore.create(deps)',sandbox);
+const reopened='https://chatgpt.com/c/reopened-fence';
+await store.start({url:reopened,tabId:17,goal:'Synthetic objective',maxContinuations:10,maxMinutes:1440});
+let goal=storage['chatgpt-goal:'+reopened];
+await store.intent({url:reopened,tabId:17,id:goal.id,operationId:goal.operation.id,text:goal.operation.text,baselineKey:'/c/reopened-fence|before'});
+await api.appendJournal({kind:'send.authorized',sourceUrl:reopened,operationId:goal.operation.id},{id:17,url:reopened});
+await store.report({url:reopened,tabId:17,id:goal.id,operationId:goal.operation.id,status:'clicked'});
+await store.report({url:reopened,tabId:17,id:goal.id,operationId:goal.operation.id,status:'blocked'});
+goal=storage['chatgpt-goal:'+reopened];
+assert.equal(meta().active[17].consumed,true);
+await store.recoverAcknowledgement({url:reopened,tabId:18,expectedRecord:structuredClone(goal),operationId:goal.operation.id,
+ promptKey:'/c/reopened-fence|accepted',userId:'accepted-native',nativeVerified:true});
+assert.equal(meta().active[17],undefined,'native recovery retires only the accepted old grant');
+assert.equal((await log('retry.send_intent','next-recovery',18,reopened,{promptKey:'/c/reopened-fence|accepted'})).ok,true);

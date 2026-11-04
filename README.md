@@ -6,7 +6,7 @@
 <img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
-Version **1.8.49** · Chrome / Chromium **116+** · No build required
+Version **1.8.52** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -22,7 +22,7 @@ Version **1.8.49** · Chrome / Chromium **116+** · No build required
 | **Draft protection** | Saves and restores your draft around automatic sends. Your draft is never used as an automatic message. Native rich-link labels are matched to their submitted URLs without treating unrelated drafts as recovery text. Hidden native prompt context also blocks automatic sending. Concurrent edits and user attachments cancel handoff preparation; cancelled transfers do not resume later. |
 | **New-chat handoff** | Opens a new chat in the same tab, transfers up to the last **2 user messages + 2 assistant answers** in chronological order, and requests end-to-end completion. Large context becomes a text attachment. Preserves the **source chat’s reasoning mode**, including Pro when available; refuses to send if that mode cannot be restored. A shared source-chat claim prevents duplicate handoffs from multiple tabs. |
 | **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the first response to finish and rename controls to become ready. |
-| **Reload recovery** | Saves request/response bindings and elapsed-time metadata locally. Reattaches to existing tabs after an extension reload; restores safe draft backups without repeating uncertain sends. Follows a new chat from its initial page to its permanent URL using native first-message evidence. Rebinds renumbered native turns using exact sent text and a unique recorded request. Restores terminal error alerts after worker restarts without releasing retry locks. |
+| **Reload recovery** | Saves request/response bindings and elapsed-time metadata locally. Reattaches to existing tabs after an extension reload; restores safe draft backups without repeating uncertain sends. Follows a new chat from its initial page to its permanent URL using native first-message evidence. Rebinds renumbered native turns using exact sent text and a unique recorded request. Restores terminal error alerts after worker restarts without releasing retry locks. Delayed requests are acknowledged against the exact committed click interval; accepted historical sends and request-confirmed manual follow-ups can recover after reopening a tab without resending. |
 | **Persistent activity log** | Records chat IDs, source/destination URLs, send intents, sent text, confirmations, retry counts, and stop reasons. Preserves recovery copies across extension updates. |
 | **Safe recovery** | Recognizes a completed response after a failed network stream or extension worker restart. Service warnings do not replace response status. Reports visible errors even when retries are blocked. Pre-send handoff readiness/upload timeouts can recover when the new-chat editor is empty, with no later request or send intent. Retries preparation at most three times, checking every five minutes; preserves Goal budgets and Pause/Stop. A positively refused retry click can prepare again at most twice, preserving retry/Goal limits; unknown sends stay blocked. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
 
