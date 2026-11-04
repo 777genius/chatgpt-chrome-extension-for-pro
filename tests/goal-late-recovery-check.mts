@@ -7,6 +7,7 @@ const url='https://chatgpt.com/c/late-recovery-fixture';
 type V=Record<string,any>;
 async function fixture(){
  const data:V={},events:V[]=[],messages:V[]=[];
+ let journalError=false;
  let live=url,afterProbe:(()=>Promise<void>|void)|null=null,failSave=false;
  const users=[{userId:'initial',userText:'Original objective',userSentAtMs:100011,promptKey:'/c/late-recovery-fixture|initial'},
  {userId:'follow-one',userText:'First clarification',userSentAtMs:140000,promptKey:'/c/late-recovery-fixture|follow-one'},
@@ -15,7 +16,7 @@ async function fixture(){
   sourceUrl:i===0?'https://chatgpt.com/':url,operationId:null}));
  const original:V={ok:true,url,isReadOnly:false,isLatest:false,...users[0],userVisibleText:'Original objective\n',firstTurn:false,recoveryTimeline:users};
  const latest:V={ok:true,url,isReadOnly:false,isLatest:true,...users[2],turnStatus:'in_progress',generating:true,hasError:false};
- const ctx=createContext({URL,Date,console,latestRequestReceipt:async()=>({requestId:requests.at(-1)!.requestId,startedAt:requests.at(-1)!.eventAt,url}),readJournal:async()=>({events:requests}),inspectCompletedTurn:function(){},
+ const ctx=createContext({URL,Date,console,latestRequestReceipt:async()=>({requestId:requests.at(-1)!.requestId,startedAt:requests.at(-1)!.eventAt,url}),readJournal:async()=>({ok:true,storageError:journalError?'Disk full':'',events:requests}),inspectCompletedTurn:function(){},
   chrome:{tabs:{get:async()=>({id:7,url:live})},scripting:{executeScript:async({args}:V)=>{
    const result=structuredClone(args.length>2?original:latest);await afterProbe?.();return [{result}];
   }}}});
@@ -37,6 +38,7 @@ async function fixture(){
  return {data,events,messages,users,requests,original,latest,store,pending,
   recover:()=>runInContext(`recoverNativeComposerGoal(7,'${url}',pending)`,ctx),
   bind:()=>runInContext(`bindNativeComposerGoal(7,'${url}',pending.id)`,ctx),
+  journalError:()=>{journalError=true;},
   route:(v:string)=>{live=v;},after:(f:()=>Promise<void>|void)=>{afterProbe=f;},failSave:(value:boolean)=>{failSave=value;}};
 }
 {
@@ -114,4 +116,10 @@ console.log('Late Goal recovery: atomic original+all supplements, original limit
  f.pending.request=f.data['chatgpt-goal-composer:7'].request;
  assert.equal((await f.bind()).ok,true,'saved original receipt survives newer tab receipt through native timeline');
  assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+}
+
+{
+ const f=await fixture();f.journalError();
+ assert.equal((await f.recover()).pending,true,'incomplete journal evidence cannot authorize Goal adoption');
+ assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.messages.length,0);
 }

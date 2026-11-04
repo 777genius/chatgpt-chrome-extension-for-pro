@@ -2,7 +2,7 @@
 
 ## Reproducible upload ZIP
 
-Use Node 26+ and the pinned development dependencies:
+Run packaging from a Git checkout of this repository, using Node 26+ and the pinned development dependencies. Source downloads without Git metadata can be loaded unpacked, but are not release packaging inputs. Git provenance is checked before writing the ZIP or receipt:
 
 ```sh
 npm ci

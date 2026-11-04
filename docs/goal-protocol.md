@@ -95,3 +95,10 @@ A trusted manual send during an active Goal adds a verified supplemental instruc
 Interrupted-response recovery waits up to 60 seconds for positively verified native Stop/idle readiness, retrying only explicit no-click transient refusals every two seconds. Missing acknowledgements, changed request/prompt/draft and hard ownership refusals never authorize a second click.
 
 Real Chrome validation for 1.8.0: in an isolated chat, a trusted sent follow-up was appended exactly once while an explicitly paused Goal retained its original ID, objective, deadline and budget. Resume sent a continuation containing both texts; its exact native request/message proof confirmed the collapsed long bubble. The model returned GOAL_COMPLETE and the Goal became completed without a pending operation. Active unpaused follow-ups and receipt races have deterministic integration coverage.
+
+
+## Native-message adoption limits
+
+A manually sent rich-link message is adopted from the confirmed native request and retains its actual native Markdown URLs. The pre-submit visible-text intent does not independently snapshot hidden rich-link targets; it is not proof that those targets were unchanged before the user submitted the native message. Automatic sends still require the exact authorized payload and protected editor/model checks.
+
+Historical manual Goal bindings can remain blocked after native turn renumbering. Recovery fails closed when it cannot establish the latest user/assistant ownership; a historical user match alone does not authorize replaying an assistant completion.

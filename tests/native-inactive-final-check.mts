@@ -33,8 +33,13 @@ function fixture(extra:any={}) {
  if(extra.assistantMismatch)document.querySelector('[data-chatgpt-search-unit-key="turn:2:assistant"]')!.setAttribute('data-chatgpt-search-message-ids','other');
  if(extra.pageError)document.querySelector('main')!.insertAdjacentHTML('beforeend','<aside role="alert" class="text-danger">Current recovery error</aside>');
  if(extra.oldPageError)document.querySelector('main')!.insertAdjacentHTML('afterbegin','<aside role="alert" class="text-danger">Historical recovery error</aside>');
+ if(extra.summary){
+  item.content='GOAL_COMPLETE\n\nИтог:\n- Done';
+  document.querySelector('[data-message-author-role="assistant"]')!.innerHTML='<div class="markdown"><p class="hidden-marker">GOAL_COMPLETE</p><p>Итог:</p><ul><li>Done</li></ul></div>';
+  Object.assign(window,{getComputedStyle:(node:Element)=>({display:extra.hiddenSummary&&node.classList.contains('hidden-marker')?'none':'block',visibility:'visible'})});
+ }
  const ctx=createContext({document,URL,location:{origin:'https://chatgpt.com',href:url,pathname:'/c/inactive-fixture'}});
- runInContext(source,ctx);return JSON.parse(JSON.stringify(runInContext(`inspectCompletedTurn(${JSON.stringify(url)},false,null,null,${JSON.stringify(extra.binding||null)})`,ctx)));
+ runInContext(source,ctx);return JSON.parse(JSON.stringify(runInContext(`inspectCompletedTurn(${JSON.stringify(url)},${extra.summary===true},null,null,${JSON.stringify(extra.binding||null)})`,ctx)));
 }
 const valid=fixture();assert.equal(valid.turnStatus,'complete');assert.equal(valid.nativeTurnStatus,'in_progress');assert.equal(valid.nativeConversationInactive,true);assert.equal(valid.completionProof,'native-inactive-final');
 assert.equal(fixture({historicalTask:true}).turnStatus,'complete','only the current native row can block completion');
@@ -59,3 +64,6 @@ for(const change of [{url:'https://chatgpt.com/c/other'},{alias:'local-chatgpt:o
 
 assert.equal(fixture({pageError:true}).hasError,true,'page-level error after latest user blocks native completion');
 assert.equal(fixture({oldPageError:true}).hasError,false,'historical error before latest user is ignored');
+
+assert.equal(fixture({summary:true}).goalRawExact,true,'visible legacy summary marker still works');
+assert.equal(fixture({summary:true,hiddenSummary:true}).goalRawExact,false,'stylesheet-hidden summary marker cannot declare Goal complete');

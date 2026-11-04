@@ -5,16 +5,17 @@ const body=source.slice(source.indexOf('async function recoverHandoffReadiness('
 const url='https://chatgpt.com/c/readiness-fixture';
 async function fixture(options:any={}) {
  const state:any={id:'handoff-fixture',stage:'failed',reason:'Не удалось дождаться готовности нового чата',sourceUrl:url,createdAt:100,...options.record};
+ let route=options.url||'https://chatgpt.com/';
  let current=structuredClone(state),nativeCalls=0,goalCalls=0,writes=0;
  const events:any[]=[{kind:'handoff.navigating',sourceUrl:url,operationId:state.id},...(options.events||[])];
  const locks=new Map();
  const fn=new Function('handoffWrites','handoffKey','chrome','readJournal','controlChatComposer','goalController','appendJournal',body+';return recoverHandoffReadiness;')(
   locks,()=> 'key',{
    storage:{local:{get:async()=>({key:structuredClone(current)}),set:async(v:any)=>{writes++;current=structuredClone(v.key);}}},
-   tabs:{get:async()=>({url:options.url||'https://chatgpt.com/',status:options.status||'complete'})},
+   tabs:{get:async()=>({url:route,status:options.status||'complete'})},
    scripting:{executeScript:async()=>{nativeCalls++;return [{result:{ok:options.nativeOk!==false}}];}}
   },async()=>({ok:true,events,storageError:options.storageError||''}),()=>{},
-  {handoffPreparationReady:async()=>{goalCalls++;return {ok:options.goalOk!==false};}},async(e:any)=>events.push(e));
+  {handoffPreparationReady:async()=>{goalCalls++;if(options.routeDuringGoal)route='https://chatgpt.com/c/new-manual';return {ok:options.goalOk!==false};}},async(e:any)=>events.push(e));
  const result=await fn(7,state);
  return {result,current,nativeCalls,goalCalls,writes,events,fn,state};
 }
@@ -37,3 +38,5 @@ for(const options of [{events:[{kind:'request.started',tabId:7,recordedAt:101,op
  const env=await fixture(options);assert.equal(env.writes,0,'refusal does not modify the handoff');
 }
 console.log('Initial handoff readiness: exact no-send recovery, duplicate GET and unsafe-state refusals passed.');
+
+assert.equal((await fixture({routeDuringGoal:true})).writes,0,'route change during Goal preparation cannot resume old handoff');

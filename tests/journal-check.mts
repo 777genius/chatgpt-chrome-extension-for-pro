@@ -64,6 +64,13 @@ async function claimNativeUser(operationId:string,retryUserId:string,promptKey:s
 await claimNativeUser('native-first','user-1','/c/stable-user|fallback-turn-1:0:user');
 ctx=boot();
 await claimNativeUser('native-second','user-2','/c/stable-user|fallback-turn-1:0:user');
+for(const migrated of [false,true]) {
+ if(migrated){delete storage['chatgpt-journal:meta'].retrySendClaimSchema;storage['chatgpt-journal:meta'].retrySendClaims={};}
+ ctx=boot();
+ await assert.rejects(()=>append({kind:'retry.planned',operationId:'fallback-after-native-'+migrated,
+  promptKey:'/c/stable-user|fallback-turn-1:0:user',sourceUrl:stableTab.url},{...stableTab,id:93}),
+  /Автоповтор этого запроса уже запускался/,'missing native ID must not bypass a consumed same-turn claim');
+}
 delete storage['chatgpt-journal:meta'].retrySendClaimSchema;
 storage['chatgpt-journal:meta'].retrySendClaims={};
 ctx=boot();
@@ -82,3 +89,17 @@ await append({kind:'retry.finished',operationId:'native-refused',clicked:false,c
 ctx=boot();
 await assert.rejects(()=>claimNativeUser('native-refused','user-refused',noClickPrompt),/Автоповтор этого запроса уже запускался/);
 await claimNativeUser('native-refused-fresh','user-refused',noClickPrompt);
+
+// Schema-1 fallback claims also fence a later positively bound native view.
+{
+ const legacyTab={id:94,url:'https://chatgpt.com/c/legacy-fallback',title:'Test'},promptKey='/c/legacy-fallback|fallback-turn-1:0:user';
+ for(const kind of ['retry.planned','retry.send_intent','send.authorized','retry.confirmed'])
+  await append({kind,operationId:'legacy-fallback-send',sourceUrl:legacyTab.url,promptKey},legacyTab);
+ storage['chatgpt-journal:meta'].retrySendClaimSchema=1;
+ storage['chatgpt-journal:meta'].retrySendClaims={};ctx=boot();
+ await assert.rejects(()=>append({kind:'retry.planned',operationId:'native-after-legacy',sourceUrl:legacyTab.url,
+  promptKey,retryUserId:'now-known-user'},{...legacyTab,id:95}),/Автоповтор этого запроса уже запускался/);
+ const consumed=storage['chatgpt-journal:meta'].retrySendClaims[JSON.stringify([legacyTab.url,promptKey])];
+ assert.equal(consumed.sourceUrl,legacyTab.url);assert.equal(consumed.promptKey,promptKey);assert.equal(consumed.retryUserId,null);
+ assert.equal(storage['chatgpt-journal:meta'].retrySendClaimSchema,2);
+}

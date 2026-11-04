@@ -27,6 +27,12 @@ if (typeof module !== 'undefined') module.exports = { completedAttemptEvidence, 
 // The MAIN probe carries the same self-contained predicate for serialization.
 function plainGoalMarkerDOM(rendered,sourceMessageId='') {
   if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
+  for(let node=rendered;node;node=node.parentElement) {
+    const style=node.ownerDocument?.defaultView?.getComputedStyle?.(node);
+    if(node.hasAttribute('hidden')||node.getAttribute('aria-hidden')==='true'||
+        node.style?.display==='none'||style?.display==='none'||
+        ['hidden','collapse'].includes(node.style?.visibility)||['hidden','collapse'].includes(style?.visibility))return false;
+  }
   const plain=node=>{
     if(node?.tagName!=='P'||node.childNodes.length!==1)return false;
     const text=node.firstChild;

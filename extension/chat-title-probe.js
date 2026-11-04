@@ -27,11 +27,9 @@ function controlChatTitle(options) {
   if (options.action==='cancel') {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
-      const candidates=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
-      const input=state.input||(state.saved?state.form?.querySelector('input'):state.selected&&candidates.length===1?candidates[0]:null);
+      const input=state.form?.isConnected?state.form.querySelector('input'):null;
       const unchanged=[state.title,state.previousTitle,state.previousFormTitle];
-      const inputKey=input&&Object.keys(input).find(name=>name.startsWith('__reactProps$'));
-      const unchangedInput=input&&unchanged.includes(input.value)&&inputKey&&input[inputKey]?.value===input.value;
+      const unchangedInput=input&&input.closest('form')===state.form&&unchanged.includes(input.value);
       if(chatUrl(location.href)===state.url && unchangedInput) input.closest('form')?.querySelector('button[type="button"]')?.click();
       if(chatUrl(location.href)===state.url && !state.selected) {
         const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
@@ -182,6 +180,7 @@ function controlChatTitle(options) {
       !form.querySelector('button[type="submit"]') || form.querySelectorAll('button').length!==2) return {ok:false,retryable:true,reason:'rename-form-not-ready'};
   if (options.action==='fill') {
     if (input.value!==state.previousFormTitle || document.title!==state.previousTitle) return {ok:false,reason:'title-edited-by-user'};
+    state.form=form;state.input=input;
     const inputKey=Object.keys(input).find(name=>name.startsWith('__reactProps$'));
     if(!inputKey||input[inputKey]?.value!==input.value)return {ok:false,retryable:true,reason:'title-model-not-ready'};
     state.input=input;

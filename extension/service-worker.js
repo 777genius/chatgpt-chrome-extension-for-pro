@@ -376,7 +376,7 @@ async function recoverHandoffReadiness(tabId, expected) {
     const latest=(await chrome.storage.local.get(key))[key];
     if(latest?.id!==current.id||latest.stage!=='failed'||(await chrome.tabs.get(tabId)).url!==tab.url)return latest;
     const goal=await goalController.handoffPreparationReady({sourceUrl:current.sourceUrl,handoffId:current.id,tabId});
-    if(!goal.ok)return current;
+    if(!goal.ok||(await chrome.tabs.get(tabId)).url!==tab.url)return current;
     const record={...current,stage:'navigating',reason:'',preparationRecoveries:(current.preparationRecoveries||0)+1};
     await appendJournal({kind:'handoff.preparation_recovered',operationId:current.id,
       sourceUrl:current.sourceUrl,targetUrl:tab.url,recoveries:record.preparationRecoveries},{id:tabId});
@@ -529,6 +529,7 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
   if(!ChatGPTGoalPolicy.canonical(url)||(pending.url!=='https://chatgpt.com/'&&pending.url!==url)||
       !Number.isFinite(pending.intent?.eventAt)||Date.now()-pending.intent.eventAt<30000)return waiting();
   const journal=await readJournal();
+  if(!journal.ok||journal.storageError)return waiting();
   const requests=journal.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&!e.operationId&&
     typeof e.requestId==='string'&&e.requestId&&Number.isFinite(e.eventAt));
   const candidates=requests.filter(e=>e.sourceUrl===pending.url&&e.eventAt>=pending.intent.eventAt&&e.eventAt-pending.intent.eventAt<=10000);

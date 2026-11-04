@@ -109,7 +109,8 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
         titlePrepareAttempts:0,titleRetryAfter:0,titleRefusalRetries:(record.titleRefusalRetries||0)+1};
       delete next.previousTitle;
       delete next.titleSaveStartedAt;
-      delete next.titlePreparationTitle;
+      // Keep the original title baseline: a later owner rename must refuse
+      // preparation rather than becoming a new authorized baseline.
       await appendJournal({kind:'handoff.title_no_click_recovered',operationId:id,sourceUrl:record.sourceUrl,
         targetUrl:record.targetUrl}, {id:tabId});
       await chrome.storage.local.set({[key]:next});

@@ -291,3 +291,10 @@ console.log('Goal/retry fences: confirmed manual supersession, stale callbacks, 
  assert.equal(result.ok,true,'failed opportunistic reconciliation must retain Goal controls');
  assert.equal(result.record.id,env.data[goalKey].id);
 }
+
+for(const action of ['pause','stop']) {
+ const env=fixture();await env.waitingGoal();
+ await env.evaluate('goalController.control(options)',{options:{action,url,tabId:7}});
+ await assert.rejects(()=>env.append({kind:'retry.preparation_recovered',operationId:'late-recovery',attemptId:'1000010'}),
+  'Pause/Stop also fences composer preparation recovery');
+}

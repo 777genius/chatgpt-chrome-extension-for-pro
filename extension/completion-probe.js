@@ -6,6 +6,12 @@
 function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null, sentText = null) {
   function plainGoalMarkerDOM(rendered,sourceMessageId='') {
     if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
+  for(let node=rendered;node;node=node.parentElement) {
+    const style=node.ownerDocument?.defaultView?.getComputedStyle?.(node);
+    if(node.hasAttribute('hidden')||node.getAttribute('aria-hidden')==='true'||
+        node.style?.display==='none'||style?.display==='none'||
+        ['hidden','collapse'].includes(node.style?.visibility)||['hidden','collapse'].includes(style?.visibility))return false;
+  }
     const plain=node=>{
       if(node?.tagName!=='P'||node.childNodes.length!==1)return false;
       const text=node.firstChild;
@@ -221,7 +227,14 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
       const run=marker?.firstElementChild;
       const plainSpan=marker?.childNodes.length===1&&run?.tagName==='SPAN'&&run.attributes.length===0&&
         run.childNodes.length===1&&run.firstChild.nodeType===3&&run.firstChild.textContent==='GOAL_COMPLETE';
-      if(marker&&(plainGoalMarkerDOM(marker)||plainSpan||boundDIL&&marker.closest('[data-dil-message-id]')?.getAttribute('data-dil-message-id')===boundDIL&&
+      let markerVisible=Boolean(marker);
+      for(let node=marker;node;node=node.parentElement) {
+        const style=node.ownerDocument?.defaultView?.getComputedStyle?.(node);
+        if(node.hasAttribute('hidden')||node.getAttribute('aria-hidden')==='true'||style?.display==='none'||
+            ['hidden','collapse'].includes(style?.visibility)||node.style?.display==='none'||
+            ['hidden','collapse'].includes(node.style?.visibility))markerVisible=false;
+      }
+      if(markerVisible&&(plainGoalMarkerDOM(marker)||plainSpan||boundDIL&&marker.closest('[data-dil-message-id]')?.getAttribute('data-dil-message-id')===boundDIL&&
           marker.children.length===1&&marker.firstElementChild?.matches('span[data-d-stream-run]')&&
           marker.firstElementChild.children.length===0&&
           !marker.closest('[hidden],[aria-hidden="true"],[style*="display: none"]'))) {

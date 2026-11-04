@@ -22,9 +22,9 @@ async function domCheck() {
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
       return this.hidden || this.style.display === 'none' ? [] : [{width:240,height:32}];
     }});
-    const messages: any[] = [], sends: string[] = [], logs: any[] = [];
+    const messages: any[] = [], sends: string[] = [], logs: any[] = [], committedLogs:any[]=[];
     const draftStorage:Record<string,any>={};
-    let failJournal = false;let stopCalls=0,stopChecks=0;
+    let failJournal = false;let stopCalls=0,stopChecks=0,delayedPlanMs=0;
     let now = 1000000, sequence = 0;
     const editor = document.querySelector('#prompt-textarea');
     const main = document.querySelector('main')!;
@@ -64,7 +64,7 @@ async function domCheck() {
           if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
           return {ok:true,matches:true,ready:true};
         }
-        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(message.event.kind==='retry.readiness'&&message.event.phase==='settling')now+=readinessClockDelay;if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
+        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(message.event.kind==='retry.planned'&&delayedPlanMs){const delay=delayedPlanMs;delayedPlanMs=0;await new Promise(resolve=>setTimeout(resolve,delay));}if(message.event.kind==='retry.readiness'&&message.event.phase==='settling')now+=readinessClockDelay;if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};context.journalEvent=message.event;const result=await runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);if(result?.ok)committedLogs.push(structuredClone(message.event));return result;}
         if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
         if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
         messages.push(message);
@@ -81,7 +81,7 @@ async function domCheck() {
     });
     runInContext(readFileSync('extension/journal-store.js','utf8'),context);
     runInContext(content, context);
-    return { messages, sends, document, context, logs, getStopCalls(){return stopCalls;},getStopChecks(){return stopChecks;}, breakJournal(){failJournal=true;},
+    return { messages, sends, document, context, logs, committedLogs, delayNextPlan(ms:number){delayedPlanMs=ms;}, getStopCalls(){return stopCalls;},getStopChecks(){return stopChecks;}, breakJournal(){failJournal=true;},
       advance(ms: number) { now += ms; },
       async fail(text: string) {
         main.insertAdjacentHTML('beforeend', alertHTML(text));
@@ -158,20 +158,32 @@ async function domCheck() {
   assert.equal(extras.sends.length,2,'explicit extra budget must allow exactly two sends');
   assert.match(extras.messages[0].retryReason,/Дополнительные автоповторы исчерпаны/);
   const run = setup();
-  await run.fail('Ошибка первая');
+  const settledRetry=async(text:string)=>{
+    const start=run.logs.length;
+    await run.fail(text);
+    // Observe the exact operation's durable outcome, not a page timer. A
+    // loaded runner or slow journal can outlive fail()'s observation interval.
+    await waitFor(()=>{
+      const planned=run.logs.slice(start).find(event=>event.kind==='retry.planned');
+      return planned&&run.committedLogs.some(event=>event.kind==='retry.finished'&&event.operationId===planned.operationId)&&
+        run.committedLogs.some(event=>event.kind==='retry.confirmed'&&event.operationId===planned.operationId);
+    });
+  };
+  await settledRetry('Ошибка первая');
   assert.deepEqual(run.sends, ['доделай е2е']);
   assert.equal(run.messages.length, 0, 'first error retries silently');
   // Keep the five failures within 120s, including virtual worker readiness time.
   run.advance(25000);
-  await run.fail('Ошибка с другим текстом');
+  await settledRetry('Ошибка с другим текстом');
   assert.equal(run.sends.length, 2);
   assert.equal(run.messages.length, 0, 'second error retries silently');
   run.advance(25000);
-  await run.fail('Третья ошибка');
+  run.delayNextPlan(1200); // Deterministically exceed the former 1100ms assumption.
+  await settledRetry('Третья ошибка');
   assert.equal(run.sends.length,3,'third error gets the third automatic retry');
   assert.equal(run.messages.length,0);
   run.advance(25000);
-  await run.fail('Четвёртая ошибка');
+  await settledRetry('Четвёртая ошибка');
   assert.equal(run.sends.length,4,'fourth error gets the fourth automatic retry');
   assert.equal(run.messages.length,0);
   run.advance(25000);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Deterministic, dependency-free ZIP. Only this reviewed runtime allowlist ships.
-import {readFileSync, lstatSync, mkdirSync, writeFileSync} from 'node:fs';
-import {resolve, dirname} from 'node:path';
+import {readFileSync, lstatSync, realpathSync, mkdirSync, writeFileSync} from 'node:fs';
+import {resolve, dirname, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
@@ -34,9 +34,11 @@ requireValid(JSON.stringify([...manifest.permissions].sort())===JSON.stringify(p
 requireValid(JSON.stringify(manifest.host_permissions)===JSON.stringify(['https://chatgpt.com/*']),'Host access changed: update the privacy audit');
 for(const script of manifest.content_scripts)requireValid(JSON.stringify(script.matches)===JSON.stringify(['https://chatgpt.com/*']),'Unexpected content-script host');
 const entries=new Map<string,Buffer>();
+const extensionRoot=realpathSync(resolve(root,'extension'));
 for(const file of runtimeFiles){
   const path=resolve(root,'extension',file);
   requireValid(lstatSync(path).isFile()&&!lstatSync(path).isSymbolicLink(),`Not a regular runtime file: ${file}`);
+  requireValid(realpathSync(path).startsWith(extensionRoot+sep),`Runtime file resolves outside extension/: ${file}`);
   entries.set(file,readFileSync(path));
 }
 for(const file of ['LICENSE','NOTICE.md'])entries.set(file,readFileSync(resolve(root,file)));
@@ -72,12 +74,13 @@ const args=process.argv.slice(2);
 requireValid(args.length===0||(args.length===2&&args[0]==='--out'),'Usage: npm run package:store -- [--out /path/package.zip]');
 const output=resolve(args[1]||resolve(root,'work',`chatgpt-completion-alert-${manifest.version}.zip`));
 requireValid(output.endsWith('.zip'),'Output must end in .zip');
-requireValid(!output.startsWith(resolve(root,'extension')+'/'),'Output must be outside extension/');
-mkdirSync(dirname(output),{recursive:true});writeFileSync(output,zip);
+requireValid(!output.startsWith(resolve(root,'extension')+sep),'Output must be outside extension/');
+requireValid(realpathSync(execFileSync('git',['rev-parse','--show-toplevel'],{cwd:root,encoding:'utf8'}).trim())===realpathSync(root),'Packaging requires the extension repository Git checkout');
 const dirtyPaths=execFileSync('git',['status','--porcelain=v1','--untracked-files=all'],{cwd:root,encoding:'utf8'}).trimEnd().split('\n').filter(Boolean);
 const source={gitHead:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),dirtyPaths,
   status:dirtyPaths.length?'Preparatory package; Git HEAD alone does not identify dirty runtime bytes. Rebuild after the final commit.':'Clean source checkout; runtime bytes packaged from the recorded Git HEAD.'};
 const receipt={source,version:manifest.version,files:entries.size,bytes:zip.length,sha256:createHash('sha256').update(zip).digest('hex'),
   entries:[...entries.keys()].sort(),note:'Static package validation only; Chrome Web Store review and live ChatGPT behavior are separate.'};
+mkdirSync(dirname(output),{recursive:true});writeFileSync(output,zip);
 writeFileSync(output+'.json',JSON.stringify(receipt,null,2)+'\n');
 console.log(JSON.stringify({output,...receipt},null,2));

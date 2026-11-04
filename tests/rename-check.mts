@@ -464,3 +464,26 @@ for(const mode of ['sidebar-stale-no-ack','sidebar-stale-failed-ack'] as const){
  assert.equal(h.saved,1);assert.equal(h.sent,0);
  await h.rename();assert.equal(h.saved,1,'confirmed title sync never repeats the native save');
 }
+
+{
+ const h=harness();Object.assign(h.record,{titleStatus:'failed',titleReason:'title-form-changed',titlePreparationTitle:h.document.title,previousTitle:h.document.title,titleSaveStartedAt:100});
+ h.document.title='Owner manually renamed';await h.rename();
+ assert.equal(h.saved,0,'refused-save recovery must preserve original title baseline');
+ assert.equal(h.document.title,'Owner manually renamed');
+}
+
+{
+ const h=harness(),options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+ for(const action of ['open','select'])assert.equal(h.probe({...options,action}).ok,true);
+ const old=h.document.querySelector('[role="dialog"] form')!,foreign=old.cloneNode(true) as HTMLFormElement;
+ const input=foreign.querySelector('input')!;input.value=evidence.title;(input as any).__reactProps$foreign={value:input.value};
+ let cancelled=0;foreign.querySelector('button[type="button"]')!.addEventListener('click',()=>cancelled++);old.replaceWith(foreign);
+ h.probe({...options,action:'cancel'});assert.equal(cancelled,0,'cleanup cannot cancel an unowned replacement form');
+}
+{
+ const h=harness(),options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+ for(const action of ['open','select','fill'])assert.equal(h.probe({...options,action}).ok,true);
+ const input=h.document.querySelector('[role="dialog"] input')!;
+ (input as any).__reactProps$test={value:evidence.title};
+ h.probe({...options,action:'cancel'});assert.equal(input.isConnected,false,'owned unchanged form cleanup tolerates lagging native props');
+}

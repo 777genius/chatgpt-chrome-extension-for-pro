@@ -62,9 +62,9 @@ function probeCheck(){
  {type:'chatgpt-reasoning-group',items:[{type:'assistant-message',content:'DO NOT INCLUDE REASONING'}]},
  {type:'assistant-message',phase:'final_answer',messageId:'a2',content:'::chatgpt-content-reference{index="0"}',contentReferences:[{model_dil_v2:{fallbackMarkdown:'Full answer\nwith code'}}]}]}}];
  const btn=document.querySelector('button')! as any;
- const fiber={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries},return:null}};
+ const fiber={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries,isChatConversation:true,conversationId:'source'},return:null}};
  btn.__reactFiber$test=fiber;
- const ctx=createContext({document,URL});runInContext(probe,ctx);
+ const ctx=createContext({document,URL,location:{pathname:'/c/source'}});runInContext(probe,ctx);
  const result=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',ctx)));
  assert.equal(result.action,'new-chat');assert.equal(result.incomplete,true,'two answers require proof of fully loaded history when requesting three');
  assert.deepEqual(result.messages.map((m:any)=>m.id),['a1','u1','u2','a2']);
@@ -78,6 +78,9 @@ function probeCheck(){
  assert.deepEqual(threePairs.messages.map((item:any)=>item.id),['u1','a1','u2','a2','u3','a3'],
   'exactly the latest three messages per role retain their original order');
  assert.equal(threePairs.incomplete,false);
+ fiber.return.memoizedProps.conversationId='other';
+ assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'three complete pairs from another chat cannot authorize a handoff');
+ fiber.return.memoizedProps.conversationId='source';
  fiber.return.memoizedProps.entries=originalEntries;
 
  const unknown=document.createElement('span');unknown.textContent='Unknown error';document.querySelector('aside')!.prepend(unknown);
@@ -198,7 +201,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?'ready':'missing'};
    if(m.type==='CHATGPT_INSPECT_ERROR'){
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
-    return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages,incomplete:interference==='history-loading'&&++historyInspections<3};
+    return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages:effortOptions.escalate&&!m.captureRetryHistory?[]:messages,incomplete:interference==='history-loading'&&++historyInspections<3};
    }
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
     if(m.type==='CHATGPT_HANDOFF_BEGIN'){begins++;assert.equal(loc.href,originalURL,'backup must precede navigation');}

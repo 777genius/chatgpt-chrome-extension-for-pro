@@ -23,6 +23,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   let entries = null;
   let historyReady = null;
+  let historyBound = false;
   let recoveryEntry = null;
   let inputDeliveryError = false;
   const alertContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
@@ -42,6 +43,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
       const boundHistory=props.conversationId===pageId ||
         /^local-chatgpt:[a-z0-9-]+$/.test(props.conversationId||'') &&
         props.composerConversationId===props.conversationId && props.scrollStateConversationId===pageId;
+      historyBound=props.isChatConversation===true&&boundHistory;
       if (props.isChatConversation === true && boundHistory &&
           typeof props.isConversationFetching === 'boolean' && typeof props.isConversationLoading === 'boolean') {
         historyReady = !props.isConversationFetching && !props.isConversationLoading && props.hasLoadError === false;
@@ -126,7 +128,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   if (!captureHistory || action !== 'new-chat'&&!(captureRetryHistory&&action==='retry')) return { action, messages: [], recoveryBinding,
     deliveryUserSentAtMs:inputDeliveryError?recoveryEntry?.timestampTurns?.filter(item=>item.role==='user').at(-1)?.sentAtMs:null };
-  if (!entries) return { action, messages: [], incomplete: true };
+  if (!entries||!historyBound) return { action, messages: [], incomplete: true };
   function messageText(item) {
     if (item.type === 'user-message') return typeof item.message === 'string' ? item.message : '';
     const fallbacks = (item.contentReferences || []).map((ref) => ref.model_dil_v2?.fallbackMarkdown).filter((text) => typeof text === 'string' && text.trim());
@@ -322,9 +324,9 @@ function controlChatComposer(options) {
   }
   const inspectingEmptyHandoff=options.action==='inspect-empty-handoff';
   if(inspectingEmptyHandoff) {
-    const emptyRoot=location.pathname==='/'&&!root.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"]');
+    const emptyRoot=location.pathname==='/'&&!root.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]');
     const attachments=composer.querySelector('[data-composer-attachments]');
-    if(!emptyRoot||!matches||!ready||prompt!=='')return {...inspection,ok:false};
+    if(!emptyRoot||!matches||!ready||prompt!==''||controller.pendingBrowserAutocompleteSubmission!=null)return {...inspection,ok:false};
     if(!attachments?.children.length)return inspection;
     // Reuse the exact one-ready-file proof below; never accept user files.
     if(!options.fileName)return {...inspection,ok:false};
