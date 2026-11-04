@@ -591,6 +591,39 @@ async function reconcileNativeGoalAcknowledgement(tabId,url) {
   return confirmNativeGoalSend({url,tabId,id:record.id,operationId:op.id,
     requestId:proof.request.requestId,startedAt:proof.request.startedAt});
 }
+async function reconcileAcceptedHandoffGoal(tabId,url) {
+  const key='chatgpt-goal:'+url,values=await chrome.storage.local.get([key,handoffKey(tabId)]);
+  const goal=values[key],handoff=values[handoffKey(tabId)];
+  if(goal?.phase!=='waiting'||goal.operation||goal.handoffPending!==true||handoff?.stage!=='sent'||
+      goal.handoffId!==handoff.id||handoff.targetUrl!==url||!goal.handoffAcceptedUserId||
+      handoff.acceptance?.messageId!==goal.handoffAcceptedUserId||!handoff.sendReceipt?.submittedText)return;
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const native=checked?.result;
+  if(!native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||native.generating!==false||
+      native.turnStatus!=='complete'||native.hasError||native.assistantCompleted!==true||native.assistantPhase!=='final_answer'||
+      !native.assistantKey||native.userId!==goal.handoffAcceptedUserId||native.userText!==handoff.sendReceipt.submittedText)return;
+  const current=await chrome.storage.local.get([key,handoffKey(tabId)]);
+  if(JSON.stringify(current[key])!==JSON.stringify(goal)||JSON.stringify(current[handoffKey(tabId)])!==JSON.stringify(handoff)||
+      ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
+  return goalController.completion({url,tabId,completionKey:native.promptKey+'|'+native.assistantKey,
+    promptKey:native.promptKey,userId:native.userId,response:native.goalResponse||'',
+    rawExact:native.goalRawExact===true,nativeVerified:true});
+}
+async function reconcileGoalPreparation(tabId,url) {
+  const key='chatgpt-goal:'+url,goal=(await chrome.storage.local.get(key))[key],op=goal?.operation;
+  if(goal?.phase!=='blocked'||op?.status!=='reserved'||op.tabId!==tabId||goal.pauseRequested||goal.stopRequested)return;
+  const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+  // A reserved operation may be retried only before any journal send intent.
+  // Intent/clicked/unknown outcomes remain fenced even if the editor is idle.
+  if(!meta||meta.active?.[tabId]||Object.values(meta.active||{}).some(a=>a.operationId===op.id))return;
+  const ready=await chrome.tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url});
+  if(!ready?.ok||ready.idle!==true||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
+  const current=(await chrome.storage.local.get(key))[key];
+  const freshMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+  if(JSON.stringify(current)!==JSON.stringify(goal)||!freshMeta||freshMeta.active?.[tabId]||
+      Object.values(freshMeta.active||{}).some(a=>a.operationId===op.id))return;
+  return goalController.retryPreparation({url,tabId,id:goal.id,operationId:op.id});
+}
 async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,startedAt}) {
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
   const sameOperation=value=>value?.id===id&&value.url===url&&value.operation?.id===operationId&&value.operation.tabId===tabId&&
@@ -704,6 +737,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const url=ChatGPTGoalPolicy.canonical(live);
       if(message.action==='get'&&url&&typeof reconcileNativeGoalAcknowledgement==='function')
         await reconcileNativeGoalAcknowledgement(tabId,url);
+      if(message.action==='get'&&url&&typeof reconcileAcceptedHandoffGoal==='function')
+        await reconcileAcceptedHandoffGoal(tabId,url);
+      if(message.action==='get'&&url&&typeof reconcileGoalPreparation==='function')
+        await reconcileGoalPreparation(tabId,url);
       return {ok:true,tabId,url:live,record:url?await goalController.get(url):null,
         composer:result?.record||await goalController.composerGet({tabId})};
     })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));return true;

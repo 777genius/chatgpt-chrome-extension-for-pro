@@ -386,6 +386,19 @@
       if(outcome.dispatch)await deliver(outcome.record);
       return {ok:true,record:view(await getRaw(target))};
     }
+    async function retryPreparation({url,tabId,id,operationId}) {
+      const outcome=await serialize(async()=>{
+        const record=await read(url),op=record?.operation;
+        if(record?.id!==id||record.phase!=='blocked'||op?.id!==operationId||op.tabId!==tabId||
+            op.status!=='reserved'||record.pauseRequested||record.stopRequested||record.manualOverride||
+            record.manualPending||now()>=record.deadlineAt)return {ok:false};
+        const next={...record,phase:'preparing',reason:'',operation:{...op,createdAt:now()}};
+        await event('preparation_retried',next,tabId);await save(next);
+        return {ok:true,record:next};
+      });
+      if(outcome.ok)await deliver(outcome.record);
+      return {ok:outcome.ok};
+    }
     async function check({url,tabId,id,operationId,phase='preparing'}) {
       return serialize(async()=>{
         const record=await read(url);
@@ -703,7 +716,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerBind,recoverTab,control,retryPreparation,check,intent,authorize,report,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&!['moved','completed','stopped','blocked'].includes(record.phase)?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
