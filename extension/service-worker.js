@@ -693,7 +693,8 @@ async function recoverNoClickRetry(tabId,url) {
   const work=(async()=>{
     const state=await readRetryState(url);
     if(!state?.blocked||state.terminal||(state.preparationRecoveries||0)>=2||state.remainingRetries===0||
-        !state.lastPromptKey||!state.blockedAttemptId||await readRetryDraft(url))return state;
+        !state.lastPromptKey||!state.blockedAttemptId)return state;
+    const carriedDraft=await readRetryDraft(url);
     const journal=await readJournal();
     if(!journal.ok||journal.storageError)return state;
     const failures=journal.events.filter(e=>e.sourceUrl===url&&['retry.failed','draft.restore_failed'].includes(e.kind));
@@ -701,6 +702,9 @@ async function recoverNoClickRetry(tabId,url) {
     if(!['retry.failed','draft.restore_failed'].includes(failed?.kind)||failed.tabId!==tabId||!failed.operationId||failed.kind==='retry.failed'&&failed.clicked!==false||failed.attemptId!==state.blockedAttemptId||
         (failed.error||failed.reason)!==state.reason)return state;
     const events=journal.events.filter(e=>e.operationId===failed.operationId);
+    if(carriedDraft&&(carriedDraft.operationId!==failed.operationId||carriedDraft.claimedAt||
+        !['saved','not-clicked'].includes(carriedDraft.phase)||typeof carriedDraft.draft!=='string'||
+        !carriedDraft.draft||carriedDraft.attemptId!==failed.attemptId))return state;
     const planned=events.find(e=>e.kind==='retry.planned');
     const cleanupOnly=failed.kind==='draft.restore_failed'&&!events.some(e=>e.kind==='draft.saved');
     if(failed.kind==='draft.restore_failed'&&!cleanupOnly||planned?.promptKey!==state.lastPromptKey||planned.attemptId!==failed.attemptId||
@@ -719,6 +723,7 @@ async function recoverNoClickRetry(tabId,url) {
       checkpoint.startedAt===Number(planned.attemptId)&&checkpoint.requestId===planned.requestId&&checkpoint.httpCompleted===true&&
       native?.terminalEmptyResponse===true&&native.nativeConversationInactive===true;
     if(cleanupOnly&&!terminalEmpty)return state;
+    if(carriedDraft&&(native?.generating!==false||native.nativeConversationInactive!==true))return state;
     if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||(!native.hasError&&!terminalEmpty)||!native.userId||
         native.promptKey!==planned.promptKey||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
         !Number.isFinite(native.lastUserSentAtMs))return state;
@@ -731,8 +736,10 @@ async function recoverNoClickRetry(tabId,url) {
       func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
     if(runtime?.result?.attemptId!==planned.attemptId||(runtime.result.requestId||null)!==(planned.requestId||null)||
         (await chrome.tabs.get(tabId)).url!==url)return state;
+    if(JSON.stringify(await readRetryDraft(url))!==JSON.stringify(carriedDraft))return state;
     await appendJournal({kind:'retry.preparation_recovered',operationId:failed.operationId,sourceUrl:url,
-      attemptId:planned.attemptId,promptKey:planned.promptKey,requestId:planned.requestId},tab);
+      attemptId:planned.attemptId,promptKey:planned.promptKey,requestId:planned.requestId,
+      preparationDraftOperationId:carriedDraft?.operationId||null,preparationDraftSequence:carriedDraft?.savedSequence||null},tab);
     await goalController.retry({url,tabId,kind:'retry.preparation_recovered',promptKey:planned.promptKey,attemptId:planned.attemptId});
     return readRetryState(url);
   })();

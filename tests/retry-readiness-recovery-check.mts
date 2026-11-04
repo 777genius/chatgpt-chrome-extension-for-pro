@@ -24,7 +24,7 @@ async function fixture(extra:any={}) {
  function inspectCompletedTurn(){}function inspectChatError(){}function controlChatComposer(){}
  const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn',
   code+';return recoverNoClickRetry;')(
-  async()=>structuredClone(state),async()=>extra.draft?{draft:'owner'}:null,async()=>({ok:true,storageError:'',events}),chrome,
+  async()=>structuredClone(state),async()=>extra.draftRecord|| (extra.draft?{draft:'owner'}:null),async()=>({ok:true,storageError:'',events}),chrome,
   {get:async()=>extra.goal||null,retry:async()=>{goalCalls++;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url,promptKey,startedAt:1000000,requestId:'request',httpCompleted:extra.httpCompleted!==false}),async()=>native);
  const result=await fn(7,url);return {result,writes,calls,goalCalls,fn};
 }
@@ -49,12 +49,22 @@ assert.equal((await fixture({cleanupOnly:true,native:{hasError:true}})).writes,0
 // Real reducer preserves historical failures/limits and makes the grant one-use.
 const ctx=createContext({URL,Date});runInContext(readFileSync('extension/journal-store.js','utf8'),ctx);
 ctx.state={[new URL(url).pathname.split('/').at(-1)!]:{...baseState,remainingRetries:2}};
-ctx.event={kind:'retry.preparation_recovered',sourceUrl:url,promptKey,attemptId};
+ctx.event={kind:'retry.preparation_recovered',sourceUrl:url,promptKey,attemptId,preparationDraftOperationId:'op',preparationDraftSequence:12};
 const recovered=runInContext('reduceRetrySummary(state,event)',ctx)[new URL(url).pathname.split('/').at(-1)!];
 assert.equal(recovered.blocked,false);assert.equal(recovered.remainingRetries,2);
 assert.deepEqual(recovered.failures,baseState.failures);assert.equal(recovered.preparationRecoveries,1);
+assert.equal(recovered.preparationDraftOperationId,'op');assert.equal(recovered.preparationDraftSequence,12);
 ctx.state={fixture:1,[new URL(url).pathname.split('/').at(-1)!]:recovered};
 ctx.event={kind:'retry.planned',sourceUrl:url,operationId:'fresh'};
 const planned=runInContext('reduceRetrySummary(state,event)',ctx)[new URL(url).pathname.split('/').at(-1)!];
 assert.equal(planned.preparationRecovered,false);assert.equal(planned.remainingRetries,1);
 console.log('No-click retry recovery: exact native/journal proof; unknown sends, cross-tab failures, drafts, Stop and budgets remain fenced.');
+
+const carry={operationId:'op',attemptId,phase:'not-clicked',savedSequence:12,draft:'Synthetic owner draft'};
+assert.equal((await fixture({draftRecord:carry,native:{generating:false,nativeConversationInactive:true}})).writes,1,'proven no-click backup is carried into the same protected retry');
+for(const draftRecord of [{...carry,phase:'unknown'},{...carry,claimedAt:1},{...carry,operationId:'other'},{...carry,attemptId:'other'}])
+ assert.equal((await fixture({draftRecord,native:{generating:false,nativeConversationInactive:true}})).writes,0);
+assert.equal((await fixture({draftRecord:carry,native:{generating:true,nativeConversationInactive:true}})).writes,0);
+
+ctx.state={[new URL(url).pathname.split('/').at(-1)!]:recovered};ctx.event={kind:'retry.confirmed',sourceUrl:url};
+assert.equal(runInContext('reduceRetrySummary(state,event)',ctx)[new URL(url).pathname.split('/').at(-1)!].preparationDraftOperationId,null,'a confirmed retry retires the carry reference');

@@ -45,7 +45,7 @@ async function domCheck() {
         if(message.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS')return {ok:true,changed:false};
         if(message.type==='CHATGPT_GOAL_RECOVER')return {ok:false};
         if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:''};
-        if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
+        if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:savedRetry?.fixtureDraft&&!logs.some(e=>e.kind==='draft.saved')?savedRetry.fixtureDraft:await runInContext('readRetryDraft(location.href)',context)};
         if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
         if(message.type==='CHATGPT_WAIT'){
           // Keep the user-visible recovery grace observable until advance(),
@@ -268,6 +268,12 @@ async function domCheck() {
   assert.ok(uncertain.logs.some(e=>e.kind==='draft.saved'&&e.draft==='Черновик до неясной отправки'));
   assert.ok(uncertain.logs.some(e=>e.kind==='draft.restore_deferred'));
 
+  const carried=setup('',true,true,'',{preparationRecovered:true,preparationDraftOperationId:'prior-no-click',preparationDraftSequence:12,
+    fixtureDraft:{operationId:'prior-no-click',savedSequence:12,attemptId:'',phase:'not-clicked',draft:'Preserved synthetic draft'}});
+  await carried.fail('Delivery timeout after a no-click recovery');
+  await waitFor(()=>carried.sends.length===1);
+  await waitFor(()=>carried.document.querySelector('#prompt-textarea')!.textContent==='Preserved synthetic draft');
+  assert.deepEqual(carried.sends,['доделай е2е'],'carried backup is never submitted');
   const historical = setup();
   historical.document.querySelector('main')!.innerHTML = `<article data-testid="conversation-turn-old" data-turn="assistant">${alertHTML('Old')}</article>${user}<article data-testid="conversation-turn-2" data-turn="assistant"><div class="markdown">${alertHTML('Example')}</div></article>`;
   await pause();

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.43';
+  const SCRIPT_VERSION = '1.8.44';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -307,6 +307,7 @@
         retryStates.set(path,{failures:(saved?.failures||[]).filter(at=>Date.now()-at<=RETRY_WINDOW_MS),
           blocked:result?.ok!==true||Boolean(saved?.blocked),reason:saved?.reason||(result?.ok?'':'Не удалось восстановить журнал повторов'),
           lastAttempt:!saved?.preparationRecovered&&saved?.lastPromptKey?`${saved.lastPromptKey}|${saved.lastAttemptId||''}`:'',
+          preparationDraftOperationId:saved?.preparationDraftOperationId||null,preparationDraftSequence:saved?.preparationDraftSequence||null,
           restoredPromptKey:saved?.lastPromptKey||'',terminalHandled:Boolean(saved?.terminal),remainingRetries:saved?.remainingRetries,
           repeatedError:saved?.repeatedError||'',sameErrorCount:saved?.sameErrorCount||0});
       }
@@ -659,12 +660,22 @@
       if (form?.querySelector('[data-testid*="attachment"], [data-testid="file-upload-progress"]') || form?.querySelector('[data-composer-attachments]')?.children.length) {
         throw new Error('В поле есть вложение');
       }
+      if(state.preparationDraftOperationId) {
+        const carried=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url:sourceUrl});
+        const backup=carried?.ok&&carried.record;
+        if(!stillCurrent()||!backup||backup.operationId!==state.preparationDraftOperationId||
+            backup.savedSequence!==state.preparationDraftSequence||backup.attemptId!==attempt||backup.claimedAt||
+            !['saved','not-clicked'].includes(backup.phase)||typeof backup.draft!=='string'||!backup.draft)
+          throw new Error('Резервная копия черновика изменилась; повтор остановлен');
+        recoveryDraft=backup.draft;
+      }
       insertedEditor = editor;
       const visibleDraft = rawEditorText(editor);
       const draft = recoveryDraft && visibleDraft !== recoveryDraft
         ? (visibleDraft ? `${recoveryDraft}\n\n${visibleDraft}` : recoveryDraft) : visibleDraft;
       if (draft) {
         await logRetry('draft.saved',{operationId,draftChars:draft.length,draft},true);
+        state.preparationDraftOperationId=null;state.preparationDraftSequence=null;
         if (!stillCurrent() || rawEditorText(editor) !== visibleDraft) return;
         pendingDrafts.set(path, draft);
       }

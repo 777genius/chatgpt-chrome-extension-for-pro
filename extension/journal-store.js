@@ -105,7 +105,8 @@ function reduceRetrySummary(retryByChat, event) {
         state.lastPromptKey!==event.promptKey||(state.preparationRecoveries||0)>=2||
         state.remainingRetries===0)return retryByChat;
     return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',
-      preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1}};
+      preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1,
+      preparationDraftOperationId:event.preparationDraftOperationId||null,preparationDraftSequence:event.preparationDraftSequence||null}};
   }
   if(event.kind==='retry.planned' && retryByChat[chatId]) {
     const state=retryByChat[chatId];
@@ -113,6 +114,8 @@ function reduceRetrySummary(retryByChat, event) {
     return {...retryByChat,[chatId]:{...state,preparationRecovered:false,
       ...(state.remainingRetries!=null?{remainingRetries:Math.max(0,state.remainingRetries-1),lastBudgetOperation:event.operationId}:{})}};
   }
+  if(event.kind==='retry.confirmed'&&retryByChat[chatId])return {...retryByChat,[chatId]:{...retryByChat[chatId],
+    preparationDraftOperationId:null,preparationDraftSequence:null}};
   const isRetryError = event.kind === 'error.detected' && event.action === 'retry';
   const isBlocked = ['retry.blocked', 'retry.failed', 'draft.restore_failed'].includes(event.kind);
   if (!isRetryError && !isBlocked) return retryByChat;
