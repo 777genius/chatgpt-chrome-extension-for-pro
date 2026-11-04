@@ -599,7 +599,7 @@
       await serialize(async()=>{
         const record=await read(target);
         const recoveredBlock=record?.phase==='blocked'&&!record.operation&&
-          record.reason==='Восстановление запроса завершилось ошибкой'&&kind==='retry.confirmed';
+          record.reason==='Восстановление запроса завершилось ошибкой'&&['retry.confirmed','retry.preparation_recovered'].includes(kind);
         if(!record||!['waiting','recovering','paused'].includes(record.phase)&&!recoveredBlock)return;
         // Journal delivery and Goal writes use different queues. Recheck the
         // request fence here, after serialization: an accepted old callback
@@ -607,8 +607,11 @@
         const attempt=Number(attemptId),knownAttempt=Number.isFinite(attempt)&&attempt>0;
         if(knownAttempt&&attempt<Math.max(record.startedAt||0,record.manualStartedAt||0)||
             !knownAttempt&&record.manualStartedAt>0)return;
+        if(kind==='retry.preparation_recovered'&&(record.operation||record.pauseRequested||record.stopRequested||
+            record.manualPending||record.phase==='paused'||now()>=record.deadlineAt||record.expectedPromptKey!==promptKey))return;
         if(kind==='retry.blocked'&&goalHandoff)return; // new-chat recovery is not a failed Goal
         let next=record;
+        if(kind==='retry.preparation_recovered')next={...record,phase:'recovering',reason:''};
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
           next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,reason:''};

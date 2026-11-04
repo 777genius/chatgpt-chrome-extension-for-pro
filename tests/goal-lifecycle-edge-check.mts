@@ -164,3 +164,16 @@ console.log('Goal lifecycle: handoff pause/resume/failure, legacy binding and fi
  env.state().pauseRequested=true;
  assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:7})).ok,false);
 }
+
+// A positively refused retry preparation may recover without a Goal send/budget reset.
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|user');
+ await env.store.retry({url:source,tabId:7,kind:'retry.failed',attemptId:'1000000'});
+ const before=structuredClone(env.state());
+ await env.store.retry({url:source,tabId:7,kind:'retry.preparation_recovered',attemptId:'1000000',promptKey:'/c/goal-edge-source|other'});
+ assert.equal(env.state().phase,'blocked');
+ await env.store.retry({url:source,tabId:7,kind:'retry.preparation_recovered',attemptId:'1000000',promptKey:before.expectedPromptKey});
+ assert.equal(env.state().phase,'recovering');
+ assert.equal(env.state().deadlineAt,before.deadlineAt);assert.equal(env.state().continuations,before.continuations);
+ assert.equal(env.messages.length,1,'recovery returns control to the shared retry sender');
+}

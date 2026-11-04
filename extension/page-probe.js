@@ -310,6 +310,10 @@ function controlChatComposer(options) {
     typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
     effort===options.expectedEffort&&model===options.expectedModel;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
+  if(options.action==='inspect-empty-retry') {
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    return {...inspection,ok:matches&&prompt===''&&!attachments?.children.length};
+  }
   const inspectingEmptyHandoff=options.action==='inspect-empty-handoff';
   if(inspectingEmptyHandoff) {
     const emptyRoot=location.pathname==='/'&&!root.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"]');

@@ -606,6 +606,54 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   return {ok:result.ok,url:canonical,tabId,composer:result.record,record:await goalController.get(canonical)};
 }
 
+const retryReadinessRecoveries=new Map();
+async function recoverNoClickRetry(tabId,url) {
+  if(retryReadinessRecoveries.has(url))return retryReadinessRecoveries.get(url);
+  const work=(async()=>{
+    const state=await readRetryState(url);
+    if(!state?.blocked||state.terminal||(state.preparationRecoveries||0)>=2||state.remainingRetries===0||
+        !state.lastPromptKey||!state.blockedAttemptId||await readRetryDraft(url))return state;
+    const journal=await readJournal();
+    if(!journal.ok||journal.storageError)return state;
+    const failures=journal.events.filter(e=>e.sourceUrl===url&&['retry.failed','draft.restore_failed'].includes(e.kind));
+    const failed=failures.at(-1);
+    if(failed?.kind!=='retry.failed'||failed.tabId!==tabId||!failed.operationId||failed.clicked!==false||failed.attemptId!==state.blockedAttemptId||
+        (failed.error||failed.reason)!==state.reason)return state;
+    const events=journal.events.filter(e=>e.operationId===failed.operationId);
+    const planned=events.find(e=>e.kind==='retry.planned');
+    if(planned?.promptKey!==state.lastPromptKey||planned.attemptId!==failed.attemptId||
+        !events.some(e=>e.kind==='retry.finished'&&e.clicked===false)||
+        events.some(e=>e.kind==='send.dispatched'||e.kind==='retry.clicked'||e.kind==='request.started')||
+        events.some(e=>e.kind==='retry.send_intent'||e.kind==='send.authorized')&&!events.some(e=>e.kind==='send.not_clicked')||
+        journal.events.some(e=>(e.tabId===tabId||e.sourceUrl===url)&&e.kind==='request.started'&&e.recordedAt>planned.recordedAt))return state;
+    const tab=await chrome.tabs.get(tabId);
+    if(tab.url!==url||tab.status!=='complete')return state;
+    const goal=await goalController.get(url);
+    if(goal&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||
+        goal.phase!=='blocked'||goal.reason!=='Восстановление запроса завершилось ошибкой'||Date.now()>=goal.deadlineAt))return state;
+    const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url]});
+    const native=checked?.result;
+    if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.hasError||!native.userId||
+        native.promptKey!==planned.promptKey||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
+        !Number.isFinite(native.lastUserSentAtMs))return state;
+    const [error]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
+    if(!error?.result?.ok||error.result.action!=='retry')return state;
+    const [empty]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+      args:[{action:'inspect-empty-retry',text:'',url}]});
+    if(empty?.result?.ok!==true)return state;
+    const [runtime]=await chrome.scripting.executeScript({target:{tabId},world:'ISOLATED',
+      func:()=>({attemptId:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null})});
+    if(runtime?.result?.attemptId!==planned.attemptId||(runtime.result.requestId||null)!==(planned.requestId||null)||
+        (await chrome.tabs.get(tabId)).url!==url)return state;
+    await appendJournal({kind:'retry.preparation_recovered',operationId:failed.operationId,sourceUrl:url,
+      attemptId:planned.attemptId,promptKey:planned.promptKey,requestId:planned.requestId},tab);
+    await goalController.retry({url,tabId,kind:'retry.preparation_recovered',promptKey:planned.promptKey,attemptId:planned.attemptId});
+    return readRetryState(url);
+  })();
+  retryReadinessRecoveries.set(url,work);
+  try{return await work;}finally{if(retryReadinessRecoveries.get(url)===work)retryReadinessRecoveries.delete(url);}
+}
+
 const goalAckProofs=new Map();
 async function readGoalAckProof(tabId,url,op) {
   const cached=goalAckProofs.get(op.id);
@@ -863,7 +911,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type==='CHATGPT_RETRY_STATE') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId>0 || !message.url?.startsWith('https://chatgpt.com/')) return;
-    readRetryState(message.url).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:String(error.message||error)}));
+    const url=retryDraftUrl(message.url);
+    if(!url||retryDraftUrl(sender.tab.url)!==url)return;
+    recoverNoClickRetry(sender.tab.id,url).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:String(error.message||error)}));
     return true;
   }
   if(['CHATGPT_RETRY_DRAFT_GET','CHATGPT_RETRY_DRAFT_CLAIM'].includes(message?.type)) {
@@ -979,7 +1029,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
-    if(['retry.manual_reset','retry.preparation_superseded'].includes(event.kind)) {
+    if(['retry.manual_reset','retry.preparation_superseded','retry.preparation_recovered'].includes(event.kind)) {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
     const prepareEvent=async()=>{

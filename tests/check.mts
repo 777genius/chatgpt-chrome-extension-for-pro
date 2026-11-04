@@ -14,6 +14,7 @@ async function waitFor(predicate:()=>boolean) {
 }
 const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><div aria-hidden="true">decorative</div><div>${text}</div><button>Повторить</button></aside>`;
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
+const domContexts:ReturnType<typeof createContext>[]=[];
 async function domCheck() {
   function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0, recoveryWait: 'none'|'transient'|'permanent'|'hard'|'lost' = 'none') {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
@@ -68,6 +69,7 @@ async function domCheck() {
         if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
         messages.push(message);
       },onMessage:{addListener(){}}}} });
+    domContexts.push(context);
     document.querySelector('button[data-testid="send-button"]')?.addEventListener('click', () => {
       sends.push(editor!.textContent!);
       if (!confirmSend) { setTimeout(() => { now += 11000; }, 50); return; }
@@ -826,7 +828,10 @@ async function statusMigrationCheck() {
   assert.equal(getAllCalls,1);assert.equal(reads.filter(value=>Array.isArray(value)).length,batchReads,'restart sees the durable migration marker and does not rescan');
   console.log('PASS: one atomic bounded journal status migration, exact active legacy notification binding, manual-request proof, existing state protection, live race and immutable history');
 }
-if(process.argv[2]!=='worker') await domCheck();
+if(process.argv[2]!=='worker') {
+ try {await domCheck();}
+ finally {for(const context of domContexts)runInContext('globalThis.__chatgptNotifierDispose?.()',context);}
+}
 if(process.argv[2]!=='retry-deadline'){
 await workerCheck();
 await popupRecoveryCheck();

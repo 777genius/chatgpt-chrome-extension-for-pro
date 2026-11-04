@@ -6,7 +6,7 @@
 <img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
-Version **1.8.34** · Chrome / Chromium **116+** · No build required
+Version **1.8.35** · Chrome / Chromium **116+** · No build required
 
 ## Features
 
@@ -24,7 +24,7 @@ Version **1.8.34** · Chrome / Chromium **116+** · No build required
 | **Title continuity** | Keeps the original chat name with an incrementing suffix: `(1)`, `(2)`, etc. Waits for the first response to finish and rename controls to become ready. |
 | **Reload recovery** | Saves request/response bindings and elapsed-time metadata locally. Reattaches to existing tabs after an extension reload; restores safe draft backups without repeating uncertain sends. Follows a new chat from its initial page to its permanent URL using native first-message evidence. |
 | **Persistent activity log** | Records chat IDs, source/destination URLs, send intents, sent text, confirmations, retry counts, and stop reasons. Preserves recovery copies across extension updates. |
-| **Safe recovery** | Recognizes a completed response after a failed network stream or extension worker restart. Service warnings do not replace response status. Reports visible errors even when retries are blocked. Pre-send handoff readiness/upload timeouts can recover when the new-chat editor is empty, with no later request or send intent. Retries preparation at most three times, checking every five minutes; preserves Goal budgets and Pause/Stop. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
+| **Safe recovery** | Recognizes a completed response after a failed network stream or extension worker restart. Service warnings do not replace response status. Reports visible errors even when retries are blocked. Pre-send handoff readiness/upload timeouts can recover when the new-chat editor is empty, with no later request or send intent. Retries preparation at most three times, checking every five minutes; preserves Goal budgets and Pause/Stop. A positively refused retry click can prepare again at most twice, preserving retry/Goal limits; unknown sends stay blocked. Unconfirmed sends are never blindly repeated. Disposes obsolete extension observers and timers. |
 
 **Automatic retries and handoffs are enabled.** The extension can send continuation commands and create chats. Logs and recovery copies are stored locally and may contain messages and drafts.
 

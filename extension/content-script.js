@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.34';
+  const SCRIPT_VERSION = '1.8.35';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
@@ -17,6 +17,7 @@
   let goalDispatchQueue = Promise.resolve();
   let completionRecoveryTimer = null;
   let handoffReadinessTimer = null;
+  let retryReadinessTimer = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
   const answerWaitSlot = ChatGPTNotifierMemory.createLatestTaskSlot();
@@ -35,6 +36,8 @@
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
     if(handoffReadinessTimer!==null)clearTimeout(handoffReadinessTimer);
     handoffReadinessTimer=null;
+    if(retryReadinessTimer!==null)clearTimeout(retryReadinessTimer);
+    retryReadinessTimer=null;
     manualSendIntent = null;
     listeners.abort();
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
@@ -301,7 +304,7 @@
         const saved=result?.ok&&result.state;
         retryStates.set(path,{failures:(saved?.failures||[]).filter(at=>Date.now()-at<=RETRY_WINDOW_MS),
           blocked:result?.ok!==true||Boolean(saved?.blocked),reason:saved?.reason||(result?.ok?'':'Не удалось восстановить журнал повторов'),
-          lastAttempt:saved?.lastPromptKey?`${saved.lastPromptKey}|${saved.lastAttemptId||''}`:'',
+          lastAttempt:!saved?.preparationRecovered&&saved?.lastPromptKey?`${saved.lastPromptKey}|${saved.lastAttemptId||''}`:'',
           restoredPromptKey:saved?.lastPromptKey||'',terminalHandled:Boolean(saved?.terminal),remainingRetries:saved?.remainingRetries,
           repeatedError:saved?.repeatedError||'',sameErrorCount:saved?.sameErrorCount||0});
       }
@@ -765,6 +768,14 @@
         }
       }
       if(runtimeAvailable())await logRetry('retry.finished',{operationId,clicked,confirmed});
+      if(runtimeAvailable()&&!clicked&&state.blocked&&retryReadinessTimer===null) {
+        retryReadinessTimer=setTimeout(()=>{
+          retryReadinessTimer=null;
+          if(!runtimeAvailable()||location.pathname!==path||retryState()!==state)return;
+          retryStates.delete(path);retryRestoredPath='';visibleErrors.clear();scheduleErrorCheck();
+        },300000);
+      }
+
     }
   }
 
@@ -1189,7 +1200,7 @@
   }
 
   function scheduleHandoffReadiness() {
-    if(handoffReadinessTimer!==null||handoffRecord?.stage!=='failed'||
+    if(!runtimeAvailable()||handoffReadinessTimer!==null||handoffRecord?.stage!=='failed'||
         handoffRecord.reason!=='Не удалось дождаться готовности нового чата'||
         (handoffRecord.preparationRecoveries||0)>=3)return;
     handoffReadinessTimer=setTimeout(()=>{

@@ -99,10 +99,19 @@ function reduceRetrySummary(retryByChat, event) {
       lastPromptKey:'',lastAttemptId:'',remainingRetries:event.remainingRetries,budgetGrantedAt:event.recordedAt,
       ...(retryByChat[chatId]?.manualStartedAt?{manualStartedAt:retryByChat[chatId].manualStartedAt}:{})}};
   }
-  if(event.kind==='retry.planned' && retryByChat[chatId]?.remainingRetries!=null) {
+  if(event.kind==='retry.preparation_recovered') {
+    const state=retryByChat[chatId];
+    if(!state?.blocked||state.terminal||state.blockedAttemptId!==event.attemptId||
+        state.lastPromptKey!==event.promptKey||(state.preparationRecoveries||0)>=2||
+        state.remainingRetries===0)return retryByChat;
+    return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',
+      preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1}};
+  }
+  if(event.kind==='retry.planned' && retryByChat[chatId]) {
     const state=retryByChat[chatId];
     if(state.lastBudgetOperation===event.operationId)return retryByChat;
-    return {...retryByChat,[chatId]:{...state,remainingRetries:Math.max(0,state.remainingRetries-1),lastBudgetOperation:event.operationId}};
+    return {...retryByChat,[chatId]:{...state,preparationRecovered:false,
+      ...(state.remainingRetries!=null?{remainingRetries:Math.max(0,state.remainingRetries-1),lastBudgetOperation:event.operationId}:{})}};
   }
   const isRetryError = event.kind === 'error.detected' && event.action === 'retry';
   const isBlocked = ['retry.blocked', 'retry.failed', 'draft.restore_failed'].includes(event.kind);

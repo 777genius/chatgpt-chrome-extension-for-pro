@@ -155,3 +155,13 @@ assert.equal(uploadedRoot().ok,true,'exact one ready recovery file may finish up
 historyFile.status='uploading';assert.equal(uploadedRoot().ok,false);historyFile.status='ready';
 attachment.append(extra);assert.equal(uploadedRoot().ok,false,'owner file alongside history blocks recovery');
 assert.equal(clicks,beforeRootInspection);
+
+// Recovery may stop a failed stream even while its empty composer is not submit-ready.
+attachment.remove();ready=false;
+const retryEmpty=()=>control({action:'inspect-empty-retry',text:'',url:'https://chatgpt.com/'});
+assert.equal(retryEmpty().ok,true);
+richController.getChatGptPrompt=()=>({prompt:'owner draft',systemHints:[]});assert.equal(retryEmpty().ok,false);
+richController.getChatGptPrompt=()=>({prompt:'',systemHints:['owner hint']});assert.equal(retryEmpty().ok,false);
+richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});
+document.querySelector('[data-composer-body]')!.append(attachment);assert.equal(retryEmpty().ok,false);
+assert.equal(clicks,beforeRootInspection);
