@@ -16,7 +16,7 @@ Keep track of long-running ChatGPT work with completion alerts and guarded conti
 - See waiting, completed, error and unread-result indicators in the tab favicon.
 - Recover from supported ChatGPT errors with bounded automatic continuation attempts.
 - Continue after a conversation-length limit by opening a new chat in the same tab and transferring up to the last three user messages and three assistant answers in order. Large context is attached as a text file. The extension attempts to preserve the reasoning mode and chat-title lineage.
-- Enable Goal next to the reasoning selector, enter your objective in ChatGPT's normal composer and send it yourself. Pause, resume or stop saved goals. Defaults limit a Goal to 10 continuations and 24 hours.
+- Enable Goal next to the reasoning selector, enter your objective in ChatGPT's normal composer and send it yourself. Pause, resume or stop saved goals. Defaults limit a Goal to 30 continuations and 24 hours.
 - Inspect a persistent local activity journal and download a handoff recovery copy when available.
 
 PLEASE READ BEFORE INSTALLING

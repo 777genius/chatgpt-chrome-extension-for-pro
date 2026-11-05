@@ -22,13 +22,11 @@ A different extension version is needed for each update to an already published 
 ## Store assets
 
 - The existing `extension/icons/icon128.png` is the actual 128 x 128 product icon. A copy can be used for the dashboard icon. Preserve the source artwork/attribution; do not invent an OpenAI endorsement.
-- Use the three actual screenshots linked from README, as expressly requested by the owner. Prepared 1280 x 800 PNGs preserve each complete source image with a uniform proportional resize, centered on a neutral canvas. No UI was invented, cropped or rewritten. Originals remain in `work/readme-screenshot-originals/`; generated assets are outside tracked source in the current chat's `outputs/chrome-web-store/screenshots/`.
-- `01-tab-status-1280x800.png` shows the real tab loading/completion/error indicators.
-- `02-goal-controls-1280x800.png` shows real Goal controls with empty objective and criteria. The shown 5-continuation/30-minute values are screenshot settings, not a claim about current defaults.
-- `03-completion-notifications-1280x800.png` shows real completion/error notifications and previews.
-- Each image was inspected before preparation. No visible passwords, authentication tokens, email addresses, personal identities or full chat URLs were found. The first and third images do contain the owner's existing project/task titles, PR numbers and notification excerpts. The owner expressly authorized these README images for the listing; do not describe their content as synthetic or anonymous.
-- `provenance.json` records source URLs, original and prepared dimensions, hashes and placement. Follow the current [Chrome Web Store image requirements](https://developer.chrome.com/docs/webstore/images). These actual screenshots show captured interface states; they are not evidence that the final release passed live browser checks.
-- Use these README screenshots instead of `popup-local-renderer-1280x800.png`. Do not upload the local popup renderer capture for this submission.
+- Use the **current** three screenshots linked in README only after inspecting their source URLs, visible content, dimensions, and disclosure implications. The README image set changed after the previous draft preparation; earlier screenshot exports and `provenance.json` **are not verified assets for this release**.
+- Regenerate approved 1280 x 800 (or 640 x 400) captures with proportional scaling and neutral canvas placement. Do not crop, invent, anonymize by claim, or depict unsupported behavior. Keep original URLs, hashes and sizing in a fresh `provenance.json`.
+- Older draft exports named `01-tab-status-1280x800.png`, `02-goal-controls-1280x800.png`, and `03-completion-notifications-1280x800.png` are historical only. The earlier Goal screenshot's 5-continuation/30-minute settings were screenshot settings, not product defaults; the current default is 30 continuations/24 hours.
+- Prior inspection did not find authentication secrets in the older image set, but did find the owner's project/task titles and notification excerpts. The changed README images must be inspected again and explicitly approved before store use; do not claim they are synthetic or free of private content.
+- Follow the [Chrome Web Store image requirements](https://developer.chrome.com/docs/webstore/images). Current screenshots are interface illustrations, **not evidence that the integrated release passed live ChatGPT E2E**. Do not reuse `popup-local-renderer-1280x800.png` as a substitute without labeling it a local renderer; do not upload that old capture for this submission.
 - Additional promotional artwork is separate from screenshots. No fabricated badges, ratings, user counts, completion guarantees or feature claims.
 
 ## Before submission
