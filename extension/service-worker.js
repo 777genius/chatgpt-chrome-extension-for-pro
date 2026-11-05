@@ -1327,6 +1327,22 @@ async function reconcileAcceptedHandoffGoal(tabId,url) {
     promptKey:native.promptKey,userId:native.userId,response:native.goalResponse||'',
     rawExact:native.goalRawExact===true,nativeMarkerPending:native.goalMarkerPending===true,nativeVerified:true});
 }
+async function reconcileWaitingGoalAnswer(tabId,url) {
+  const goal=await goalController.get(url);
+  if(goal?.phase!=='waiting'||goal.operation||goal.manualPending||goal.manualOverride||
+      goal.stopRequested||goal.pauseRequested||!goal.expectedPromptKey||goal.handoffPending)return;
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const n=checked?.result;
+  if(!n?.ok||n.url!==url||n.promptKey!==goal.expectedPromptKey||n.isLatest!==true||n.isReadOnly!==false||
+      n.generating!==false||n.hasError||n.turnStatus!=='complete'||n.assistantCompleted!==true||
+      n.assistantPhase!=='final_answer'||!n.assistantKey||!n.userId)return;
+  const completionKey=n.promptKey+'|'+n.assistantKey;
+  if(goal.lastCompletionKey===completionKey||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url||
+      JSON.stringify(await goalController.get(url))!==JSON.stringify(goal))return;
+  return goalController.completion({url,tabId,completionKey,promptKey:n.promptKey,userId:n.userId,
+    response:n.goalResponse||'',rawExact:n.goalRawExact===true,nativeMarkerPending:n.goalMarkerPending===true,nativeVerified:true});
+}
+
 async function reconcileGoalPreparation(tabId,url) {
   const key='chatgpt-goal:'+url,goal=(await chrome.storage.local.get(key))[key],op=goal?.operation;
   if(goal?.phase!=='blocked'||!['reserved','intent'].includes(op?.status)||op.tabId!==tabId||goal.pauseRequested||goal.stopRequested)return;
@@ -1523,9 +1539,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         if(typeof reconcileBlockedManualHandoff==='function')await reconcileBlockedManualHandoff(tabId,url);
         const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;
+        const answer=await reconcileWaitingGoalAnswer(tabId,url);if(answer?.ok||answer?.pendingMarker)return answer;
         const goal=await goalController.get(url);
         if(goal?.phase==='blocked'&&goal.operation?.status==='reserved'&&
-            goal.reason==='Отправка отменена: Чат занят или другой механизм восстановления активен'&&
+            ['Отправка отменена: Чат занят или другой механизм восстановления активен',
+              'Отправка отменена: Поле сообщения недоступно'].includes(goal.reason)&&
             !goal.pauseRequested&&!goal.stopRequested&&!goal.manualPending&&!goal.manualOverride&&Date.now()<goal.deadlineAt) {
           const recovered=await reconcileGoalPreparation(tabId,url);
           if(!recovered?.ok)return {ok:true,pending:true,canRetry:true};

@@ -547,7 +547,7 @@
         try {replaceEditorText(editor,'');}catch{}
       }
       void audit('goal.dispatch_failed',{operationId,sourceUrl:url,reason});
-      if(!clicked&&!intentRequested&&String(error?.message)==='Чат занят или другой механизм восстановления активен'&&sameChat())
+      if(!clicked&&!intentRequested&&['Чат занят или другой механизм восстановления активен','Поле сообщения недоступно'].includes(error?.message)&&sameChat())
         void recoverGoalState();
     } finally {
       goalDispatchBusy=false;
