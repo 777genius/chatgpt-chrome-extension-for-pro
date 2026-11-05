@@ -21,3 +21,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Verify Chrome Web Store ZIP (clean checkout)
+        run: |
+          npm run package:store -- --out "$RUNNER_TEMP/store-first.zip"
+          npm run package:store -- --out "$RUNNER_TEMP/store-second.zip"
+          cmp "$RUNNER_TEMP/store-first.zip" "$RUNNER_TEMP/store-second.zip"
+          unzip -t "$RUNNER_TEMP/store-first.zip"
