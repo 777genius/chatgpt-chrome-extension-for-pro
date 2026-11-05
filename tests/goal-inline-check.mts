@@ -326,7 +326,7 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
   await f.instance.refresh();
   if(variant==='same') {
     assert.doesNotMatch(f.panel().textContent!,/Native binding explicitly refused/);
-    assert.match(f.panel().textContent!,/Waiting for full answer/);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+    assert.match(f.panel().textContent!,/Active/);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
   } else assert.match(f.panel().textContent!,variant==='different-intent'?/Native binding explicitly refused/:/Unrelated permission failure/);
   if(variant==='different-intent'){await f.instance.refresh();assert.match(f.panel().textContent!,/Native binding explicitly refused/);}
   assert.equal(f.calls.filter(c=>c.action==='bind').length,bindCount,'late GET does not restart or replay binding');
@@ -506,7 +506,7 @@ console.log('Inline Goal native arming, explicit intent, bounded confirmation, d
  f.respond(()=>{throw Error('Synthetic observation transport unavailable');});await f.advance(300000);
  assert.equal(f.timers(),1);assert.match(f.panel().textContent!,/Confirmation pending/);assert.doesNotMatch(f.panel().textContent!,/timed out|transport unavailable|Turn Goal off/);
  f.respond(null);await f.advance(10*60000);f.bindable();await f.advance(300000);
- assert.equal(f.timers(),0);assert.equal(f.composerState()!.phase,'bound');assert.match(f.panel().textContent!,/Waiting for full answer/);
+ assert.equal(f.timers(),0);assert.equal(f.composerState()!.phase,'bound');assert.match(f.panel().textContent!,/Active/);
  assert.equal(f.calls.filter(c=>c.action==='intent').length,1);assert.equal(f.calls.filter(c=>c.action==='disarm').length,0);
  assert.equal(f.calls.some(c=>c.action==='start'),false);assert.equal(f.state.nativeSends,0);assert.equal(f.state.draftReads,0);f.instance.dispose();
 }
@@ -522,7 +522,7 @@ console.log('Inline Goal native arming, explicit intent, bounded confirmation, d
  const count=f.calls.length;await f.advance(60*60000);assert.equal(f.calls.length,count);
  await f.instance.refresh();assert.equal(f.timers(),0,'GET/reload state cannot restart the original observation window');
  f.bindable();const saved=f.composerState()!;f.setRecord({...goal(),id:saved.id});f.setComposer({...saved,phase:'bound',binding:{url:chat}});
- await f.instance.refresh();assert.match(f.panel().textContent!,/Waiting for full answer/,'background accepted proof resolves expired UI observation');
+ await f.instance.refresh();assert.match(f.panel().textContent!,/Active/,'background accepted proof resolves expired UI observation');
  assert.equal(f.state.nativeSends,0);assert.equal(f.state.draftReads,0);f.instance.dispose();
 }
 {

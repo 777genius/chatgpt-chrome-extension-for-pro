@@ -326,6 +326,8 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
         await goalController.composerFollowup({tabId:details.tabId,requestId:request.requestId,startedAt:request.startedAt,url:event.sourceUrl,submission:ChatGPTGoalRequestProof.read(details)});
       else if(['armed','intent'].includes(pending?.phase))await goalController.composerRequest({tabId:details.tabId,armId:pending.id,
         requestId:request.requestId,startedAt:request.startedAt,url:event.sourceUrl,submission:ChatGPTGoalRequestProof.read(details)});
+      else if(pending?.phase==='bound'&&typeof goalController.composerObserveBlockedRequest==='function')await goalController.composerObserveBlockedRequest({tabId:details.tabId,
+        requestId:request.requestId,startedAt:request.startedAt,url:event.sourceUrl,submission:ChatGPTGoalRequestProof.read(details)});
     }
     const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl);
     if(url)await broadcastChatStatus(await markChatLoading(url,details.timeStamp,receipt));
@@ -794,6 +796,75 @@ async function recoverHandoffSuccessor(tabId,url,userConfirmed=false) {
   if(manuals.length!==sentManuals.length)return {ok:false,reason:'Не все отправленные дополнения доступны'};
   const ok=await supersedeHandoffBySuccessor(tabId,url,{handoffs:[hop]},last,null,j.events,n,userConfirmed,manuals,true);
   return {ok,record:(await chrome.storage.local.get(key))[key],...(!ok?{reason:'Предыдущая передача ожидает подтверждения'}:{})};
+}
+
+// Restore a previously bound Goal only when every manual request after a
+// failed no-click handoff has a durable submitted-body witness and the live
+// latest native turn is the same request. Never replay the handoff itself.
+async function reconcileBlockedManualHandoff(tabId,url) {
+  const target=ChatGPTGoalPolicy.canonical(url),composer=await goalController.composerGet({tabId});
+  const source=ChatGPTGoalPolicy.canonical(composer?.binding?.url);
+  if(!target||!source||source===target||composer?.phase!=='bound'||composer.blockedFollowupOverflow)return {ok:false};
+  const goalKey='chatgpt-goal:'+source,old=(await chrome.storage.local.get(goalKey))[goalKey];
+  if(!old||old.id!==composer.id||old.phase!=='blocked'||old.handoffTabId!==tabId||!old.handoffId||
+      old.reason!=='Передача Goal остановлена: Не удалось дождаться готовности нового чата'||
+      old.operation||old.manualPending||old.stopRequested||old.pauseRequested||old.preHandoffPhase==='paused'||Date.now()>=old.deadlineAt)return {ok:false};
+  const journal=await readJournal();
+  if(!journal.ok||journal.storageError||journal.events.length!==journal.meta?.sequence||
+      journal.events.some((e,i)=>e.sequence!==i+1))return {ok:false};
+  const path=ChatGPTGoalLineage.traceManualSuccessor(journal.events,tabId,source,old.handoffId);
+  if(!path||path.targetUrl!==target||path.handoffs.length>19)return {ok:false};
+  const sourceContexts=[{url:source,id:old.handoffId},...path.handoffs.map(h=>({url:h.sourceUrl,id:h.id}))].map(h=>{
+    const event=journal.events.find(e=>e.kind==='handoff.navigating'&&e.tabId===tabId&&e.operationId===h.id&&e.sourceUrl===h.url);
+    return {url:h.url,text:event?.text||''};
+  });
+  if(sourceContexts.some(c=>!c.text||c.text.length>200000))return {ok:false};
+  const first=journal.events.find(e=>e.kind==='request.started'&&e.tabId===tabId&&!e.operationId&&
+    e.requestId===path.manualRequestId&&e.eventAt===path.manualStartedAt);
+  if(!first)return {ok:false};
+  const rows=journal.events.filter(e=>e.tabId===tabId&&e.sequence>=first.sequence),manual=rows.filter(e=>
+    e.kind==='request.started'&&!e.operationId&&[path.firstTargetUrl,...path.handoffs.map(h=>h.targetUrl),'https://chatgpt.com/'].includes(e.sourceUrl));
+  if(rows.some(e=>e.kind==='request.started'&&!e.operationId&&!manual.includes(e))||
+      manual.some(e=>e.sourceUrl==='https://chatgpt.com/'&&e.requestId!==path.manualRequestId))return {ok:false};
+  const witnesses=composer.blockedFollowups||[];
+  if(!manual.length||manual.length>100||manual.some(e=>witnesses.filter(w=>w.requestId===e.requestId&&w.startedAt===e.eventAt&&w.url===e.sourceUrl).length!==1))return {ok:false};
+  const last=manual.at(-1),witness=witnesses.find(w=>w.requestId===last.requestId&&w.startedAt===last.eventAt);
+  if(!(last.sourceUrl===target||last.requestId===path.manualRequestId&&path.firstTargetUrl===target)||
+      rows.some(e=>e.kind==='request.started'&&e.sequence>last.sequence))return {ok:false};
+  const probe=async()=>(await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[target,true]}))[0]?.result;
+  const native=await probe();
+  if(!native?.ok||native.url!==target||native.isLatest!==true||native.isReadOnly!==false||native.userId!==witness.userId||
+      native.userText!==witness.userText||!Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-last.eventAt)>10000||!native.promptKey)return {ok:false};
+  // Prior submissions must also occur in the actual saved native history.
+  // Otherwise retain the blocked Goal and its copies for explicit recovery.
+  const currentSupplements=[];
+  for(const e of manual.slice(0,-1)) {
+    const w=witnesses.find(x=>x.requestId===e.requestId&&x.startedAt===e.eventAt);
+    const chat=e.requestId===path.manualRequestId?path.firstTargetUrl:e.sourceUrl;
+    if(chat===target) {
+      const history=(await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[target,true,null,e.eventAt]}))[0]?.result;
+      if(!history?.ok||history.userId!==w.userId||history.userText!==w.userText||!history.promptKey||
+          !Number.isFinite(history.userSentAtMs)||Math.abs(history.userSentAtMs-e.eventAt)>10000)return {ok:false};
+      currentSupplements.push({url:target,userId:history.userId,userText:history.userText,userSentAtMs:history.userSentAtMs,
+        promptKey:history.promptKey,requestId:e.requestId,startedAt:e.eventAt});
+    } else if(!sourceContexts.some(c=>c.url===chat&&c.text.includes(w.userText)))return {ok:false};
+  }
+  const fresh=await probe();
+  if(!fresh?.ok||fresh.url!==target||fresh.isLatest!==true||fresh.isReadOnly!==false||fresh.userId!==native.userId||
+      fresh.userText!==native.userText||fresh.userSentAtMs!==native.userSentAtMs||fresh.promptKey!==native.promptKey||
+      ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==target)return {ok:false};
+  const finalJournal=await readJournal();
+  if(!finalJournal.ok||finalJournal.storageError||finalJournal.meta?.sequence!==journal.meta.sequence||
+      finalJournal.events.length!==journal.events.length)return {ok:false};
+  const latest={url:target,userId:native.userId,userText:native.userText,userSentAtMs:native.userSentAtMs,
+    promptKey:native.promptKey,requestId:last.requestId,startedAt:last.eventAt};
+  const result=await goalController.restoreBoundHandoff({tabId,sourceUrl:source,targetUrl:target,handoffId:old.handoffId,
+    expectedGoal:old,expectedComposer:composer,sourceContexts,supplements:[...currentSupplements,latest],latest,nativeVerified:true});
+  if(result.ok&&fresh.turnStatus==='complete'&&fresh.generating===false&&!fresh.hasError&&fresh.assistantCompleted===true&&
+      fresh.assistantPhase==='final_answer'&&fresh.assistantKey)
+    await goalController.completion({url:target,tabId,completionKey:fresh.promptKey+'|'+fresh.assistantKey,promptKey:fresh.promptKey,
+      userId:fresh.userId,response:fresh.goalResponse||'',rawExact:fresh.goalRawExact===true,nativeMarkerPending:fresh.goalMarkerPending===true,nativeVerified:true});
+  return result;
 }
 
 async function bindNativeComposerGoal(tabId,currentUrl,armId) {
@@ -1400,6 +1471,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       if(result?.ok===false)return result;
       const url=ChatGPTGoalPolicy.canonical(live);
+      if(message.action==='get'&&url&&typeof reconcileBlockedManualHandoff==='function')
+        await reconcileBlockedManualHandoff(tabId,url);
       if(message.action==='get'&&url&&typeof reconcileNativeGoalAcknowledgement==='function')
         await reconcileNativeGoalAcknowledgement(tabId,url);
       if(message.action==='get'&&url&&typeof reconcileAcceptedHandoffGoal==='function')
@@ -1448,7 +1521,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             canRetry:current?.phase==='intent'&&Boolean(current.request?.submission)&&
               Date.now()<current.request.startedAt+current.config.maxMinutes*60000};
         }
+        if(typeof reconcileBlockedManualHandoff==='function')await reconcileBlockedManualHandoff(tabId,url);
         const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;
+        const goal=await goalController.get(url);
+        if(goal?.phase==='blocked'&&goal.operation?.status==='reserved'&&
+            goal.reason==='Отправка отменена: Чат занят или другой механизм восстановления активен'&&
+            !goal.pauseRequested&&!goal.stopRequested&&!goal.manualPending&&!goal.manualOverride&&Date.now()<goal.deadlineAt) {
+          const recovered=await reconcileGoalPreparation(tabId,url);
+          if(!recovered?.ok)return {ok:true,pending:true,canRetry:true};
+          return {ok:true};
+        }
         await bindNativeManualSupplement(tabId,url);await reconcileGoalPromptBinding(tabId,url);return goalController.recoverTab({id:tabId,url});
       }
       if(message.type==='CHATGPT_GOAL_CONTEXT'){await bindNativeManualSupplement(tabId,url);return {ok:true,text:await goalController.context(url)};}

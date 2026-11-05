@@ -740,3 +740,60 @@ for(const scenario of ['wrong-id','wrong-tab','operation','manual','pause','stop
  assert.equal(result.ok,false,scenario);assert.deepEqual(state(env),before,scenario);assert.equal(env.messages.length,1);
 }
 console.log('No-navigation handoff Goal recovery: explicit reason allowlist and same operation/tab/manual/Pause/Stop/deadline fences passed');
+
+// A failed no-click handoff followed by a verified manual successor must carry
+// the existing Goal rather than starting a fresh Goal or resending history.
+for(const scenario of ['success','stop','pause','expired','changed','occupied','missing-proof']) {
+ const env=fixture();await begin(env);await confirm(env);
+ const id=state(env).id,handoffId='manual-successor';
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId,tabId:7});
+ await env.store.handoffFailed({sourceUrl:URL_A,handoffId,tabId:7,reason:'Не удалось дождаться готовности нового чата'});
+ env.data['chatgpt-goal-composer:7']={id,phase:'bound',binding:{url:URL_A}};
+ const old=structuredClone(state(env)),composer=structuredClone(env.data['chatgpt-goal-composer:7']);
+ const latest={userId:'native-user',userText:'Manual follow-up',requestId:'native-request',startedAt:env.time+10,
+  userSentAtMs:env.time+10,promptKey:'/c/goal-fixture-b|manual',url:URL_B};
+ if(scenario==='stop')state(env).stopRequested=true;
+ if(scenario==='pause')state(env).pauseRequested=true;
+ if(scenario==='expired')env.time=old.deadlineAt;
+ if(scenario==='changed')state(env).reason='Changed';
+ if(scenario==='occupied')env.data[key(URL_B)]={id:'another',phase:'waiting'};
+ const args={tabId:7,sourceUrl:URL_A,targetUrl:URL_B,handoffId,expectedGoal:scenario==='stop'||scenario==='pause'||scenario==='changed'?structuredClone(state(env)):old,
+  expectedComposer:composer,sourceContexts:[{url:URL_A,text:'Preserved history'}],supplements:[latest],latest,nativeVerified:scenario!=='missing-proof'};
+ if(scenario!=='success'){
+  await assert.rejects(()=>env.store.restoreBoundHandoff(args));assert.equal(env.messages.length,1,scenario);continue;
+ }
+ await env.store.restoreBoundHandoff(args);const restored=state(env,URL_B);
+ for(const field of ['id','goal','rules','startedAt','deadlineAt','maxContinuations','continuations'])assert.deepEqual(restored[field],old[field],field);
+ assert.equal(restored.supplements.at(-1).userText,'Manual follow-up');assert.equal(state(env).phase,'moved');
+ assert.equal(env.data['chatgpt-goal-composer:7'].binding.url,URL_B);assert.equal(env.messages.length,1,'no original-message replay');
+ await assert.rejects(()=>env.store.restoreBoundHandoff(args));
+ env.tabs[7]=URL_B;env.time+=20;
+ const completion={url:URL_B,tabId:7,completionKey:latest.promptKey+'|answer',promptKey:latest.promptKey,
+  userId:latest.userId,response:'Work remains',nativeVerified:true,rawExact:false};
+ await env.store.completion(completion);
+ assert.equal(env.messages.length,2,'the completed successor answer starts one guarded continuation');
+ assert.match(env.messages.at(-1)!.message.text,/Manual follow-up/);
+ await env.store.completion(completion);assert.equal(env.messages.length,2,'duplicate completion cannot dispatch twice');
+}
+console.log('Bound Goal recovery: original limits, manual additions and duplicate/stop/pause/expiry fences passed.');
+
+for(const scenario of ['success','duplicate','stopped','wrong-tab','expired','wrong-reason','no-body']) {
+ const env=fixture();await begin(env);await confirm(env);
+ const id=state(env).id,handoffId='blocked-observation';
+ await env.store.handoffBegin({sourceUrl:URL_A,handoffId,tabId:7});
+ await env.store.handoffFailed({sourceUrl:URL_A,handoffId,tabId:7,reason:'Не удалось дождаться готовности нового чата'});
+ env.data['chatgpt-goal-composer:7']={id,phase:'bound',binding:{url:URL_A}};
+ if(scenario==='stopped')state(env).stopRequested=true;
+ if(scenario==='wrong-reason')state(env).reason='Different error';
+ if(scenario==='expired')env.time=state(env).deadlineAt;
+ const input={tabId:scenario==='wrong-tab'?8:7,requestId:'observed-request',startedAt:env.time,url:'https://chatgpt.com/',
+  submission:scenario==='no-body'?null:{userId:'user-123',userText:'Sent by the user'}};
+ const result=await env.store.composerObserveBlockedRequest(input);
+ if(scenario==='success'||scenario==='duplicate') {
+  assert.equal(result.ok,true);if(scenario==='duplicate')await env.store.composerObserveBlockedRequest(input);
+  assert.equal(env.data['chatgpt-goal-composer:7'].blockedFollowups.length,1);
+ } else assert.equal(result.ok,false,scenario);
+ assert.equal(state(env).phase,'blocked','observation cannot authorize the Goal');
+ assert.equal(env.messages.length,1,'observation cannot send a message');
+}
+console.log('Blocked handoff submitted-message witness: durable, idempotent, no authority, stop/expiry fences passed.');

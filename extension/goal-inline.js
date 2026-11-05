@@ -31,6 +31,42 @@
     const current=()=>policy.pageUrl(getUrl());
     const armed=()=>['armed','intent'].includes(composer?.phase);
     const active=()=>!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
+    const banner=node('div',{class:'cggi-banner','data-chatgpt-goal-inline':'banner'});
+    const bannerStatus=node('strong'),bannerText=node('span',{class:'cggi-summary'}),bannerTime=node('span');
+    banner.append(bannerStatus,bannerText,bannerTime);
+    const icons={
+      stop:'<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>',
+      pause:'<circle cx="12" cy="12" r="9"/><path d="M10 9v6m4-6v6"/>',
+      resume:'<circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/>',
+      expand:'<path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/>'
+    };
+    const bannerActions={};
+    for(const [action,label] of [['stop','Stop Goal'],['pause','Pause Goal'],['resume','Resume Goal'],['expand','Goal details']]) {
+      const button=node('button',{type:'button','aria-label':label,title:label});
+      button.innerHTML='<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+icons[action]+'</svg>';
+      bannerActions[action]=button;
+      banner.append(button);
+      listen(button,'click',event=>{if(consent(event,button))action==='expand'?show(!open):void act(action);});
+    }
+    banner.hidden=true;
+    let elapsedId=null,elapsedBase=0,elapsedSince=null,pageOpen=true;
+    function updateElapsed() {
+      const id=record?.id||null, now=Date.now();
+      if(elapsedId&&elapsedSince!==null) {
+        elapsedBase+=Math.max(0,now-elapsedSince);
+        try{win.localStorage.setItem('cggi-elapsed:'+elapsedId,String(elapsedBase));}catch{}
+      }
+      if(id!==elapsedId) {
+        elapsedId=id;elapsedBase=0;
+        try{if(id)elapsedBase=Math.max(0,Number(win.localStorage.getItem('cggi-elapsed:'+id))||0);}catch{}
+      }
+      elapsedSince=pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
+      const seconds=Math.floor(elapsedBase/1000),minutes=Math.floor(seconds/60);
+      bannerTime.textContent=id?(minutes>=60?Math.floor(minutes/60)+'h '+minutes%60+'m':minutes?minutes+'m':seconds+'s'):'';
+    }
+    const elapsedTimer=win.setInterval?.(updateElapsed,1000);
+    listen(win,'pagehide',()=>{pageOpen=false;updateElapsed();});
+    listen(win,'pageshow',()=>{pageOpen=true;updateElapsed();});
     const controls=node('span',{'data-chatgpt-goal-inline':'controls',class:'cggi-controls'});
     const toggle=node('button',{type:'button',role:'switch','aria-label':'Goal','aria-checked':'false',class:'cggi-switch'},'Goal');
     const track=node('span',{'aria-hidden':'true',class:'cggi-track'});
@@ -77,6 +113,12 @@
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
     style.textContent=`
+.cggi-banner{box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:rgba(127,127,127,.12);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.cggi-banner[hidden],.cggi-banner button[hidden]{display:none}
+.cggi-banner button{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:none;color:inherit;opacity:.65;cursor:pointer}
+.cggi-banner button:hover{background:rgba(127,127,127,.17);opacity:1}.cggi-banner button:disabled{opacity:.3;cursor:default}
+.cggi-banner:not([hidden])+form,.cggi-banner:not([hidden])+form [data-composer-body],.cggi-banner:not([hidden])+form [data-composer-surface],.cggi-banner:not([hidden])+form [data-composer-layout],.cggi-banner:not([hidden])+[data-composer-body]{border-top-left-radius:0!important;border-top-right-radius:0!important}
+.cggi-banner strong,.cggi-banner span:nth-child(3){white-space:nowrap;font-size:12px}.cggi-banner .cggi-summary{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.78}
 .cggi-controls{display:inline-flex;align-items:center;gap:1px;flex-shrink:0;margin-inline-start:6px;color:inherit;font:500 12px/1.2 system-ui,sans-serif}
 .cggi-controls button{box-sizing:border-box;color:inherit;font:inherit;cursor:pointer;background:transparent;border:0}
 .cggi-switch{display:inline-flex;align-items:center;gap:6px;min-height:30px;border-radius:16px!important;padding:4px 6px!important}
@@ -97,9 +139,15 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       hydrated=null;
     }
     resetFields();
-    const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Waiting for full answer',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
+    const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Active',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
     function render() {
       if(!valid())return;
+      const goalText=record?.goal||(composer?.phase==='intent'?composer.intent?.text:'');
+      banner.hidden=!goalText||record?.phase==='moved';
+      bannerStatus.textContent='◎ '+(record?.phase==='blocked'&&record.operation?.status==='reserved'?'Send paused':record?(phases[record.phase]||'Goal'):'Goal pending');
+      bannerText.textContent=goalText||'';
+      banner.title=goalText||'';
+      updateElapsed();
       const on=(active()&&!record.stopRequested)||armed();
       toggle.setAttribute('aria-checked',String(on));
       toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&(!!record?.operation||record?.phase==='blocked'));
@@ -118,6 +166,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       buttons.pause.disabled=busy||loading||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
       buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
+      for(const action of ['stop','pause','resume']) {
+        bannerActions[action].hidden=buttons[action].hidden;
+        bannerActions[action].disabled=buttons[action].disabled;
+      }
       objective.hidden=!record?.goal&&!(restorable&&composer.intent?.text);
       objective.textContent=restorable?'Saved objective: '+(composer.intent?.text||''):record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
@@ -214,7 +266,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function attach() {
       // Streaming mutations do not rescan the conversation while our anchor lives.
       if(anchor?.isConnected&&editor?.isConnected&&controls.isConnected&&controls.previousElementSibling===layoutItem&&visible(anchor)&&visible(editor))return;
-      controls.remove();anchor=null;editor=null;layoutItem=null;
+      controls.remove();banner.remove();anchor=null;editor=null;layoutItem=null;
       const page=document.querySelector('[data-app-shell-active-page="true"]')||document;
       for(const candidate of page.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,[data-composer-markdown][contenteditable="true"]')) {
         if(!visible(candidate))continue;
@@ -223,7 +275,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(!reasoning||!visible(reasoning))continue;
         editor=candidate;anchor=reasoning;
         layoutItem=inlineItem(reasoning,composer);
-        layoutItem.after(controls);break;
+        layoutItem.after(controls);composer.before?.(banner);break;
       }
       if(open)position();
     }
@@ -448,7 +500,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       });
     }
     listen(document,'keydown',event=>{if(open&&event.key==='Escape'){event.preventDefault();event.stopPropagation();show(false);}});
-    listen(document,'pointerdown',event=>{if(open&&!panel.contains(event.target)&&!controls.contains(event.target)){open=false;panel.hidden=true;render();}});
+    listen(document,'pointerdown',event=>{if(open&&!panel.contains(event.target)&&!controls.contains(event.target)&&!banner.contains(event.target)){open=false;panel.hidden=true;render();}});
     listen(win,'resize',position);
     listen(win,'scroll',position,true);
     listen(win,'popstate',()=>void refresh());
@@ -461,12 +513,14 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     void refresh();
     function dispose() {
       if(disposed)return;
+      updateElapsed();elapsedSince=null;
+      if(elapsedTimer!=null)win.clearInterval?.(elapsedTimer);
       disposed=true;epoch++;sequence++;
       observer?.disconnect();
       stopBinding();
       if(typeof unsubscribe==='function')unsubscribe();
       for(const cleanup of cleanups)cleanup();
-      controls.remove();panel.remove();style.remove();
+      controls.remove();banner.remove();panel.remove();style.remove();
       if(document.documentElement?.getAttribute(ownerAttribute)===ownerToken)document.documentElement.removeAttribute(ownerAttribute);
     }
     return Object.freeze({refresh,dispose,manualIntent});

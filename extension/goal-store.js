@@ -49,6 +49,31 @@
       return (await storage.get(name))[name]||null;
     }
     async function composerGet({tabId}) {return serialize(()=>readComposer(tabId));}
+    // Observe a user submission while a bound Goal is stranded at a failed
+    // handoff. This is evidence only; it grants no dispatch or restoration.
+    async function composerObserveBlockedRequest({tabId,requestId,startedAt,url,submission}) {
+      requireTab(tabId);const page=policy.pageUrl(url);
+      if(!page||typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
+          typeof submission?.userId!=='string'||!submission.userId||submission.userId.length>256||
+          typeof submission?.userText!=='string'||!submission.userText.trim()||submission.userText.length>10000)return {ok:false};
+      return serialize(async()=>{
+        const composer=await readComposer(tabId),source=canonical(composer?.binding?.url);
+        if(composer?.phase!=='bound'||!source)return {ok:false};
+        const goal=await read(source);
+        if(!goal||goal.id!==composer.id||goal.phase!=='blocked'||goal.handoffTabId!==tabId||
+            goal.reason!=='Передача Goal остановлена: Не удалось дождаться готовности нового чата'||
+            goal.operation||goal.manualPending||goal.stopRequested||goal.pauseRequested||
+            goal.preHandoffPhase==='paused'||startedAt<goal.startedAt||startedAt>=goal.deadlineAt)return {ok:false};
+        const witness={requestId,startedAt,url:page,userId:submission.userId,userText:submission.userText};
+        const previous=composer.blockedFollowups||[],same=previous.find(x=>x.requestId===requestId);
+        if(same)return {ok:JSON.stringify(same)===JSON.stringify(witness)};
+        if(composer.blockedFollowupOverflow||previous.length>=100){
+          await storage.set({[composerKey(tabId)]:{...composer,blockedFollowupOverflow:true}});return {ok:false};
+        }
+        await storage.set({[composerKey(tabId)]:{...composer,blockedFollowups:[...previous,witness]}});
+        return {ok:true};
+      });
+    }
     async function composerArm({tabId,url,rules,maxContinuations,maxMinutes}) {
       requireTab(tabId);
       const target=requirePage(url);
@@ -60,8 +85,10 @@
         if(previous?.phase==='bound') {
           const boundUrl=previous.binding?.url;
           const bound=boundUrl?await read(boundUrl):null;
+          const expiredElsewhere=bound?.url!==target&&bound?.phase==='blocked'&&
+            Number.isFinite(bound.deadlineAt)&&now()>=bound.deadlineAt;
           if(bound?.id!==previous.id||bound.operation||
-              !['completed','stopped','moved'].includes(bound.phase))
+              (!expiredElsewhere&&!['completed','stopped','moved'].includes(bound.phase)))
             throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
         } else if(previous?.phase==='intent') {
           if(!canonical(previous.url)||previous.url===target)
@@ -317,6 +344,47 @@
         await storage.set({[key(target)]:next,[composerKey(tabId)]:{...current,phase:'bound',binding},
           [composerBindingKey(armId)]:{...binding,tabId}});
         return {ok:true,record:view(next),composer:{...current,phase:'bound',binding}};
+      });
+    }
+    // The worker must prove the full route, all user additions, and the latest
+    // native turn before invoking this transition. This never replays a send.
+    async function restoreBoundHandoff({tabId,sourceUrl,targetUrl,handoffId,expectedGoal,expectedComposer,
+        sourceContexts,supplements,latest,nativeVerified}) {
+      requireTab(tabId);const source=requireUrl(sourceUrl),target=requireUrl(targetUrl);
+      if(source===target||nativeVerified!==true||!handoffId||!latest?.userId||!latest?.requestId||
+          !Number.isFinite(latest.startedAt)||!Number.isFinite(latest.userSentAtMs)||
+          Math.abs(latest.startedAt-latest.userSentAtMs)>10000||
+          typeof latest.userText!=='string'||!latest.userText.trim()||
+          typeof latest.promptKey!=='string'||!latest.promptKey.startsWith(new URL(target).pathname+'|')||
+          !Array.isArray(sourceContexts)||!sourceContexts.length||sourceContexts.length>20||
+          sourceContexts.some(x=>!canonical(x.url)||typeof x.text!=='string'||!x.text||x.text.length>200000)||
+          !Array.isArray(supplements)||supplements.length>100)throw Error('Доказательства восстановления Goal неполны');
+      return serialize(async()=>{
+        const old=await read(source),composer=await readComposer(tabId),existing=await read(target);
+        if(JSON.stringify(old)!==JSON.stringify(expectedGoal)||JSON.stringify(composer)!==JSON.stringify(expectedComposer)||
+            !old||old.id!==composer?.id||composer.phase!=='bound'||composer.binding?.url!==source||
+            old.phase!=='blocked'||old.handoffId!==handoffId||old.handoffTabId!==tabId||
+            old.reason!=='Передача Goal остановлена: Не удалось дождаться готовности нового чата'||
+            old.operation||old.manualPending||old.pauseRequested||old.stopRequested||old.preHandoffPhase==='paused'||
+            now()>=old.deadlineAt||existing)throw Error('Состояние Goal изменилось или восстановление не разрешено');
+        const known=new Set((old.supplements||[]).map(s=>s.requestId)),additions=[];
+        for(const item of supplements) {
+          if(!canonical(item.url)||typeof item.userId!=='string'||!item.userId||typeof item.requestId!=='string'||!item.requestId||
+              !Number.isFinite(item.startedAt)||!Number.isFinite(item.userSentAtMs)||Math.abs(item.startedAt-item.userSentAtMs)>10000||
+              typeof item.userText!=='string'||!item.userText.trim()||item.userText.length>10000||known.has(item.requestId))
+            throw Error('Дополнение к Goal не подтверждено');
+          known.add(item.requestId);additions.push({...item,text:item.userText,tabId,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
+        }
+        const moved={...old,phase:'moved',reason:'Цель перенесена в '+target};
+        const next={...old,url:target,phase:'waiting',reason:'',operation:null,pendingCompletion:null,
+          expectedPromptKey:latest.promptKey,manualStartedAt:latest.startedAt,
+          supplements:[...(old.supplements||[]),...additions],sourceContexts:[...(old.sourceContexts||[]),...sourceContexts],
+          handoffPending:false,handoffId:null,manualSupplementBinding:latest};
+        const binding={...composer.binding,url:target,restored:true,anchorUserId:latest.userId};
+        await event('lineage_restored',next,tabId,{sourceUrl:source,targetUrl:target,handoffId,requestId:latest.requestId});
+        await storage.set({[key(source)]:moved,[key(target)]:next,[composerKey(tabId)]:{...composer,binding},
+          [composerBindingKey(composer.id)]:{...binding,tabId}});
+        return {ok:true,record:view(next)};
       });
     }
     function view(record) {
@@ -924,7 +992,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
