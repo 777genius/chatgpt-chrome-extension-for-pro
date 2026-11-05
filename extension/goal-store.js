@@ -124,7 +124,7 @@
         return {ok:true,record:null,...(stopped?{goal:view(stopped)}:{})};
       });
     }
-    async function composerIntent({tabId,url,armId,eventAt,text,baselineKey}) {
+    async function composerIntent({tabId,url,armId,eventAt,text,baselineKey,linkTargets}) {
       requireTab(tabId);
       const target=requirePage(url);
       return serialize(async()=>{
@@ -133,14 +133,17 @@
           throw Error('Разрешение ручной отправки Goal изменилось');
         if(['intent','bound'].includes(current.phase)) {
           const prior=current.intent;
-          if(prior?.eventAt===eventAt&&prior.text===text&&prior.baselineKey===baselineKey)
+          if(prior?.eventAt===eventAt&&prior.text===text&&prior.baselineKey===baselineKey&&
+              JSON.stringify(prior.linkTargets??null)===JSON.stringify(linkTargets??null))
             return {ok:true,record:current};
           throw Error('Другая ручная отправка Goal уже ожидает подтверждения');
         }
         if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<current.armedAt||
             eventAt>now()||now()-eventAt>10000)
           throw Error('Ручная отправка Goal не относится к свежему включению');
-        if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string')
+        if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string'||
+            linkTargets!==undefined&&(!Array.isArray(linkTargets)||linkTargets.length>32||
+              linkTargets.some(x=>typeof x!=='string'||!/^https?:\/\//.test(x)||x.length>2048)))
           throw Error('Ручная цель должна содержать точный текст до 10000 символов');
         if(baselineKey&&(target==='https://chatgpt.com/'||!baselineKey.startsWith(new URL(target).pathname+'|')))
           throw Error('Исходное сообщение Goal относится к другому чату');
@@ -148,7 +151,8 @@
         const attachCandidate=!current.requestCandidateAmbiguous&&candidate&&candidate.url===target&&
           candidate.startedAt>=eventAt&&candidate.startedAt-eventAt<=10000&&
           policy.submittedTextMatches(text,candidate.submission?.userText,null);
-        const record={...current,phase:'intent',intent:{text,eventAt,baselineKey},
+        const record={...current,phase:'intent',intent:{text,eventAt,baselineKey,
+          ...(linkTargets!==undefined?{linkTargets}: {})},
           ...(attachCandidate?{request:candidate}:{})};
         await storage.set({[composerKey(tabId)]:record});
         return {ok:true,record};
@@ -236,7 +240,7 @@
             !Number.isFinite(startedAt)||startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
             !Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000||
             typeof userText!=='string'||!userText.trim()||userText.length>10000||
-            !policy.submittedTextMatches(intent.text,userText,userVisibleText)||
+            !policy.submittedTextMatches(intent.text,userText,userVisibleText,intent.linkTargets)||
             typeof promptKey!=='string'||promptKey===intent.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|'))
           throw Error('Нативная ручная отправка Goal не подтверждена точным запросом и текстом');
@@ -777,7 +781,7 @@
       return Array.isArray(record?.manualPendingQueue)?record.manualPendingQueue:
         record?.manualPending?[record.manualPending]:[];
     }
-    async function manual({url,tabId,startedAt,requestId,eventAt,text,baselineKey}) {
+    async function manual({url,tabId,startedAt,requestId,eventAt,text,baselineKey,linkTargets}) {
       const target=canonical(url);
       if(!target)return {ok:false};
       return serialize(async()=>{
@@ -787,17 +791,21 @@
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))return {ok:false};
         const supplement=typeof requestId==='string'&&requestId&&Number.isFinite(startedAt)&&Number.isFinite(eventAt)&&
           startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
-          typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'));
+          typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'))&&
+          (linkTargets===undefined||Array.isArray(linkTargets)&&linkTargets.length<=32&&
+            linkTargets.every(x=>typeof x==='string'&&/^https?:\/\//.test(x)&&x.length<=2048));
         if(supplement) {
           const prior=pendingManuals(record).find(item=>item.requestId===requestId)||record.manualSupplementBinding;
           if(prior?.requestId===requestId) {
-            if(prior.startedAt!==startedAt||prior.text!==text||prior.eventAt!==eventAt||prior.baselineKey!==baselineKey)
+            if(prior.startedAt!==startedAt||prior.text!==text||prior.eventAt!==eventAt||prior.baselineKey!==baselineKey||
+                JSON.stringify(prior.linkTargets??null)!==JSON.stringify(linkTargets??null))
               throw Error('Ручное дополнение уже связано с другим текстом');
             return {ok:true,record:view(record)};
           }
           if(startedAt<=(record.manualStartedAt||0))return {ok:false};
           const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
-          const pending=[...pendingManuals(record),{tabId,requestId,startedAt,eventAt,text,baselineKey}];
+          const pending=[...pendingManuals(record),{tabId,requestId,startedAt,eventAt,text,baselineKey,
+            ...(linkTargets!==undefined?{linkTargets}: {})}];
           const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,
             manualPending:pending[0],manualPendingQueue:pending,manualOverride:false,markerPending:null,
             pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
@@ -828,7 +836,7 @@
         if(!['preparing','sending','clicked','waiting','recovering','paused','blocked'].includes(old.phase)||
             pending.tabId!==tabId||pending.requestId!==requestId||pending.startedAt!==startedAt||
             nativeVerified!==true||typeof userId!=='string'||!userId||typeof userText!=='string'||!userText.trim()||userText.length>10000||
-            !policy.submittedTextMatches(pending.text,userText,userVisibleText)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
+            !policy.submittedTextMatches(pending.text,userText,userVisibleText,pending.linkTargets)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
           return {ok:false};
         if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};

@@ -54,10 +54,21 @@
       'Продолжений подтверждено: '+record.continuations+' из '+record.maxContinuations+'.',
       'Не считай перенос чата выполнением цели. '+CONTINUATION].join('\n\n');
   }
-  function submittedTextMatches(intent,nativeText,visibleText) {
+  function submittedTextMatches(intent,nativeText,visibleText,linkTargets) {
     if(typeof intent!=='string'||typeof nativeText!=='string')return false;
-    return nativeText===intent||visibleText===intent||typeof visibleText==='string'&&
-      visibleText.replace(/\s+/g,' ').trim()===intent.replace(/\s+/g,' ').trim();
+    // Literal Markdown typed by the user needs no transformed-link fallback.
+    if(nativeText===intent)return true;
+    if(typeof visibleText!=='string'||visibleText!==intent&&
+        visibleText.replace(/\s+/g,' ').trim()!==intent.replace(/\s+/g,' ').trim())return false;
+    // Old pending records lack a link snapshot; keep their legacy behavior.
+    if(linkTargets===undefined)return true;
+    if(!Array.isArray(linkTargets)||linkTargets.length>32||linkTargets.some(x=>typeof x!=='string'||!/^https?:\/\//.test(x)||x.length>2048))return false;
+    // A trusted user click captured the editor's link targets before submit.
+    // A matching visible label cannot approve a different serialized URL.
+    const pattern=/\[[^\]\n]{1,500}\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
+    const links=[...nativeText.matchAll(pattern)].map(m=>m[1].replace(/\\([()\\])/g,'$1'));
+    if(links.length!==linkTargets.length||nativeText.replace(pattern,'').includes(']('))return false;
+    return links.every((target,index)=>target===linkTargets[index]);
   }
   function exactMarker(response,rawExact,nativeVerified) {
     return nativeVerified===true&&rawExact===true&&response===MARKER;

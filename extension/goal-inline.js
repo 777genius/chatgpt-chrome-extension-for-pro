@@ -450,7 +450,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         }
       }
     }
-    async function manualIntent({text,baselineKey,eventAt}) {
+    async function manualIntent({text,baselineKey,eventAt,linkTargets}) {
       if(!valid())return {ok:false};
       if(syncRoute()){void refresh();return {ok:false};}
       if(!route||!loaded||busy||composer?.phase!=='armed'||typeof text!=='string'||!text.trim()||
@@ -461,7 +461,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       const token=binding.token;
       busy=true;loading=false;error='';failedBinding=null;sequence++;render();
       try {
-        const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt});
+        const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt,linkTargets});
         if(!contextMatches(token))return {ok:false};
         if(result?.url&&![url,route].includes(policy.pageUrl(result.url)))throw Error('Goal intent belongs to another chat');
         if(!result?.ok)throw Error(result?.error||result?.reason||'Goal intent was not saved');

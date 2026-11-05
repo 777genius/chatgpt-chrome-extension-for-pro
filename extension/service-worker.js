@@ -608,7 +608,7 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
     pending=await goalController.composerGet({tabId});
   }
   if(!native?.ok||native.url!==url||native.isReadOnly!==false||!Array.isArray(timeline)||!timeline.length||
-      timeline[0].userId!==native.userId||!ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText)||
+      timeline[0].userId!==native.userId||!ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText,pending.intent.linkTargets)||
       !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-request.eventAt)>10000)
     return pending.request?.submission&&typeof restoreMissingComposerGoal==='function'?
       restoreMissingComposerGoal(tabId,url,pending.id):waiting();
@@ -897,7 +897,7 @@ async function bindNativeComposerGoal(tabId,currentUrl,armId) {
   if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.userId||
       typeof native.userText!=='string'||!native.promptKey||!Number.isFinite(native.userSentAtMs))return waiting();
   if(pending.url==='https://chatgpt.com/'&&(Math.abs(native.userSentAtMs-request.startedAt)>10000||
-      !ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText)))
+      !ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,native.userText,native.userVisibleText,pending.intent.linkTargets)))
     return typeof recoverNativeComposerGoal==='function'?recoverNativeComposerGoal(tabId,canonical,pending):waiting();
   const live=ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url),
     fresh=await latestRequestReceipt(tabId)||(await goalController.composerGet({tabId}))?.request;
@@ -1459,7 +1459,7 @@ async function bindNextNativeManualSupplement(tabId,url) {
     const native=checked?.result,current=await goalController.get(url);
     if(!native?.ok||native.historicalUserBound!==true||native.isReadOnly!==false||native.url!==url||!native.userId||!native.promptKey||
         !Number.isFinite(native.userSentAtMs)||Math.abs(native.userSentAtMs-pending.startedAt)>10000||
-        !ChatGPTGoalPolicy.submittedTextMatches(pending.text,native.userText,native.userVisibleText)||
+        !ChatGPTGoalPolicy.submittedTextMatches(pending.text,native.userText,native.userVisibleText,pending.linkTargets)||
         current?.id!==record.id||JSON.stringify(current.manualPending)!==JSON.stringify(pending)||
         ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false,pending:true};
     const bound=await goalController.manualBind({url,tabId,id:record.id,requestId:pending.requestId,
@@ -1517,7 +1517,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
       else if(message.action==='disarm')result=await goalController.composerDisarm({tabId,armId:message.armId});
       else if(message.action==='intent')result=await goalController.composerIntent({tabId,url:requested,
-        armId:message.armId,eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey});
+        armId:message.armId,eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey,linkTargets:message.linkTargets});
       else if(message.action==='start') {
         if(!ChatGPTGoalPolicy.canonical(live))throw Error('Используйте Goal рядом с полем нового сообщения');
         return {...await goalController.start({url:live,tabId,goal:message.goal,rules:message.rules,
@@ -2164,7 +2164,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         receipt=request.receipt;
         await appendJournal({kind:'retry.preparation_superseded',sourceUrl:url,requestId:message.requestId,startedAt:message.startedAt},sender.tab);
         await goalController.manual({url,tabId:sender.tab.id,startedAt:message.startedAt,requestId:message.requestId,
-          eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey});
+          eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey,linkTargets:message.linkTargets});
         void bindNativeManualSupplement(sender.tab.id,url).catch(()=>{});
       }
       if(message.type==='CHATGPT_STATUS_GET'){

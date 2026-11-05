@@ -858,13 +858,21 @@
     void runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'intent',url:location.href,at:completionSendIntent.at,baselineKey:completionSendIntent.baselineKey});
   }
 
+  function editorLinkTargets(editor) {
+    if(!editor||typeof editor.querySelectorAll!=='function')return [];
+    // Capture the link destinations while the trusted user's send event is
+    // still in capture phase. The later request must preserve their order.
+    return Array.from(editor.querySelectorAll('a[href], [text-link-href]'))
+      .slice(0,33).map(node=>node.getAttribute('text-link-href')||node.getAttribute('href')||'');
+  }
+
   function rememberManualStatusIntent() {
     const button=sendButton();
     if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return;
-    const editor=composer(),text=editor?rawEditorText(editor):'',baselineKey=latestPromptSnapshot()?.promptKey||'',at=Date.now();
-    if(editor)void inlineGoal?.manualIntent({text,baselineKey,eventAt:at});
+    const editor=composer(),text=editor?rawEditorText(editor):'',baselineKey=latestPromptSnapshot()?.promptKey||'',at=Date.now(),linkTargets=editorLinkTargets(editor);
+    if(editor)void inlineGoal?.manualIntent({text,baselineKey,eventAt:at,linkTargets});
     rememberCompletionSendIntent();
-    manualSendIntent={text,baselineKey,url:ChatGPTHandoffTitle.chatUrl(location.href),at,attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
+    manualSendIntent={text,baselineKey,linkTargets,url:ChatGPTHandoffTitle.chatUrl(location.href),at,attempt:globalThis.__chatgptNotifierAttemptId||'',requestId:globalThis.__chatgptNotifierRequestId||null};
   }
   async function bindManualGoalSupplement(intent,startedAt,requestId) {
     for(let check=0;check<120;check++) {
@@ -885,7 +893,7 @@
     if(requestId?requestId===intent.requestId:String(startedAt)===intent.attempt)return;
     manualSendIntent=null;
     const path=location.pathname;
-    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,text:intent.text,baselineKey:intent.baselineKey,startedAt,requestId:requestId||null}).then(result=>{
+    runtimeMessage({type:'CHATGPT_MANUAL_SEND',url:intent.url,eventAt:intent.at,text:intent.text,baselineKey:intent.baselineKey,linkTargets:intent.linkTargets,startedAt,requestId:requestId||null}).then(result=>{
       if(!result?.ok)return;
       // The worker owns receipt validation. A rejected or delayed ACK must not
       // unlock this page's durable block or discard a newer local retry state.
