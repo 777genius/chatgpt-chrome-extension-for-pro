@@ -1,9 +1,9 @@
 # ChatGPT Chrome Extension for Pro
 
-**Completion alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
+**Goal, completion/error alerts, automatic error recovery, and chat-limit handoffs for long-running ChatGPT tasks.**
 
+<img width="970" height="164" alt="image" src="https://github.com/user-attachments/assets/83e7f1c7-bbfb-4373-892f-a04a18aa4945" />
 <img width="241" height="438" alt="image" src="https://github.com/user-attachments/assets/3c2c5c2a-9373-4ccf-973d-d5c9daa5b9b0" />
-<img width="533" height="648" alt="image" src="https://github.com/user-attachments/assets/1d8702d6-700b-44e1-a588-8f74d2696abf" />
 <img width="351" height="429" alt="image" src="https://github.com/user-attachments/assets/2cbb5d54-ed51-4dbd-8a07-73521bf05262" />
 
 Version **1.7.9** · Chrome / Chromium **116+** · No build required
