@@ -24,12 +24,30 @@ assert.equal(valid.inspect('stop-recovery').idle,true,'already-idle recovery has
 const regular=setup();
 regular.entry.turn.items.unshift({type:'user-message',messageId:'user-id',completed:false});
 const user=regular.document.createElement('div');user.setAttribute('data-chatgpt-search-unit-key','fallback-turn-0:0:user');
-regular.document.querySelector('main')!.prepend(user);
+(user as any).getClientRects=()=>[{width:240,height:32}];regular.document.querySelector('main')!.prepend(user);
 regular.context.expectedBinding=runInContext('inspectChatError(0,false).recoveryBinding',regular.context);
 assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",regular.context),true,'regular user-bound recoveries require the same explicit idle proof');
+// An interrupted request can fail before creating any assistant message.
+const userOnly=setup();
+userOnly.entry.turn.items=[{type:'user-message',messageId:'user-only-id',completed:false}];
+const userOnlyNode=userOnly.document.createElement('div');
+userOnlyNode.setAttribute('data-chatgpt-search-unit-key','fallback-turn-0:0:user');
+(userOnlyNode as any).getClientRects=()=>[{width:240,height:32}];
+userOnly.document.querySelector('main')!.prepend(userOnlyNode);
+userOnly.context.expectedBinding=runInContext('inspectChatError(0,false).recoveryBinding',userOnly.context);
+assert.equal(userOnly.context.expectedBinding.kind,'user');
+assert.equal(userOnly.context.expectedBinding.assistantId,null);
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",userOnly.context),true);
+userOnly.entry.turn.items[0].messageId='different-user';
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).ok",userOnly.context),false);
+const userBoundAssistant=regular.entry.turn.items.find(item=>item.type==='assistant-message')!;
+userBoundAssistant.messageId='remounted-assistant-id';
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",regular.context),true,
+ 'same latest user survives a replacement partial assistant identity');
+userBoundAssistant.messageId='assistant-uuid';
 for(const mutate of [
  (f:ReturnType<typeof setup>)=>{f.entry.turn.items[0].messageId='new-assistant';},
- (f:ReturnType<typeof setup>)=>{f.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div data-chatgpt-search-unit-key="fallback-turn-1:0:user">New</div>');},
+ (f:ReturnType<typeof setup>)=>{const newer=f.document.createElement('div') as any;newer.setAttribute('data-chatgpt-search-unit-key','fallback-turn-1:0:user');newer.getClientRects=()=>[{width:240,height:32}];f.document.querySelector('main')!.append(newer);},
  (f:ReturnType<typeof setup>)=>{f.controller.pendingSubmit={};},
  (f:ReturnType<typeof setup>)=>{f.voiceProps.isLoading=true;},
  (f:ReturnType<typeof setup>)=>{f.voiceProps.isStartButtonAllowed=false;},
@@ -39,3 +57,22 @@ const active=setup();const stop=active.document.createElement('button') as any;s
 assert.equal(active.inspect().idle,false);assert.equal(clicks,0,'read-only inspection never clicks an active Stop');
 assert.equal(active.inspect('stop-recovery').stopped,true);assert.equal(clicks,1,'active native generation still requires its actual Stop');
 console.log('Assistant-only recovery: exact native identity, idle voice/controller proof, changed assistant/user and active/pending generation fences passed.');
+
+// Retained hidden users must not shadow the visible exact recovery request.
+const hidden=regular.document.createElement('div') as any;hidden.setAttribute('data-chatgpt-search-unit-key','fallback-turn-99:0:user');hidden.getClientRects=()=>[];regular.document.querySelector('main')!.append(hidden);
+assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",regular.context),true);
+const pendingIdle=setup();pendingIdle.controller.pendingSubmit={};const retryable=pendingIdle.inspect();assert.equal(retryable.ok,false);assert.equal(retryable.stopped,false);assert.equal(retryable.retryable,true,'missing idle proof explicitly confirms no Stop click and allows bounded readiness waiting');
+console.log('Recovery visibility: hidden retained users ignored; missing positive idle proof is an explicit no-click retryable refusal.');
+
+// A visible draft replaces Voice with a native Send control. Candidate idle
+// evidence stays read-only and requires worker transport/request verification.
+{
+ const send=regular.document.querySelector('button')! as any;
+ send.setAttribute('data-testid','send-button');send.setAttribute('type','submit');send.innerHTML='<svg></svg>';
+ Object.assign(regular.voiceProps,{isStartButtonAllowed:false,disabled:false});regular.controller.submitReady=true;
+ const inspect=()=>runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding)",regular.context);
+ assert.equal(inspect().editorSubmitIdle,true);assert.equal(inspect().ok,false,'Send readiness alone cannot authorize retry');
+ regular.voiceProps.isLoading=true;assert.equal(inspect().editorSubmitIdle,false);
+ regular.voiceProps.isLoading=false;regular.controller.pendingSubmit={};assert.equal(inspect().editorSubmitIdle,false);
+ regular.controller.pendingSubmit=null;send.disabled=true;assert.equal(inspect().editorSubmitIdle,false);
+}

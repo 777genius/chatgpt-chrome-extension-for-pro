@@ -194,8 +194,9 @@ function stopChatLoading(url,startedAt,receipt,startReceipt=null) {
     return {write:true,value:statusView(record)};
   });
 }
-function reserveChatNotification(url,tabId,kind,eventAt,receipt) {
+function reserveChatNotification(url,tabId,kind,eventAt,receipt,expected=null) {
   return withChatStatus(url,record=>{
+    if(expected&&(record.revision!==expected.revision||record.status?.kind!==(expected.kind||'loading')||record.status.eventAt!==expected.startedAt||record.status.receipt?.epoch!==expected.receipt?.epoch||record.status.receipt?.order!==expected.receipt?.order))return {value:null};
     const sequence=++record.sequence;
     const ticket={id:`chatgpt-prompt-bound:${tabId}:${eventAt}:${sequence}:${encodeURIComponent(url)}`,
       url,tabId,sequence,receipt,state:'creating'};

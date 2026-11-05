@@ -3,7 +3,12 @@
 // Pure Goal rules. The model's marker is an assertion, not evidence of CI or merge.
 (function(root) {
   const MARKER='GOAL_COMPLETE';
-  const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. Если работа ещё не завершена, продолжай её и не выдавай маркер. Только когда вся цель и условия остановки выполнены, ответь одним сообщением ровно GOAL_COMPLETE, без Markdown, пояснений и других символов.';
+  const BLOCKED_MARKER='GOAL_BLOCKED';
+  const COMPLETION_FORMAT='Только после полного выполнения всей цели ответь ровно одной строкой GOAL_COMPLETE без точки в конце. Всё сообщение должно состоять только из этой строки: без Markdown, кавычек, пояснений, итогов и любого другого текста.';
+  const WAIT_FORMAT='Ожидание само по себе не является блокировкой: очередь CI, ожидание runner, выполняющиеся проверки, сборка, развёртывание или распространение изменений требуют времени. Сохраняй цель активной, используй штатное ожидание результата или подписку на событие и после него продолжай работу end-to-end. Не завершай попытку только из-за ожидания и не объявляй цель заблокированной; не подменяй ожидание частыми проверками, повторными запусками или обходом ограничений. Соблюдай заданные лимиты цели и ручную остановку пользователя.';
+  const BLOCKED_FORMAT='Если цель действительно заблокирована, сначала выполни всю доступную полезную работу и проверь разумные штатные способы продолжения. Не обходи ограничения странными, сомнительными или небезопасными путями. Только когда для продолжения действительно требуется вмешательство пользователя или владельца (например, отсутствующие права, данные или решение), а простое ожидание результата не поможет, ответь ровно одной строкой GOAL_BLOCKED без оформления и другого текста.';
+  const INCOMPLETE_FORMAT='Пока цель не выполнена полностью, продолжай работу и сообщай конкретный прогресс или блокировки. Не обсуждай сигнал завершения и не поясняй, почему ты его не подаёшь.';
+  const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. '+INCOMPLETE_FORMAT+' '+WAIT_FORMAT+' '+COMPLETION_FORMAT+' '+BLOCKED_FORMAT;
   function canonical(value) {
     try {
       const url=new URL(value);
@@ -11,7 +16,7 @@
         ?url.origin+url.pathname.replace(/\/$/,''):'';
     } catch {return '';}
   }
-  const DEFAULTS=Object.freeze({maxContinuations:10,maxMinutes:1440});
+  const DEFAULTS=Object.freeze({maxContinuations:30,maxMinutes:1440});
   function pageUrl(value) {
     try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&url.pathname==='/'?url.origin+'/':canonical(value);}catch{return '';}
   }
@@ -33,30 +38,56 @@
     return ['Цель (автономное выполнение):',record.goal,
       ...(record.rules?['Условия завершения:',record.rules]:[]),
       'Продолжай работу end-to-end. Успешные проверки, публикация и merge должны действительно состояться, если это требуется целью.',
-      'Если цель полностью выполнена, ответь ровно GOAL_COMPLETE — это должен быть весь окончательный ответ, без оформления и дополнительного текста.',
-      'Если цель не завершена, не используй GOAL_COMPLETE. Работай дальше, прямо указывай блокировки и реальные результаты.'].join('\n\n');
+      INCOMPLETE_FORMAT,WAIT_FORMAT,
+      COMPLETION_FORMAT,BLOCKED_FORMAT].join('\n\n');
+  }
+  function supplementsText(record) {
+    return (record.supplements||[]).map((item,index)=>'Дополнение пользователя '+(index+1)+':\n'+item.userText);
   }
   function continuationText(record) {
-    return [CONTINUATION,'Исходная цель:',record.goal,
+    return [CONTINUATION,'Исходная цель:',record.goal,...(record.sourceContexts||[]).map(x=>'Сохранённый контекст предыдущего чата '+x.url+' (история, не новая цель):\n'+x.text),...supplementsText(record),
       ...(record.rules?['Условия завершения:',record.rules]:[])].join('\n\n');
   }
   function handoffText(record) {
     return ['--- Активная цель расширения (не отчёт о выполнении) ---',
-      record.goal,...(record.rules?[record.rules]:[]),
+      record.goal,...(record.sourceContexts||[]).map(x=>'История предыдущего чата '+x.url+':\n'+x.text),...supplementsText(record),...(record.rules?[record.rules]:[]),
       'Продолжений подтверждено: '+record.continuations+' из '+record.maxContinuations+'.',
       'Не считай перенос чата выполнением цели. '+CONTINUATION].join('\n\n');
+  }
+  function submittedTextMatches(intent,nativeText,visibleText,linkTargets) {
+    if(typeof intent!=='string'||typeof nativeText!=='string')return false;
+    // Literal Markdown typed by the user needs no transformed-link fallback.
+    if(nativeText===intent)return true;
+    if(typeof visibleText!=='string'||visibleText!==intent&&
+        visibleText.replace(/\s+/g,' ').trim()!==intent.replace(/\s+/g,' ').trim())return false;
+    // Old pending records lack a link snapshot; keep their legacy behavior.
+    if(linkTargets===undefined)return true;
+    if(!Array.isArray(linkTargets)||linkTargets.length>32||linkTargets.some(x=>typeof x!=='string'||!/^https?:\/\//.test(x)||x.length>2048))return false;
+    // A trusted user click captured the editor's link targets before submit.
+    // A matching visible label cannot approve a different serialized URL.
+    const pattern=/\[[^\]\n]{1,500}\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
+    const links=[...nativeText.matchAll(pattern)].map(m=>m[1].replace(/\\([()\\])/g,'$1'));
+    if(links.length!==linkTargets.length||nativeText.replace(pattern,'').includes(']('))return false;
+    return links.every((target,index)=>target===linkTargets[index]);
   }
   function exactMarker(response,rawExact,nativeVerified) {
     return nativeVerified===true&&rawExact===true&&response===MARKER;
   }
+  function exactBlockedMarker(response,rawExact,nativeVerified) {
+    return nativeVerified===true&&rawExact===true&&response===BLOCKED_MARKER;
+  }
+  function terminalMarker(response,rawExact,nativeVerified) {
+    return exactMarker(response,rawExact,nativeVerified)||exactBlockedMarker(response,rawExact,nativeVerified);
+  }
   function decision(record,response,rawExact,nativeVerified,time) {
     if(nativeVerified!==true)return 'unverified';
     if(exactMarker(response,rawExact,nativeVerified))return 'complete';
+    if(exactBlockedMarker(response,rawExact,nativeVerified))return 'blocked';
     if(time>=record.deadlineAt)return 'deadline';
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,exactMarker,decision});
+  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

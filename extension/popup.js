@@ -61,6 +61,7 @@ recoverTitle.addEventListener('click',async()=>{
 
 const goalUi={
   text:document.getElementById('goal-text'),
+  followups:document.getElementById('goal-followups'),
   rules:document.getElementById('goal-rules'),
   max:document.getElementById('goal-max'),
   minutes:document.getElementById('goal-minutes'),
@@ -85,6 +86,10 @@ function showGoal(record) {
   const active=!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
   const editable=!active&&!goalBusy;
   for(const field of [goalUi.text,goalUi.rules,goalUi.max,goalUi.minutes])field.disabled=!editable;
+  // Confirmed additions are read-only context, not part of the editable original objective.
+  const supplements=Array.isArray(record?.supplements)?record.supplements.filter(item=>typeof item?.userText==='string'):[];
+  goalUi.followups.hidden=supplements.length===0;
+  goalUi.followups.textContent=supplements.map((item,index)=>'Дополнение '+(index+1)+':\n'+item.userText).join('\n\n');
   if(record) {
     goalUi.text.value=record.goal;
     goalUi.rules.value=record.rules||'';
@@ -100,7 +105,7 @@ function showGoal(record) {
   } else goalUi.status.textContent='Задайте цель и нажмите «Начать Goal».';
   goalUi.start.disabled=!editable||!goalBinding||!!record?.operation||record?.phase==='blocked';
   goalUi.pause.disabled=goalBusy||!active||!goalBinding||record.phase==='paused'||record.phase==='handoff';
-  goalUi.resume.disabled=goalBusy||record?.phase!=='paused'||!!record?.operation||!goalBinding;
+  goalUi.resume.disabled=goalBusy||(record?.phase!=='paused'&&!(record?.phase==='blocked'&&record.reason==='Восстановление запроса завершилось ошибкой'))||!!record?.operation||!goalBinding;
   goalUi.stop.disabled=goalBusy||(!active&&record?.phase!=='blocked')||!goalBinding;
 }
 async function goalAction(action) {

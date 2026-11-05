@@ -5,7 +5,7 @@ Implement **Goal** only. Message queue / Steer is out of scope and remains unimp
 
 - User explicitly starts an objective and optional stop conditions from the inline Goal control beside reasoning effort or the popup in the selected ChatGPT conversation. Inline state changes require a trusted user click, including native keyboard activation; page-script clicks cannot authorize them. Persistent controls: pause, resume, stop; finite continuation budget and deadline.
 - The initial instruction and all later continuation messages are **explicitly authorized by this goal**. They use the existing native composer inspection and guarded one-click sender, *never* a second click implementation or automatic capture of the user's draft.
-- Completion requires a **new, request-bound, fully completed assistant answer** whose **entire text is exactly `GOAL_COMPLETE`**, rendered as a single plain paragraph. Headings, strikethrough and other rich markup do not qualify. No substring / partial or streaming match. The marker is a model assertion, **not verification** of a GitHub merge or CI result.
+- New instructions require a **new, request-bound, fully completed assistant answer containing only plain `GOAL_COMPLETE`**, without Markdown, quotes, explanations or a summary. While incomplete, the model must continue work without discussing the completion signal. Legacy replies already in flight may still use a plain first-paragraph marker followed by the previously prescribed `Итог:` bullet summary. Headings, strikethrough and other rich markup do not qualify. No substring / partial or streaming match. The marker is a model assertion, **not verification** of a GitHub merge or CI result.
 - A non-marker answer schedules one continuation with a stable operation ID. Claim and intent are persisted before dispatch. Any lost click acknowledgement or uncertain outcome blocks further sends until explicit user intervention.
 - Goal state and stop rules are stored in local Chrome storage, bound to the original chat and transferred to a confirmed handoff destination without resetting budgets. New-chat handoff payload retains the goal instructions; retry and handoff must not run competing send coordinators.
 - User drafts / attachments have priority; automatic goal sends fail closed rather than overwrite. Duplicate tabs, duplicate completion notifications, worker suspension, and race with manual actions are tested.
@@ -18,7 +18,7 @@ Implement **Goal** only. Message queue / Steer is out of scope and remains unimp
 
 ## Verification requirements
 
-1. Exact `GOAL_COMPLETE` only on fully completed assistant message, bounded to the expected prompt; ordinary text containing marker must continue.
+1. New instructions request standalone plain `GOAL_COMPLETE` only. Accept it only on a fully completed assistant message bound to the expected prompt; quoted or negated mentions such as “Маркер `GOAL_COMPLETE` не выдаю.” must continue. Retain compatibility with valid in-flight replies using the previous marker-plus-summary format.
 2. Only one append/send authorization per operation; duplicate events/tabs/recovery do not resend; timeout after click yields unknown.
 3. Start, pause, resume, stop, budget, storage failure, wrong chat, manual draft / attachments, new-user message, retry conflict, handoff recovery.
 4. Synthetic DOM and mocked Chrome tests via `npm run check` (no browser access). Live browser E2E with a dedicated chat, native completion/stream, extension reload and handoff is a **pre-merge** gate.
@@ -87,3 +87,18 @@ Recoverable retries have one bounded 60-second preparation deadline, retaining t
 The exact completion marker also supports the native DIL text-run paragraph after binding its source/message IDs to the completed assistant turn. Rich formatting, extra or hidden meaningful text, wrong IDs and non-marker answers remain non-exact.
 
 Final 1.7.9 real Chrome canary: a trusted Goal opt-in and real observed send received one scoped terminal-error response. The confirmed destination retained the same Goal ID, exact original objective, deadline and continuation budget. The model returned the native DIL `GOAL_COMPLETE`; Goal became `completed` with zero extra continuations. One handoff send and one rename save were recorded, with title status `confirmed` and the source title plus `(1)`. The controlled response substitution does not prove actual server-side limit exhaustion.
+
+## Manual follow-ups (1.8.0)
+
+A trusted manual send during an active Goal adds a verified supplemental instruction instead of pausing the Goal. The original objective is immutable; native sent-message text and identity are stored in chronological supplements after request-receipt and native turn verification. Unsaved drafts are never adopted. Continuations and handoffs include the objective plus supplements, with the same Goal ID, remaining budget and deadline. Explicit Pause/Stop and unknown-click fences retain priority; already paused Goals stay paused.
+
+Interrupted-response recovery waits up to 60 seconds for positively verified native Stop/idle readiness, retrying only explicit no-click transient refusals every two seconds. Missing acknowledgements, changed request/prompt/draft and hard ownership refusals never authorize a second click.
+
+Real Chrome validation for 1.8.0: in an isolated chat, a trusted sent follow-up was appended exactly once while an explicitly paused Goal retained its original ID, objective, deadline and budget. Resume sent a continuation containing both texts; its exact native request/message proof confirmed the collapsed long bubble. The model returned GOAL_COMPLETE and the Goal became completed without a pending operation. Active unpaused follow-ups and receipt races have deterministic integration coverage.
+
+
+## Native-message adoption limits
+
+A manually sent rich-link message is adopted from the confirmed native request and retains its actual native Markdown URLs. The pre-submit visible-text intent does not independently snapshot hidden rich-link targets; it is not proof that those targets were unchanged before the user submitted the native message. Automatic sends still require the exact authorized payload and protected editor/model checks.
+
+Historical manual Goal bindings can remain blocked after native turn renumbering. Recovery fails closed when it cannot establish the latest user/assistant ownership; a historical user match alone does not authorize replaying an assistant completion.

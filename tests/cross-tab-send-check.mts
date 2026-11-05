@@ -172,7 +172,7 @@ delete storage['chatgpt-journal:meta'].retrySendClaimSchema;
 storage['chatgpt-journal:meta'].active[14]={operationId:'legacy-unknown',kind:'retry.send_intent',consumed:true,at:1};
 addPage(15,legacyUrl);boot();
 assert.equal((await plan(15,'new-operation-old-failure','/c/legacy-retry|old-turn')).duplicate,true,'upgrade blocks a new tab/new operation for a historically authorized unknown send');
-assert.equal(storage['chatgpt-journal:meta'].retrySendClaimSchema,1);
+assert.equal(storage['chatgpt-journal:meta'].retrySendClaimSchema,2);
 assert.deepEqual(Object.fromEntries(Object.entries(storage).filter(([key])=>key.startsWith('chatgpt-journal:event:'))),legacyEvents,'retry claim migration never changes immutable events');
 assert.equal((await plan(15,'new-distinct-failure','/c/legacy-retry|new-turn')).ok,true,'historical consumed claim does not lock a distinct failed user turn');
 await append(15,'retry.finished','new-distinct-failure',{clicked:false,confirmed:false});

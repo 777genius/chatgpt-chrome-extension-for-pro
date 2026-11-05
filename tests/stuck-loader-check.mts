@@ -28,8 +28,8 @@ const last={id:'fallback-turn-2',isMostRecentTurn:true,isReadOnly:false,errorMes
  turn:{status:'complete',items:[{type:'user-message',messageId:'user-id'},
  {type:'assistant-message',messageId:'assistant-id',phase:'final_answer',completed:true}]}};
 const node=(key:string)=>({getAttribute:(name:string)=>name==='data-chatgpt-search-unit-key'?key:null});
-const element={getAttribute:(name:string)=>name==='data-content-search-turn-key'?'fallback-turn-2':null,
- querySelectorAll:(selector:string)=>[node(selector.includes(':user')?'fallback-turn-2:0:user':'fallback-turn-2:2:assistant')],
+const element={closest:()=>null,getAttribute:(name:string)=>name==='data-content-search-turn-key'?'fallback-turn-2':null,
+ querySelectorAll:(selector:string)=>selector.startsWith('aside')||selector.includes('data-automation-card')?[]:[node(selector.includes(':user')?'fallback-turn-2:0:user':'fallback-turn-2:2:assistant')],
  __reactFiber$fixture:{memoizedProps:{entries:[{...last,id:'fallback-turn-1'},last]},return:null}};
 const root={querySelectorAll:(selector:string)=>selector.startsWith('[data-content-search-turn-key]')?[element]:[]};
 const globals=globalThis as unknown as Record<string,unknown>;
@@ -79,6 +79,22 @@ console.log('stuck-loader native latest-turn binding: passed');
  const saved={document:globals.document,location:globals.location};
  globals.document=document;globals.location={origin:'https://chatgpt.com',pathname:'/c/exact'};
  try {
+  const normalTurn=latest.turn;
+  latest.turn={status:'cancelled',items:[nativeUser,{type:'chatgpt-reasoning-group'}] as typeof normalTurn.items};
+  assert.equal(inspectCompletedTurn(attempt.url).reasoningFailed,true);
+  latest.turn={...latest.turn,status:'complete'};
+  assert.equal(inspectCompletedTurn(attempt.url).reasoningFailed,false);
+  latest.turn={status:'cancelled',items:[nativeUser,nativeAssistant]};
+  assert.equal(inspectCompletedTurn(attempt.url).reasoningFailed,false);
+  latest.turn=normalTurn;
+  const historicalError=document.createElement('aside');
+  historicalError.setAttribute('role','alert');historicalError.className='text-danger';
+  historicalError.innerHTML='<span class="text-chatgpt-recovery">Historical failed request</span>';
+  element.before(historicalError);
+  assert.equal(inspectCompletedTurn(attempt.url).hasError,false,'a retained older error cannot block the latest healthy final answer');
+  element.append(historicalError);
+  assert.equal(inspectCompletedTurn(attempt.url).hasError,true,'a visible error inside the latest turn still blocks completion');
+  historicalError.remove();
   const metadata=inspectCompletedTurn(attempt.url);
   for(const key of ['userText','userVisibleText','userSentAtMs','goalResponse','goalRawExact'])assert.equal(Object.hasOwn(metadata,key),false,'default snapshot remains metadata only');
   assert.deepEqual(inspectCompletedTurn(attempt.url,false),metadata);
@@ -88,6 +104,84 @@ console.log('stuck-loader native latest-turn binding: passed');
   assert.equal(goal.firstUserSentAtMs,null,'first-turn allocation evidence is unchanged');
   assert.equal(goal.goalResponse,'GOAL_COMPLETE');assert.equal(goal.goalRawExact,true,'speaker heading and feedback are interface content');
   assert.equal(goal.userVisibleText,'Rendered sent request','sent body excludes speaker and copy controls');
+  const summaryRendered=document.querySelector('[data-markdown-text-style="assistant-message"], .markdown')!;
+  const savedSummaryHTML=summaryRendered.innerHTML;
+  const savedSummaryContent=nativeAssistant.content;
+  for(const marker of ['GOAL_COMPLETE','GOAL_BLOCKED']) {
+    nativeAssistant.content=marker;summaryRendered.innerHTML='<p>Renderer is settling</p>';
+    let pending=inspectCompletedTurn(attempt.url,true);
+    assert.equal(pending.goalRawExact,false);assert.equal(pending.goalMarkerPending,true,'native exact terminal cannot continue while renderer settles');
+    nativeAssistant.content=marker.replace('_','\\_');
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalMarkerPending,true,'transient escaped raw terminal defers instead of continuing');
+    nativeAssistant.content='::chatgpt-content-reference{index="0" source_message_id="latest-assistant-id"}';
+    nativeAssistant.contentReferences=[];summaryRendered.innerHTML='<p>'+marker+'</p>';
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalMarkerPending,true,'exact visible terminal with unresolved whole native reference defers');
+    nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'`'+marker+'`'}}];
+    summaryRendered.innerHTML='<p><code>'+marker+'</code></p>';
+    pending=inspectCompletedTurn(attempt.url,true);
+    assert.equal(pending.goalRawExact,false);assert.equal(pending.goalMarkerPending,false,'resolved formatted native source is definitively nonterminal');
+    nativeAssistant.contentReferences=[];nativeAssistant.content='I am not issuing '+marker;
+    summaryRendered.innerHTML='<p>'+nativeAssistant.content+'</p>';
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalMarkerPending,false,'negated marker prose never enters pending');
+    nativeAssistant.content=marker;summaryRendered.innerHTML='<p>'+marker+'</p>';
+    pending=inspectCompletedTurn(attempt.url,true);assert.equal(pending.goalRawExact,true);assert.equal(pending.goalMarkerPending,false);
+  }
+  nativeAssistant.content=savedSummaryContent;nativeAssistant.contentReferences=[];summaryRendered.innerHTML=savedSummaryHTML;
+
+  nativeAssistant.content='GOAL_BLOCKED';
+  summaryRendered.innerHTML='<p>GOAL_BLOCKED</p>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'native blocked marker uses exact plain envelope');
+  for(const html of ['<p>GOAL_BLOCKED не выдаю.</p>','<p><code>GOAL_BLOCKED</code></p>','<p>GOAL_BLOCKED</p><p>Reason</p>']) {
+    summaryRendered.innerHTML=html;
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'discussion and formatting never block a Goal');
+  }
+  nativeAssistant.content='GOAL\\_COMPLETE\n\nИтог\\:\n\n\\- Вычислено 2+2 = 4.';
+  summaryRendered.innerHTML='<p>GOAL_COMPLETE</p><p>Итог:</p><ul><li>Вычислено 2+2 = 4.</li></ul>';
+  const summary=inspectCompletedTurn(attempt.url,true);
+  assert.equal(summary.goalResponse,'GOAL_COMPLETE');
+  assert.equal(summary.goalRawExact,true,'native escaped summary with separately rendered marker completes');
+  summaryRendered.innerHTML='<p><code>GOAL_COMPLETE</code></p><p>Итог:</p><ul><li>Вычислено 2+2 = 4.</li></ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'quoted code cannot complete a goal');
+  const detailedBullets=[
+    'Implemented the requested catalog and independent filters, verified the changes and merged '+
+      '[catalog change](https://example.invalid/catalog/pull/42) and [registry change](https://example.invalid/registry/pull/57). '+
+      'Every entry now appears by default and the two independent filters remain available through the options dialog.',
+    'Completed the production validation chain with '+
+      '[scan and progress publication](https://example.invalid/actions/runs/1001) followed by '+
+      '[the deployed site verification](https://example.invalid/actions/runs/1002).\n'+
+      '  Required checks and the production deployment completed successfully.',
+    'Recorded the verification snapshot and its remaining coverage limits in the reviewed changes.\n\n'+
+      '  The task is complete and its waiting automation was disabled.'
+  ];
+  assert.ok(detailedBullets[0].length>240,'regression fixture exceeds the old per-bullet limit');
+  const detailedSummary='GOAL_COMPLETE\n\nИтог:\n\n'+detailedBullets.map(text=>'- '+text).join('\n\n');
+  const summaryReference='::chatgpt-content-reference{index="0" source_message_id="latest-assistant-id"}';
+  nativeAssistant.content=summaryReference;
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:detailedSummary.replace(/[_:\-]/g,'\\$&')}}];
+  summaryRendered.innerHTML='<p>GOAL_COMPLETE</p><p>Итог:</p><ul>'+detailedBullets.map(text=>'<li>'+text+'</li>').join('')+'</ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,
+    'three long linked DIL summary bullets with wrapped lines and blank paragraphs complete the goal');
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalResponse,'GOAL_COMPLETE');
+  summaryRendered.innerHTML='<p dir="auto"><span>GOAL_COMPLETE</span></p><p><span>Итог:</span></p><ul><li>Completed <a href="https://example.invalid/result">verification</a>.</li></ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'native paragraph renderer uses a neutral text-only span');
+  for(const inner of ['<code>GOAL_COMPLETE</code>','<a href="https://example.invalid">GOAL_COMPLETE</a>','<strong>GOAL_COMPLETE</strong>']) {
+    summaryRendered.innerHTML='<p><span>'+inner+'</span></p><p>Итог:</p><ul><li>Quoted only</li></ul>';
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'rich marker inside a neutral span does not declare completion');
+  }
+  summaryRendered.innerHTML='<p>GOAL_COMPLETE</p><p>Итог:</p><ul><li>Verified summary</li></ul>';
+  for(const body of [detailedSummary.replace('GOAL_COMPLETE','`GOAL_COMPLETE`'),
+    detailedSummary.replace('GOAL_COMPLETE','> GOAL_COMPLETE'),
+    'Example:\n\n'+detailedSummary]) {
+    nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:body}}];
+    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'quoted or embedded native marker does not declare completion');
+  }
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:detailedSummary}}];
+  summaryRendered.innerHTML='<blockquote><p>GOAL_COMPLETE</p></blockquote><p>Итог:</p><ul><li>Quoted only</li></ul>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'a rendered quoted marker cannot corroborate completion');
+  nativeAssistant.contentReferences=[];
+  nativeAssistant.content=savedSummaryContent;
+  summaryRendered.innerHTML=savedSummaryHTML;
+
   const userUnit=document.querySelector('[data-chatgpt-search-unit-key$=":user"]')!;
   const userBody=userUnit.querySelector('.whitespace-pre-wrap')!;
   nativeUser.message='  Read [Project](https://example.invalid/path) now  \nSecond\nline';
@@ -128,6 +222,16 @@ console.log('stuck-loader native latest-turn binding: passed');
   const referenced=inspectCompletedTurn(attempt.url,true);
   assert.equal(referenced.goalResponse,'GOAL_COMPLETE','a whole native reference resolves to its complete fallback Markdown');
   assert.equal(referenced.goalRawExact,true,'plain exact rendered marker agrees with complete native fallback');
+  const blockedHTML=rendered.innerHTML;
+  nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'GOAL\\_BLOCKED'}}];
+  rendered.innerHTML='<p>GOAL_BLOCKED</p>';
+  const blocked=inspectCompletedTurn(attempt.url,true);
+  assert.equal(blocked.goalResponse,'GOAL_BLOCKED');assert.equal(blocked.goalRawExact,true);
+  latest.turn.status='in_progress';nativeAssistant.completed=false;
+  const blockedStreaming=inspectCompletedTurn(attempt.url,true);
+  assert.equal(completedAttemptEvidence({...attempt,promptKey:blockedStreaming.promptKey},{...blockedStreaming,attemptId:attempt.id}),null,'streaming blocked marker cannot finish the current request');
+  latest.turn.status='complete';nativeAssistant.completed=true;
+  rendered.innerHTML=blockedHTML;
   nativeAssistant.contentReferences=[{model_dil_v2:{fallbackMarkdown:'GOAL\\_COMPLETE'}}];
   const escaped=inspectCompletedTurn(attempt.url,true);
   assert.equal(escaped.goalResponse,'GOAL_COMPLETE','native DIL Markdown may escape the one literal underscore');
@@ -156,10 +260,12 @@ console.log('stuck-loader native latest-turn binding: passed');
    rendered.innerHTML=`<${tag}>GOAL_COMPLETE</${tag}>`;
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,`${tag} is not a plain paragraph in native catch-up`);
   }
-  for(const tag of ['del','s','b','i','u','mark','small','sup','sub','span','unknown-rich-node']) {
+  for(const tag of ['del','s','b','i','u','mark','small','sup','sub','unknown-rich-node']) {
    rendered.innerHTML=`<p><${tag}>GOAL_COMPLETE</${tag}></p>`;
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,`${tag} markup cannot complete native catch-up`);
   }
+  rendered.innerHTML='<p><span>GOAL_COMPLETE</span></p>';
+  assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,true,'neutral span native fallback marker is plain text');
   for(const content of ['<p>GOAL_COMPLETE<br></p>','<p>GOAL_COMPLETE</p><p></p>','<p>GOAL_COMPLETE<!--extra node--></p>']) {
    rendered.innerHTML=content;
    assert.equal(inspectCompletedTurn(attempt.url,true).goalRawExact,false,'only one text-only paragraph can complete native catch-up');
@@ -210,3 +316,36 @@ assert.equal(bindAttemptPrompt(bound!,{...observe,promptKey:'user-3'}),null);
 assert.equal(bindAttemptPrompt(pending,{...observe,attemptId:'request-1',promptKey:'user-2'}),null);
 assert.equal(bindAttemptPrompt({...pending,baselineKey:undefined},{...observe,promptKey:'user-2'}),null);
 console.log('stuck-loader new-user attempt binding: passed');
+
+// Historical virtualized rows retain native identity but do not become click
+// evidence. Only current mounted native/DOM binding selects the live response.
+{
+ const {document}=parseHTML('<html><body><section data-app-shell-active-page="true"><article data-content-search-turn-key="history-0"><div data-chatgpt-search-unit-key="history-0:1:user" data-chatgpt-search-message-ids="old-user"></div></article><article data-content-search-turn-key="current"><div data-chatgpt-search-unit-key="current:0:user" data-chatgpt-search-message-ids="current-user"></div></article></section></body></html>');
+ for(const e of document.querySelectorAll('*'))Object.defineProperty(e,'getClientRects',{value:()=>[{width:10,height:10}],configurable:true});
+ const oldEntry:any={id:'history-0',conversationId:'native-fixture',isMostRecentTurn:false,isReadOnly:false,
+  timestampTurns:[{role:'user',sentAtMs:100000}],turn:{status:'complete',items:[{type:'chatgpt-reasoning-group'},{type:'user-message',messageId:'old-user',message:'Prior sent clarification'}]}};
+ const latest:any={id:'current',conversationId:'native-fixture',isMostRecentTurn:true,isReadOnly:false,
+  timestampTurns:[{role:'user',sentAtMs:120000}],turn:{status:'in_progress',items:[{type:'user-message',messageId:'current-user',message:'Current sent instruction'}]}};
+ const historyRow=document.querySelector('[data-content-search-turn-key="history-0"]')!,current=document.querySelector('[data-content-search-turn-key="current"]')!;
+ (current as any).__reactFiber$test={memoizedProps:{entries:[oldEntry,latest]},return:null};
+ const saved={document:globals.document,location:globals.location};globals.document=document;globals.location={origin:'https://chatgpt.com',pathname:'/c/exact'};
+ const probe=()=> (inspectCompletedTurn as any)(attempt.url,true,null,120000);
+ try{
+  historyRow.remove();let r=probe();assert.equal(r.ok,true);
+  assert.deepEqual(r.recoveryTimeline.map((u:any)=>u.promptKey),['/c/exact|history-0:1:user','/c/exact|current:0:user']);
+  assert.equal(r.promptKey,'/c/exact|current:0:user');assert.equal(r.userId,'current-user');
+  current.before(historyRow);const oldUnit=historyRow.firstElementChild!;oldUnit.remove();
+  assert.equal(probe().recoveryTimeline.length,2,'historical mounted row without mounted user is virtualized metadata');
+  historyRow.append(oldUnit);oldUnit.setAttribute('data-chatgpt-search-unit-key','history-0:9:user');
+  assert.equal(probe().recoveryTimeline,null,'rendered conflicting unit cannot use native fallback');
+  oldUnit.setAttribute('data-chatgpt-search-unit-key','history-0:1:user');oldUnit.setAttribute('data-chatgpt-search-message-ids','wrong-user');
+  assert.equal(probe().recoveryTimeline,null,'rendered native ID conflict remains rejected');
+  oldUnit.setAttribute('data-chatgpt-search-message-ids','old-user');historyRow.remove();
+  for(const [key,value] of [['conversationId','unrelated'],['isReadOnly',true]] as [string,unknown][]){const before=oldEntry[key];oldEntry[key]=value;assert.equal(probe().recoveryTimeline,null);oldEntry[key]=before;}
+  oldEntry.timestampTurns=[];assert.equal(probe().recoveryTimeline,null,'native user/time cardinality must remain exact');oldEntry.timestampTurns=[{role:'user',sentAtMs:100000}];
+  oldEntry.turn.items[1].messageId='current-user';assert.equal(probe().recoveryTimeline,null,'duplicate native user IDs cannot become historical metadata');oldEntry.turn.items[1].messageId='old-user';
+  oldEntry.id='';assert.equal(probe().recoveryTimeline,null,'missing historical turn ID cannot derive a prompt key');oldEntry.id='history-0';
+  const currentUnit=current.firstElementChild!;currentUnit.remove();assert.equal(probe().ok,false,'current user cannot use virtualized historical fallback');
+ }finally{globals.document=saved.document;globals.location=saved.location;}
+}
+console.log('Historical virtualized timeline: native exact identity metadata, current DOM requirement and rendered conflict fences passed');

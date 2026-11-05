@@ -6,9 +6,9 @@ import { parseHTML } from 'linkedom';
 type Request = { tabId: number; method: string; url: string; requestId: string; requestBody: {raw: {bytes: ArrayBuffer}[]} };
 type Completion = { tabId: number; url: string; requestId: string; statusCode: number };
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
-type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; streaming?:boolean; title?: string; conversationId?: string};
-type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel';
+type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
+type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,7 +28,7 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0, cancels = 0;
   let clickAt = 0;
-  let menuReady=!['late-menu','sidebar-menu','sidebar-hidden','sidebar-wrong-chat','sidebar-hidden-delayed-cancel'].includes(mode);
+  let menuReady=mode!=='late-menu'&&!mode.startsWith('sidebar-');
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
   const failure: ((value: unknown)=>void)[] = [];
@@ -61,15 +61,16 @@ function harness(mode: Mode = 'success') {
       // must still permit fill/save without reauthorizing through that header.
       document.querySelector('header')!.setAttribute('inert','');
       const input=dialog.querySelector('input')!;
-      input.value=document.title;
+      input.value=trigger.closest('[data-sidebar-cycle-item]')?.querySelector('a')?.textContent||document.title;
       (input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};
       input.addEventListener('input',()=>{(input as unknown as Record<string,unknown>).__reactProps$test={value:input.value};});
       dialog.querySelector('button[type="button"]')!.addEventListener('click',()=>{cancels++;if(mode==='sidebar-hidden-delayed-cancel'&&cancels===1)return;dialog.remove();document.querySelector('header')!.removeAttribute('inert');});
       dialog.querySelector('button[type="submit"]')!.addEventListener('click',()=>{
         saved++;clickAt=time;
-        if(mode!=='optimistic') document.title=input.value;
+        if(mode!=='optimistic'&&!mode.startsWith('sidebar-stale')) document.title=input.value;
+        const savedLink=trigger.closest('[data-sidebar-cycle-item]')?.querySelector('a');if(savedLink)savedLink.textContent=input.value;
         document.querySelector('header')!.removeAttribute('inert');
-        if(mode==='no-ack')return;
+        if(mode==='no-ack'||mode==='sidebar-stale-no-ack')return;
         const payload=new TextEncoder().encode(JSON.stringify({title:mode==='wrong-request'||mode.endsWith('-wrong-title')?'Other':input.value}));
         const split=mode==='split-utf8'?payload.findIndex(byte=>byte>=128)+1:0;
         const raw=split?[{bytes:payload.slice(0,split).buffer as ArrayBuffer},{bytes:payload.slice(split).buffer as ArrayBuffer}]:[{bytes:payload.buffer as ArrayBuffer}];
@@ -88,11 +89,19 @@ function harness(mode: Mode = 'success') {
     const row=document.createElement('div');row.setAttribute('data-sidebar-cycle-item','');
     row.innerHTML=`<a aria-current="page" href="${mode==='sidebar-wrong-chat'?'https://chatgpt.com/c/other':targetUrl}">Native saved chat</a><button id="saved-chat-menu" aria-haspopup="menu"><svg><use href="#ellipsis-horizontal" /></svg></button>`;
     const link=row.querySelector('a')!,trigger=row.querySelector('button')!;
+    link.textContent=mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')?'Server stored title':document.title;
     trigger.addEventListener('click',()=>openMenu(trigger,true));document.body.append(row);
-    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel') {
+    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')&&mode!=='sidebar-stale-visible') {
       link.hidden=true;trigger.hidden=true;
       const toggle=document.createElement('button');toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<svg><use href="#codex-icon-sidebar-hidden-light-16" /></svg>';
-      toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
+      if(mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
+        const panel=document.createElement('aside');panel.id='native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
+        panel.append(row);document.body.append(panel);toggle.setAttribute('aria-controls',panel.id);
+        const close=document.createElement('button');close.setAttribute('aria-controls',panel.id);close.hidden=true;panel.append(close);
+        const setOpen=(open:boolean)=>{toggle.setAttribute('aria-expanded',String(open));close.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;close.hidden=!open;panel.hidden=!open;
+          if(open)document.querySelector('header')!.setAttribute('inert','');else document.querySelector('header')!.removeAttribute('inert');};
+        toggle.addEventListener('click',()=>setOpen(toggle.getAttribute('aria-expanded')!=='true'));close.addEventListener('click',()=>setOpen(false));
+      }else toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
       document.querySelector('header')!.append(toggle);
     }
   }
@@ -119,7 +128,7 @@ function harness(mode: Mode = 'success') {
   ctx.sourceTitle=sourceTitle;
   const naming=runInContext('ChatGPTHandoffTitle.planNext({sourceUrl:"https://chatgpt.com/c/source",sourceTitle})',ctx) as unknown;
   storage['handoff:7']={id:'handoff',stage:'sent',sourceUrl,targetUrl:mode==='temporary-to-server'?temporaryUrl:targetUrl,sentAt:100,naming} satisfies Stored;
-  const rename = (options?:{recoverTemporaryTarget?:boolean;goalOperationId?:string})=>{ctx.renameOptions=options;return runInContext('renameSavedHandoff(7,"handoff",renameOptions)',ctx) as Promise<Result>;};
+  const rename = (options?:{recoverTemporaryTarget?:boolean;goalOperationId?:string;recoverNativeTitle?:string})=>{ctx.renameOptions=options;return runInContext('renameSavedHandoff(7,"handoff",renameOptions)',ctx) as Promise<Result>;};
   const probe = (options:ProbeOptions)=>{ctx.options=options;return runInContext('controlChatTitle(options)',ctx) as Result;};
   return {rename,probe,events,storage,storageWrites,document,location,
     advance(ms:number){time+=ms;},allowReady(){readiness.isReady=true;readiness.isStreaming=false;(share as unknown as HTMLButtonElement).disabled=false;},allowMenu(){menuReady=true;},
@@ -384,4 +393,97 @@ console.log('PASS: observed native rename DOM, local/canonical chat binding, ine
 {
  const h=harness();h.storage['chatgpt-goal:'+targetUrl]={phase:'sending',operation:{id:'goal-send',status:'intent'}};
  await h.rename({goalOperationId:'goal-send'});assert.equal(h.opened,0,'an already sending operation cannot authorize title UI');
+}
+
+// A modal can block native menu preparation before any title save intent.
+{
+ const h=harness();Object.assign(h.record,{titleStatus:'failed',titleReason:'title-or-form-changed',titlePreparationTitle:h.document.title});
+ const modal=h.document.createElement('section');modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');h.document.body.append(modal);
+ assert.equal((await h.rename()).waiting,true);assert.equal(h.saved,0);assert.equal(h.record.titleRefusalRetries,undefined);
+ modal.remove();assert.equal((await h.rename()).ok,true);assert.equal(h.saved,1);assert.equal(h.record.titleRefusalRetries,1);
+ await h.rename();assert.equal(h.saved,1,'safe preparation recovery never repeats a confirmed save');
+}
+for(const scenario of ['owner-title','save-intent','exhausted']){
+ const h=harness();Object.assign(h.record,{titleStatus:'failed',titleReason:'title-or-form-changed',titlePreparationTitle:h.document.title});
+ if(scenario==='owner-title')h.document.title='Owner renamed this chat';
+ if(scenario==='save-intent')h.record.titleSaveStartedAt=100;
+ if(scenario==='exhausted')h.record.titleRefusalRetries=2;
+ await h.rename();assert.equal(h.saved,0,scenario);assert.equal(h.opened,0,scenario);
+}
+
+{
+ const h=harness('sidebar-modal');const result=await h.rename();
+ assert.equal(result.ok,true,result.reason||'modal sidebar rename');assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1);
+ assert.equal(h.document.querySelector('#native-sidebar-panel')?.hasAttribute('hidden'),true,'close the native modal sidebar opened by this operation');
+ assert.equal(h.document.querySelector('header')?.hasAttribute('inert'),false);assert.equal(h.sent,0);
+}
+{
+ const h=harness('sidebar-modal'),options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+ assert.equal(h.probe({...options,action:'open'}).ok,true);
+ assert.equal(h.probe({...options,action:'select'}).reason,'sidebar-opening');
+ const foreign=h.document.createElement('section');foreign.setAttribute('role','dialog');foreign.setAttribute('aria-modal','true');
+ foreign.innerHTML='<form><input value="Owner input"><button type="submit">Submit</button></form>';h.document.body.append(foreign);
+ assert.equal(h.probe({...options,action:'select'}).ok,false,'the owned sidebar does not authorize a foreign modal');
+ h.probe({...options,action:'cancel'});
+ assert.equal(foreign.isConnected,true);assert.equal(foreign.querySelector('input')?.value,'Owner input');assert.equal(h.saved,0);
+}
+
+for(const mode of ['sidebar-native-title','sidebar-stale-title'] as const){
+ const h=harness(mode);const result=await h.rename();
+ assert.equal(result.ok,true,result.reason||mode);assert.equal(h.record.titleStatus,'confirmed');
+ assert.equal(h.saved,1);assert.equal(h.document.title,expectedTitle);assert.equal(h.sent,0);
+ assert.equal(h.document.querySelector('#native-sidebar-panel')?.hasAttribute('hidden'),true);
+}
+
+{
+ const h=harness('sidebar-stale-title');Object.assign(h.record,{titleStatus:'failed',titleReason:'title-edited-by-user',titlePreparationTitle:h.document.title,titlePrepareAttempts:3});
+ assert.equal((await h.rename({recoverNativeTitle:'Server stored title'})).ok,true);assert.equal(h.record.titleStatus,'confirmed');
+ assert.equal(h.document.title,expectedTitle);assert.equal(h.saved,1);
+ await h.rename({recoverNativeTitle:'Server stored title'});assert.equal(h.saved,1);
+}
+for(const scenario of ['wrong-native-title','save-intent','changed-browser-title']){
+ const h=harness('sidebar-stale-title');Object.assign(h.record,{titleStatus:'failed',titleReason:'title-edited-by-user',titlePreparationTitle:h.document.title});
+ if(scenario==='save-intent')h.record.titleSaveStartedAt=100;
+ if(scenario==='changed-browser-title')h.document.title='Owner changed browser title';
+ await h.rename({recoverNativeTitle:scenario==='wrong-native-title'?'Another native title':'Server stored title'});
+ assert.equal(h.saved,0,scenario);assert.equal(h.sent,0,scenario);
+}
+
+for(const mode of ['sidebar-stale-no-ack','sidebar-stale-failed-ack'] as const){
+ const h=harness(mode),original=h.document.title;await h.rename();
+ assert.equal(h.saved,1);assert.equal(h.record.titleStatus,'failed');
+ assert.equal(h.document.title,original,'optimistic native sidebar text cannot synchronize the browser title without server ACK');
+ await h.rename();assert.equal(h.saved,1,'a missing or failed save ACK never authorizes another save');
+}
+
+{
+ const h=harness('sidebar-stale-visible');
+ const result=await h.rename();
+ assert.equal(result.ok,true,result.reason||'visible sidebar must retain title operation through server ACK');
+ assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.document.title,expectedTitle);
+ assert.equal(h.saved,1);assert.equal(h.sent,0);
+ await h.rename();assert.equal(h.saved,1,'confirmed title sync never repeats the native save');
+}
+
+{
+ const h=harness();Object.assign(h.record,{titleStatus:'failed',titleReason:'title-form-changed',titlePreparationTitle:h.document.title,previousTitle:h.document.title,titleSaveStartedAt:100});
+ h.document.title='Owner manually renamed';await h.rename();
+ assert.equal(h.saved,0,'refused-save recovery must preserve original title baseline');
+ assert.equal(h.document.title,'Owner manually renamed');
+}
+
+{
+ const h=harness(),options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+ for(const action of ['open','select'])assert.equal(h.probe({...options,action}).ok,true);
+ const old=h.document.querySelector('[role="dialog"] form')!,foreign=old.cloneNode(true) as HTMLFormElement;
+ const input=foreign.querySelector('input')!;input.value=evidence.title;(input as any).__reactProps$foreign={value:input.value};
+ let cancelled=0;foreign.querySelector('button[type="button"]')!.addEventListener('click',()=>cancelled++);old.replaceWith(foreign);
+ h.probe({...options,action:'cancel'});assert.equal(cancelled,0,'cleanup cannot cancel an unowned replacement form');
+}
+{
+ const h=harness(),options={url:targetUrl,operationId:'handoff',title:expectedTitle,previousTitle:evidence.title};
+ for(const action of ['open','select','fill'])assert.equal(h.probe({...options,action}).ok,true);
+ const input=h.document.querySelector('[role="dialog"] input')!;
+ (input as any).__reactProps$test={value:evidence.title};
+ h.probe({...options,action:'cancel'});assert.equal(input.isConnected,false,'owned unchanged form cleanup tolerates lagging native props');
 }

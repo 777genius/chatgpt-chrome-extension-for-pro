@@ -2,7 +2,7 @@
 
 // Serialized into ChatGPT's MAIN world by chrome.scripting. No closure state,
 // cookies, network requests, or translated-string matching.
-function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null) {
+function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null, captureRetryHistory = false) {
   const alert = document.querySelectorAll('aside[role="alert"].text-danger, [role="status"]:has(.text-chatgpt-recovery)')[alertIndex];
   const button = alert?.querySelector('button');
   const origin = button || alert;
@@ -23,6 +23,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   let entries = null;
   let historyReady = null;
+  let historyBound = false;
   let recoveryEntry = null;
   let inputDeliveryError = false;
   const alertContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
@@ -42,6 +43,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
       const boundHistory=props.conversationId===pageId ||
         /^local-chatgpt:[a-z0-9-]+$/.test(props.conversationId||'') &&
         props.composerConversationId===props.conversationId && props.scrollStateConversationId===pageId;
+      historyBound=props.isChatConversation===true&&boundHistory;
       if (props.isChatConversation === true && boundHistory &&
           typeof props.isConversationFetching === 'boolean' && typeof props.isConversationLoading === 'boolean') {
         historyReady = !props.isConversationFetching && !props.isConversationLoading && props.hasLoadError === false;
@@ -62,28 +64,32 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   // explicit Start new chat also transfers Unknown error through the existing
   // history handoff. Without that action, its native fallback retries in place.
   const unknownServerError=Boolean(fiberKey) && /^unknown error[.!]?$/i.test(visibleError);
+  const recoverySurface = alert.matches('[role="status"]:has(.text-chatgpt-recovery)');
   const action = messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
     : unknownServerError || messageIds.has('chatgptConversations.responseError.retry') ||
-      (alert.querySelector('.text-chatgpt-recovery') && messageIds.has('errors.network.reconnecting_fallback')) || inputDeliveryError ? 'retry' : 'unknown';
-  const recoverySurface=Boolean(alert.querySelector('.text-chatgpt-recovery'))&&messageIds.has('errors.network.reconnecting_fallback');
+      recoverySurface || inputDeliveryError ? 'retry' : 'unknown';
   const nativeUsers=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='user-message');
   const nativeAssistant=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='assistant-message'&&typeof item.messageId==='string'&&item.messageId).at(-1);
   const nativeUser=nativeUsers.at(-1);
   const recoveryContainer=alert.closest('[data-content-search-turn-key],[data-testid^="conversation-turn-"]');
   const recoveryContainerKey=recoveryContainer?.getAttribute('data-content-search-turn-key')||recoveryContainer?.getAttribute('data-testid');
-  const recoveryBinding=recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&nativeAssistant&&(!nativeUser||nativeUser.messageId)?{
+  const recoveryBinding=recoverySurface&&recoveryContainerKey===recoveryEntry?.id&&recoveryEntry?.id&&(nativeUser?.messageId||nativeAssistant)&&(!nativeUser||nativeUser.messageId)?{
     kind:nativeUsers.length?'user':'assistant-only',url:location.origin+location.pathname,entryId:recoveryEntry.id,
-    assistantId:nativeAssistant.messageId,userId:nativeUser?.messageId||null}:null;
+    assistantId:nativeAssistant?.messageId||null,userId:nativeUser?.messageId||null}:null;
   if (recoveryAction === 'stop-recovery'||recoveryAction==='inspect-recovery') {
     const root = document.querySelector('[data-app-shell-active-page="true"]') || document;
     const chatRoute=value=>{try{const u=new URL(value);return u.origin==='https://chatgpt.com'?u.origin+(u.pathname==='/'?'/':u.pathname.replace(/\/$/,'')):'';}catch{return '';}};
     if (!chatRoute(expectedUrl)||chatRoute(location.href)!==chatRoute(expectedUrl) || !root.contains(alert) || !alert.getClientRects().length ||
-        !alert.querySelector('.text-chatgpt-recovery') || !messageIds.has('errors.network.reconnecting_fallback')) {
+        !recoverySurface) {
       return {ok:false,reason:'Статус прерванного соединения не подтверждён'};
     }
-    const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).at(-1);
+    const visibleRecoveryNode=node=>Boolean(node?.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
+    const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).filter(visibleRecoveryNode).at(-1);
     const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
-    const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&['kind','url','entryId','assistantId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key]));
+    const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&
+      ['kind','url','entryId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key])&&
+      (recoveryBinding.kind==='user'&&Boolean(recoveryBinding.userId)||
+        recoveryBinding.assistantId===expectedRecoveryBinding.assistantId));
     const assistantOnly=sameRecovery&&recoveryBinding.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
     if(expectedRecoveryBinding&&!sameRecovery)return {ok:false,reason:'Нативный ответ перед восстановлением изменился'};
     if(expectedPromptKey&&!assistantOnly&&(!latestUserKey||location.pathname+'|'+latestUserKey!==expectedPromptKey))return {ok:false,reason:'Запрос пользователя перед остановкой изменился'};
@@ -113,15 +119,28 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         }
       }
       if(sameRecovery&&voice&&nativeVoiceIdle&&controller&&controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')return {ok:true,stopped:false,idle:true,proof:'native-voice-idle',recoveryBinding};
-      return {ok:false,stopped:false,reason:'Нативная остановка или свободный редактор не подтверждены; автопродолжение отменено'};
+      const send=Array.from(root.querySelectorAll('button[data-testid="send-button"],button#composer-submit-button,[data-composer-body] button[type="submit"]')).find(node=>visible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true');
+      let nativeSendIdle=false;
+      const sendFiber=send&&Object.keys(send).find(key=>key.startsWith('__reactFiber$'));
+      for(let current=sendFiber&&send[sendFiber],i=0;current&&i<12;i++,current=current.return){
+        const props=current.memoizedProps;
+        if(props?.isLoading===false&&props.disabled===false&&props.isStartButtonAllowed===false)nativeSendIdle=true;
+      }
+      const sameComposer=send&&editor&&send.closest('form,[data-composer-body]')===editor.closest('form,[data-composer-body]');
+      const editorSubmitIdle=Boolean(sameRecovery&&sameComposer&&nativeSendIdle&&controller&&controller.submitReady===true&&
+        controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null);
+      // A draft replaces Voice with Send. This is only a candidate: the worker
+      // must additionally prove this exact request's terminal transport failure.
+      return {ok:false,stopped:false,retryable:true,needsIdleProof:sameRecovery,editorSubmitIdle,reason:'Нативная остановка или свободный редактор пока не подтверждены'};
     }
     if(recoveryAction==='inspect-recovery')return {ok:true,stopped:false,idle:false,needsStop:true,recoveryBinding};
     if (stop.disabled || stop.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Остановка временно недоступна'};
     stop.click();
     return {ok:true,stopped:true};
   }
-  if (!captureHistory || action !== 'new-chat') return { action, messages: [], recoveryBinding };
-  if (!entries) return { action, messages: [], incomplete: true };
+  if (!captureHistory || action !== 'new-chat'&&!(captureRetryHistory&&action==='retry')) return { action, messages: [], recoveryBinding,
+    deliveryUserSentAtMs:inputDeliveryError?recoveryEntry?.timestampTurns?.filter(item=>item.role==='user').at(-1)?.sentAtMs:null };
+  if (!entries||!historyBound) return { action, messages: [], incomplete: true };
   function messageText(item) {
     if (item.type === 'user-message') return typeof item.message === 'string' ? item.message : '';
     const fallbacks = (item.contentReferences || []).map((ref) => ref.model_dil_v2?.fallbackMarkdown).filter((text) => typeof text === 'string' && text.trim());
@@ -140,29 +159,15 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   const selected = new Set();
   for (const role of ['user', 'assistant']) {
-    all.map((item, index) => ({ item, index })).filter(({ item }) => item.role === role).slice(-2)
+    all.map((item, index) => ({ item, index })).filter(({ item }) => item.role === role).slice(-3)
       .forEach(({ index }) => selected.add(index));
   }
   const messages = all.filter((_, index) => selected.has(index));
-  const shortHistory = messages.filter((item) => item.role === 'user').length < 2 ||
-    messages.filter((item) => item.role === 'assistant').length < 2;
+  const shortHistory = messages.filter((item) => item.role === 'user').length < 3 ||
+    messages.filter((item) => item.role === 'assistant').length < 3;
   return { action, messages, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
     messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
 
-}
-
-function inspectChatAttachment(fileName) {
-  const page = document.querySelector('[data-app-shell-active-page="true"]') || document;
-  const root = page.querySelector('[data-composer-attachments]');
-  if (!root) return { status: 'missing' };
-  const label = Array.from(root.querySelectorAll('*')).find((node) => !node.children.length && node.textContent === fileName);
-  if (!label) return { status: 'missing' };
-  const key = Object.keys(label).find((name) => name.startsWith('__reactFiber$'));
-  for (let fiber = key && label[key], i = 0; fiber && i < 20; i += 1, fiber = fiber.return) {
-    const attachment = fiber.memoizedProps?.attachment;
-    if (attachment?.name === fileName) return { status: attachment.status || 'unknown' };
-  }
-  return { status: 'unknown' };
 }
 
 // Read-only acknowledgement of an already clicked handoff. The composer being
@@ -221,6 +226,39 @@ function controlChatComposer(options) {
     const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
     return rects.some(rect=>rect.width>0&&rect.height>0);
   };
+  // Host fibers can retain an old uploading object after their owner committed
+  // the ready file. Correlate snapshots by uploadId, never by filename alone.
+  function nativeFiles(container) {
+    const snapshots=new Set();
+    for(const node of container?.querySelectorAll('*')||[]) {
+      const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
+      for(let f=key&&node[key],i=0;f&&i<20;i++,f=f.return) {
+        const a=f.memoizedProps?.attachment;if(typeof a?.name==='string')snapshots.add(a);
+      }
+    }
+    const groups=new Map();
+    for(const a of snapshots){const key=typeof a.uploadId==='string'&&a.uploadId?'upload:'+a.uploadId:a;
+      if(!groups.has(key))groups.set(key,[]);groups.get(key).push(a);}
+    const files=[];
+    for(const items of groups.values()) {
+      const first=items[0];
+      if(items.some(a=>a.name!==first.name||Number.isFinite(a.size)&&Number.isFinite(first.size)&&a.size!==first.size))return null;
+      if(items.length===1){files.push(first);continue;}
+      if(items.some(a=>!['uploading','ready'].includes(a.status)))return null;
+      const ready=items.filter(a=>a.status==='ready'&&typeof a.id==='string'&&a.id);
+      if(ready.length&&new Set(ready.map(a=>a.id)).size===1)files.push(ready[0]);
+      else if(items.every(a=>a.status==='uploading'))files.push(first);
+      else return null;
+    }
+    return files;
+  }
+  if(options.action==='inspect-attachment') {
+    if(location.href!==options.url)return {ok:false,status:'unknown'};
+    const container=root.querySelector('[data-composer-attachments]'),files=nativeFiles(container);
+    if(!container||!container.children.length)return {ok:true,status:'missing'};
+    if(!files||files.length!==1||files[0].name!==options.fileName)return {ok:true,status:'unknown'};
+    return {ok:true,status:files[0].status||'unknown'};
+  }
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
   const composer=editor.closest('form')||editor.closest('[data-composer-body]');
@@ -305,24 +343,36 @@ function controlChatComposer(options) {
     typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
     effort===options.expectedEffort&&model===options.expectedModel;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
+  if(options.action==='inspect-plain-retry-draft') {
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    const plain=typeof controller.getPlainText==='function'?controller.getPlainText():null;
+    return {...inspection,ok:noSystemHints&&typeof prompt==='string'&&plain===prompt&&visibleText()===prompt&&
+      controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&(ready||prompt==='')&&!attachments?.children.length};
+  }
+  if(options.action==='inspect-empty-retry') {
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    return {...inspection,ok:matches&&prompt===''&&!attachments?.children.length};
+  }
+  const inspectingEmptyHandoff=options.action==='inspect-empty-handoff';
+  if(inspectingEmptyHandoff) {
+    const emptyRoot=location.pathname==='/'&&!root.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]');
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    if(!emptyRoot||!matches||!ready||prompt!==''||controller.pendingBrowserAutocompleteSubmission!=null)return {...inspection,ok:false};
+    if(!attachments?.children.length)return inspection;
+    // Reuse the exact one-ready-file proof below; never accept user files.
+    if(!options.fileName)return {...inspection,ok:false};
+  }
   if (options.action === 'inspect' && !options.fileName) return inspection;
-  if (options.action !== 'inspect' && !inspectingSeed && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || !modeMatches)) {
+  if (options.action !== 'inspect' && !inspectingSeed && !inspectingEmptyHandoff && (options.action !== 'send' || !matches || !ready || (options.requireMax && effort !== 'max') || !modeMatches)) {
     return {ok:false,reason:'Текст, готовность редактора или уровень рассуждения не подтверждены',matches,ready,effort,model};
   }
   const attachments = composer.querySelector('[data-composer-attachments]');
   if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};
   if (options.fileName) {
-    const found = new Set();
-    for (const node of attachments?.querySelectorAll('*') || []) {
-      const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
-      for(let fiber=key&&node[key],i=0;fiber&&i<5;i++,fiber=fiber.return){
-        const attachment=fiber.memoizedProps?.attachment;
-        if(attachment?.name)found.add(attachment);
-      }
-    }
-    if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
+    const files=nativeFiles(attachments);
+    if(!files||files.length!==1||files[0].name!==options.fileName||files[0].status!=='ready') return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
-  if (options.action === 'inspect' || inspectingSeed) return inspection;
+  if (options.action === 'inspect' || inspectingSeed || inspectingEmptyHandoff) return inspection;
   const button = Array.from(composer.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Кнопка отправки недоступна'};
   // No await between checking the actual prompt and clicking its own button.

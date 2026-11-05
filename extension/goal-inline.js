@@ -8,12 +8,15 @@
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
     const prefix='chatgpt-goal-inline-'+(++instance);
+    const ownerToken=prefix+'-'+Math.random().toString(36).slice(2);
+    const ownerAttribute='data-chatgpt-goal-inline-owner';
+    let ownsDOM=false;
     let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false,loading=false;
     let busy=false,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
     const cleanups=[];
     let observer=null,binding=null,bindTimer=null,bindGeneration=0,failedBinding=null;
     const ROOT_URL='https://chatgpt.com/';
-    const BIND_WINDOW=30000;
+    const BIND_WINDOW=30*60*1000;
     const node=(tag,attrs={},text='')=>{
       const el=document.createElement(tag);
       for(const [name,value] of Object.entries(attrs))el.setAttribute(name,value);
@@ -24,10 +27,46 @@
       target.addEventListener(type,fn,options);
       cleanups.push(()=>target.removeEventListener(type,fn,options));
     };
-    const valid=()=>!disposed&&alive();
+    const valid=()=>!disposed&&alive()&&(!ownsDOM||document.documentElement?.getAttribute(ownerAttribute)===ownerToken);
     const current=()=>policy.pageUrl(getUrl());
     const armed=()=>['armed','intent'].includes(composer?.phase);
     const active=()=>!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
+    const banner=node('div',{class:'cggi-banner','data-chatgpt-goal-inline':'banner'});
+    const bannerStatus=node('strong'),bannerText=node('span',{class:'cggi-summary'}),bannerTime=node('span');
+    banner.append(bannerStatus,bannerText,bannerTime);
+    const icons={
+      stop:'<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>',
+      pause:'<circle cx="12" cy="12" r="9"/><path d="M10 9v6m4-6v6"/>',
+      resume:'<circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/>',
+      expand:'<path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/>'
+    };
+    const bannerActions={};
+    for(const [action,label] of [['stop','Stop Goal'],['pause','Pause Goal'],['resume','Resume Goal'],['expand','Goal details']]) {
+      const button=node('button',{type:'button','aria-label':label,title:label});
+      button.innerHTML='<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+icons[action]+'</svg>';
+      bannerActions[action]=button;
+      banner.append(button);
+      listen(button,'click',event=>{if(consent(event,button))action==='expand'?show(!open):void act(action);});
+    }
+    banner.hidden=true;
+    let elapsedId=null,elapsedBase=0,elapsedSince=null,pageOpen=true;
+    function updateElapsed() {
+      const id=record?.id||null, now=Date.now();
+      if(elapsedId&&elapsedSince!==null) {
+        elapsedBase+=Math.max(0,now-elapsedSince);
+        try{win.localStorage.setItem('cggi-elapsed:'+elapsedId,String(elapsedBase));}catch{}
+      }
+      if(id!==elapsedId) {
+        elapsedId=id;elapsedBase=0;
+        try{if(id)elapsedBase=Math.max(0,Number(win.localStorage.getItem('cggi-elapsed:'+id))||0);}catch{}
+      }
+      elapsedSince=pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
+      const seconds=Math.floor(elapsedBase/1000),minutes=Math.floor(seconds/60);
+      bannerTime.textContent=id?(minutes>=60?Math.floor(minutes/60)+'h '+minutes%60+'m':minutes?minutes+'m':seconds+'s'):'';
+    }
+    const elapsedTimer=win.setInterval?.(updateElapsed,1000);
+    listen(win,'pagehide',()=>{pageOpen=false;updateElapsed();});
+    listen(win,'pageshow',()=>{pageOpen=true;updateElapsed();});
     const controls=node('span',{'data-chatgpt-goal-inline':'controls',class:'cggi-controls'});
     const toggle=node('button',{type:'button',role:'switch','aria-label':'Goal','aria-checked':'false',class:'cggi-switch'},'Goal');
     const track=node('span',{'aria-hidden':'true',class:'cggi-track'});
@@ -63,9 +102,9 @@
       group.append(label,input);limits.append(group);
     }
     panel.append(limits);
-    panel.append(node('p',{class:'cggi-note'},'Write the goal in the message box and send it yourself. Goal checks completion after the first answer. GOAL_COMPLETE is the model’s declaration of completion.'));
+    panel.append(node('p',{class:'cggi-note'},'Write the goal in the message box and send it yourself. Goal checks completion after the first answer. GOAL_COMPLETE declares completion; GOAL_BLOCKED stops a blocked goal.'));
     const actions=node('div',{class:'cggi-actions'}),buttons={};
-    for(const [action,title] of [['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
+    for(const [action,title] of [['restore','Restore saved goal'],['pause','Pause'],['resume','Resume'],['stop','Stop Goal']]) {
       const button=node('button',{type:'button','data-goal-action':action},title);
       buttons[action]=button;actions.append(button);
       // Shared page DOM is not authority to change durable Goal state.
@@ -74,6 +113,12 @@
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
     style.textContent=`
+.cggi-banner{box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:rgba(127,127,127,.12);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.cggi-banner[hidden],.cggi-banner button[hidden]{display:none}
+.cggi-banner button{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:none;color:inherit;opacity:.65;cursor:pointer}
+.cggi-banner button:hover{background:rgba(127,127,127,.17);opacity:1}.cggi-banner button:disabled{opacity:.3;cursor:default}
+.cggi-banner:not([hidden])+form,.cggi-banner:not([hidden])+form [data-composer-body],.cggi-banner:not([hidden])+form [data-composer-surface],.cggi-banner:not([hidden])+form [data-composer-layout],.cggi-banner:not([hidden])+[data-composer-body]{border-top-left-radius:0!important;border-top-right-radius:0!important}
+.cggi-banner strong,.cggi-banner span:nth-child(3){white-space:nowrap;font-size:12px}.cggi-banner .cggi-summary{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.78}
 .cggi-controls{display:inline-flex;align-items:center;gap:1px;flex-shrink:0;margin-inline-start:6px;color:inherit;font:500 12px/1.2 system-ui,sans-serif}
 .cggi-controls button{box-sizing:border-box;color:inherit;font:inherit;cursor:pointer;background:transparent;border:0}
 .cggi-switch{display:inline-flex;align-items:center;gap:6px;min-height:30px;border-radius:16px!important;padding:4px 6px!important}
@@ -84,7 +129,7 @@
 .cggi-details{padding:4px!important;min-width:24px;min-height:30px;border-radius:12px;font-size:18px!important}
 .cggi-controls button:disabled{opacity:.5;cursor:default}.cggi-controls button:focus-visible,.cggi-panel button:focus-visible{outline:2px solid #358af0;outline-offset:2px}
 .cggi-panel{box-sizing:border-box;position:fixed;z-index:2147483646;width:360px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;overscroll-behavior:contain;padding:16px;border:1px solid #d3d3d3;border-radius:16px;background:#fff;color:#202123;box-shadow:0 8px 36px #0003;font:13px/1.45 system-ui,sans-serif;color-scheme:light}
-.cggi-panel[hidden]{display:none!important}.cggi-header{display:flex;justify-content:space-between;align-items:center;font-size:16px}.cggi-panel button{font:inherit;cursor:pointer;border:1px solid #ccc;border-radius:8px;padding:7px 10px;background:transparent;color:inherit}.cggi-close{border:0!important;font-size:22px!important;padding:0 5px!important}.cggi-panel label{display:block;font-weight:500;margin-top:10px}.cggi-panel textarea,.cggi-panel input{display:block;box-sizing:border-box;width:100%;margin-top:4px;border:1px solid #b6b6b6;border-radius:8px;padding:8px;background:transparent;color:inherit;font:inherit}.cggi-panel textarea{resize:vertical;min-height:50px;max-height:25vh}.cggi-panel :disabled{opacity:.55;cursor:default}.cggi-limits{display:flex;gap:12px}.cggi-limits>div{flex:1;min-width:0}.cggi-status{overflow-wrap:anywhere;margin:10px 0}.cggi-note{font-size:11px;opacity:.7}.cggi-actions{display:flex;flex-wrap:wrap;gap:8px}
+.cggi-panel[hidden]{display:none!important}[data-goal-objective]{white-space:pre-wrap}.cggi-header{display:flex;justify-content:space-between;align-items:center;font-size:16px}.cggi-panel button{font:inherit;cursor:pointer;border:1px solid #ccc;border-radius:8px;padding:7px 10px;background:transparent;color:inherit}.cggi-close{border:0!important;font-size:22px!important;padding:0 5px!important}.cggi-panel label{display:block;font-weight:500;margin-top:10px}.cggi-panel textarea,.cggi-panel input{display:block;box-sizing:border-box;width:100%;margin-top:4px;border:1px solid #b6b6b6;border-radius:8px;padding:8px;background:transparent;color:inherit;font:inherit}.cggi-panel textarea{resize:vertical;min-height:50px;max-height:25vh}.cggi-panel :disabled{opacity:.55;cursor:default}.cggi-limits{display:flex;gap:12px}.cggi-limits>div{flex:1;min-width:0}.cggi-status{overflow-wrap:anywhere;margin:10px 0}.cggi-note{font-size:11px;opacity:.7}.cggi-actions{display:flex;flex-wrap:wrap;gap:8px}
 html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ececec;border-color:#555;color-scheme:dark}
 @media(prefers-color-scheme:dark){html:not(.light):not([data-theme=light]) .cggi-panel{background:#242424;color:#ececec;border-color:#555;color-scheme:dark}}
 `;
@@ -94,25 +139,39 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       hydrated=null;
     }
     resetFields();
-    const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Waiting for full answer',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked for safety',stopped:'Stopped',moved:'Moved to a new chat'};
+    const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Active',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
     function render() {
       if(!valid())return;
+      const goalText=record?.goal||(composer?.phase==='intent'?composer.intent?.text:'');
+      banner.hidden=!goalText||record?.phase==='moved';
+      bannerStatus.textContent='◎ '+(record?.phase==='blocked'&&record.operation?.status==='reserved'?'Send paused':record?(phases[record.phase]||'Goal'):'Goal pending');
+      bannerText.textContent=goalText||'';
+      banner.title=goalText||'';
+      updateElapsed();
       const on=(active()&&!record.stopRequested)||armed();
       toggle.setAttribute('aria-checked',String(on));
       toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&(!!record?.operation||record?.phase==='blocked'));
       toggle.title=!route?'Goal is available on ChatGPT chat pages':!loaded&&error?'Retry loading Goal':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
-      const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused';
+      const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused'||
+        record?.phase==='blocked'&&!record.operation&&record.reason==='Восстановление запроса завершилось ошибкой';
       for(const input of Object.values(fields))input.disabled=!editable;
+      const restorable=!record&&composer?.phase==='intent'&&Boolean(policy.canonical(route));
+      buttons.restore.hidden=!restorable;
+      buttons.restore.disabled=busy||loading||!loaded;
       buttons.pause.hidden=!active()||paused;
       buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
       buttons.pause.disabled=busy||loading||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
       buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
       buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
-      objective.hidden=!record?.goal;
-      objective.textContent=record?.goal?'Objective: '+record.goal:'';
+      for(const action of ['stop','pause','resume']) {
+        bannerActions[action].hidden=buttons[action].hidden;
+        bannerActions[action].disabled=buttons[action].disabled;
+      }
+      objective.hidden=!record?.goal&&!(restorable&&composer.intent?.text);
+      objective.textContent=restorable?'Saved objective: '+(composer.intent?.text||''):record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
       if(record) {
         message=(phases[record.phase]||record.phase)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
@@ -124,7 +183,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
       }
       if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
-      if(composer?.phase==='intent')message='Waiting to confirm the message you sent. Goal will follow this message after confirmation.';
+      if(composer?.phase==='intent')message='Confirmation pending. Your objective is saved. Background verification continues without resending your message.';
       status.textContent=error||(busy?'Saving Goal…':message);
       toggle.setAttribute('aria-description',status.textContent);
       if(open)position();
@@ -207,7 +266,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function attach() {
       // Streaming mutations do not rescan the conversation while our anchor lives.
       if(anchor?.isConnected&&editor?.isConnected&&controls.isConnected&&controls.previousElementSibling===layoutItem&&visible(anchor)&&visible(editor))return;
-      controls.remove();anchor=null;editor=null;layoutItem=null;
+      controls.remove();banner.remove();anchor=null;editor=null;layoutItem=null;
       const page=document.querySelector('[data-app-shell-active-page="true"]')||document;
       for(const candidate of page.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea,[data-composer-markdown][contenteditable="true"]')) {
         if(!visible(candidate))continue;
@@ -216,7 +275,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(!reasoning||!visible(reasoning))continue;
         editor=candidate;anchor=reasoning;
         layoutItem=inlineItem(reasoning,composer);
-        layoutItem.after(controls);break;
+        layoutItem.after(controls);composer.before?.(banner);break;
       }
       if(open)position();
     }
@@ -227,6 +286,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(observer)return true;
       const target=document.documentElement;
       if(!target)return false;
+      // Extension reloads can replace the isolated world while leaving its DOM.
+      // Acquire one shared UI slot before removing only extension-owned nodes.
+      target.setAttribute(ownerAttribute,ownerToken);ownsDOM=true;
+      for(const stale of document.querySelectorAll('[data-chatgpt-goal-inline]'))stale.remove();
       (document.head||target).append(style);
       observer=new win.MutationObserver(()=>{
         if(!valid())return;
@@ -262,11 +325,12 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function scheduleBind() {
       if(!binding||binding.stopped||!binding.persisted||binding.inFlight||bindTimer!==null||!valid())return;
       if(Date.now()>=binding.deadline) {
-        bindingFailure('Message confirmation timed out. Goal has not adopted the message. Turn Goal off and check this chat.');
-        render();return;
+        binding.observationExpired=true;render();return;
       }
       const token=binding.token;
-      bindTimer=win.setTimeout(()=>{bindTimer=null;void pollBind(token);},Math.min(250,binding.deadline-Date.now()));
+      const age=Date.now()-(binding.deadline-BIND_WINDOW);
+      const interval=age<30000?5000:age<300000?30000:300000;
+      bindTimer=win.setTimeout(()=>{bindTimer=null;void pollBind(token);},Math.min(interval,binding.deadline-Date.now()));
     }
     function resumeBinding() {
       if(composer?.phase!=='intent') {if(binding?.persisted)stopBinding();return;}
@@ -278,7 +342,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
           deadline:Number(composer.intent?.eventAt??composer.eventAt)+BIND_WINDOW};
       } else binding.persisted=true;
       if(!Number.isFinite(binding.deadline)||binding.deadline<=BIND_WINDOW) {
-        bindingFailure('Goal intent has no valid confirmation time. Turn Goal off and check this chat.');render();return;
+        binding.observationExpired=true;render();return;
       }
       scheduleBind();
     }
@@ -298,7 +362,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'bind',armId:id,url});
         if(!contextMatches(token))return;
-        if(!result?.ok)throw Error(result?.error||result?.reason||'Goal message confirmation failed');
+        if(!result?.ok)throw Object.assign(Error(result?.error||result?.reason||'Goal message confirmation is pending'),{confirmationRefused:result?.refused===true});
         // Re-read the real page URL in contextMatches before accepting a result.
         if(deferAllocation(result))return;
         if(result?.url&&![url,route].includes(policy.pageUrl(result.url)))throw Error('Goal confirmation belongs to another chat');
@@ -313,7 +377,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         stopBinding();error='';failedBinding=null;render();
       } catch(cause) {
         if(!contextMatches(token))return;
-        binding.inFlight=false;bindingFailure('Goal: '+String(cause?.message||cause));render();
+        binding.inFlight=false;
+        if(cause?.confirmationRefused===true)bindingFailure('Goal: '+String(cause?.message||cause));
+        else {error='';scheduleBind();}
+        render();
       }
     }
     async function refresh() {
@@ -339,7 +406,6 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       } catch(cause) {
         if(!accepts(url,revision,serial))return;
         loaded=false;error='Goal: '+String(cause?.message||cause);
-        if(controls.isConnected)show(true,false);
       } finally {
         if(accepts(url,revision,serial)){loading=false;render();}
       }
@@ -359,6 +425,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
             maxContinuations:Number(fields.maxContinuations.value),maxMinutes:Number(fields.maxMinutes.value)});
         } catch(cause){error=String(cause?.message||cause);render();return;}
       }
+      if(action==='restore'){if(record||composer?.phase!=='intent')return;input={armId:composer.id};stopBinding();}
       if(action==='disarm') {
         if(!composer?.id)return;
         input={armId:composer.id};
@@ -383,7 +450,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         }
       }
     }
-    async function manualIntent({text,baselineKey,eventAt}) {
+    async function manualIntent({text,baselineKey,eventAt,linkTargets}) {
       if(!valid())return {ok:false};
       if(syncRoute()){void refresh();return {ok:false};}
       if(!route||!loaded||busy||composer?.phase!=='armed'||typeof text!=='string'||!text.trim()||
@@ -394,7 +461,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       const token=binding.token;
       busy=true;loading=false;error='';failedBinding=null;sequence++;render();
       try {
-        const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt});
+        const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt,linkTargets});
         if(!contextMatches(token))return {ok:false};
         if(result?.url&&![url,route].includes(policy.pageUrl(result.url)))throw Error('Goal intent belongs to another chat');
         if(!result?.ok)throw Error(result?.error||result?.reason||'Goal intent was not saved');
@@ -433,7 +500,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       });
     }
     listen(document,'keydown',event=>{if(open&&event.key==='Escape'){event.preventDefault();event.stopPropagation();show(false);}});
-    listen(document,'pointerdown',event=>{if(open&&!panel.contains(event.target)&&!controls.contains(event.target)){open=false;panel.hidden=true;render();}});
+    listen(document,'pointerdown',event=>{if(open&&!panel.contains(event.target)&&!controls.contains(event.target)&&!banner.contains(event.target)){open=false;panel.hidden=true;render();}});
     listen(win,'resize',position);
     listen(win,'scroll',position,true);
     listen(win,'popstate',()=>void refresh());
@@ -446,12 +513,15 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     void refresh();
     function dispose() {
       if(disposed)return;
+      updateElapsed();elapsedSince=null;
+      if(elapsedTimer!=null)win.clearInterval?.(elapsedTimer);
       disposed=true;epoch++;sequence++;
       observer?.disconnect();
       stopBinding();
       if(typeof unsubscribe==='function')unsubscribe();
       for(const cleanup of cleanups)cleanup();
-      controls.remove();panel.remove();style.remove();
+      controls.remove();banner.remove();panel.remove();style.remove();
+      if(document.documentElement?.getAttribute(ownerAttribute)===ownerToken)document.documentElement.removeAttribute(ownerAttribute);
     }
     return Object.freeze({refresh,dispose,manualIntent});
   }

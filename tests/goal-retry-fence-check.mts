@@ -28,7 +28,7 @@ function fixture() {
         dispatches.push(message);return {ok:true};
       }}
     };
-    context=createContext({chrome,URL,console,setTimeout,clearTimeout,
+    context=createContext({chrome,URL,console,setTimeout,clearTimeout,bindNativeManualSupplement:async()=>({ok:true,pending:false}),
       crypto:{randomUUID:()=>`fence-operation-${++sequence}`},
       Date:class extends Date {static now(){return clock;}},
       messageChatUrl:(message:Value)=>message.url,
@@ -210,4 +210,93 @@ function fixture() {
   assert.equal(env.data[goalKey].phase,'recovering','current request recovery remains enabled');
 }
 
+{
+ const env=fixture();await env.waitingGoal();
+ const original=structuredClone(env.data[goalKey]);
+ env.data[goalKey]={...env.data[goalKey],phase:'blocked',operation:null,reason:'Восстановление запроса завершилось ошибкой'};
+ const confirmed={url,tabId:7,kind:'retry.confirmed',attemptId:'1000100',promptKey:'/c/manual-retry-fence|recovered-user'};
+ await env.evaluate('goalController.retry(confirmed)',{confirmed});
+ assert.equal(env.data[goalKey].phase,'waiting','confirmed recovery resumes a no-operation recovery block');
+ assert.equal(env.data[goalKey].expectedPromptKey,confirmed.promptKey);
+ for(const key of ['id','goal','deadlineAt','maxContinuations','continuations'])assert.equal(env.data[goalKey][key],original[key]);
+ env.data[goalKey]={...env.data[goalKey],phase:'stopped',reason:'Stopped by user'};
+ await env.evaluate('goalController.retry(confirmed)',{confirmed});
+ assert.equal(env.data[goalKey].phase,'stopped','retry confirmation cannot resume a stopped goal');
+ env.data[goalKey]={...env.data[goalKey],phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',operation:{id:'unknown-click'}};
+ await env.evaluate('goalController.retry(confirmed)',{confirmed});
+ assert.equal(env.data[goalKey].phase,'blocked','unresolved send retains its fence');
+}
+
+// A transient native probe failure must not hide the existing durable Goal.
+for(const failure of ['supplement','prompt']) {
+ let recovered=0;
+ let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
+ const context=createContext({
+  chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
+  ChatGPTGoalPolicy:{canonical:(value:string)=>value},
+  bindNativeManualSupplement:async()=>{if(failure==='supplement')throw Error('native supplement probe unavailable');return {ok:true};},
+  reconcileGoalMarker:async()=>null,
+  reconcileWaitingGoalAnswer:async()=>null,
+  reconcileGoalPromptBinding:async()=>{if(failure==='prompt')throw Error('native prompt probe unavailable');},
+  goalController:{composerGet:async()=>null,get:async()=>null,recoverTab:async()=>{recovered++;return {ok:true};}}
+ });
+ runInContext(listenerSource,context);
+ const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(recovered,1,failure+' failure must still reach durable recovery');
+}
+
+// Pause/Stop may arrive after recovery preflight or after its durable intent.
+for(const action of ['pause','stop']) {
+ for(const afterIntent of [false,true]) {
+  const env=fixture();await env.waitingGoal();
+  const event={operationId:'recovered-retry',attemptId:'1000010',promptKey:env.data[goalKey].expectedPromptKey};
+  await env.append({kind:'retry.planned',...event});
+  if(afterIntent)await env.append({kind:'retry.send_intent',...event});
+  await env.evaluate('goalController.control(options)',{options:{action,url,tabId:7}});
+  env.boot();
+  await assert.rejects(()=>env.append({kind:afterIntent?'send.authorized':'retry.send_intent',...event}),
+    `${action} must fence recovered retries at ${afterIntent?'authorization':'intent'} after restart`);
+  assert.notEqual(env.active()?.consumed,true,'refused retry never consumes a click grant');
+ }
+}
+
 console.log('Goal/retry fences: confirmed manual supersession, stale callbacks, restart, exact consumed grants and new Goal binding passed.');
+
+// The second history probe can yield while a newer manual request starts.
+{
+ const content=readFileSync('extension/content-script.js','utf8');
+ const route=content.slice(content.indexOf('  async function routeError('),content.indexOf('  function scheduleHandoffReadiness('));
+ let handoffs=0,probes=0;
+ const context=createContext({location:{pathname:'/c/source'},__chatgptNotifierAttemptId:'old',__chatgptNotifierRequestId:'old-request',
+  document:{querySelectorAll:()=>[]},ERROR_SELECTOR:'error',normalize:(v:string)=>v,
+  retryState:()=>({repeatedError:'failure',sameErrorCount:3,blocked:false}),audit:async()=>{},
+  beginHandoff:async()=>{handoffs++;},notifyOperationWarning:()=>{},
+  runtimeMessage:async()=>{if(++probes===2){context.__chatgptNotifierAttemptId='new';context.__chatgptNotifierRequestId='new-request';}
+    return {ok:true,action:'retry',messages:[{role:'user',text:'Synthetic context'}]};}
+ });
+ runInContext(route,context);
+ await runInContext("routeError({response:'failure'},'/c/source|old',{})",context);
+ assert.equal(handoffs,0,'a newer request during history inspection cancels stale escalation');
+}
+
+{
+ const env=fixture();
+ env.evaluate(`chrome.scripting={executeScript:async()=>{throw Error('fixture native unavailable');}};inspectCompletedTurn=()=>{};`);
+ const result=await env.log({kind:'retry.planned',operationId:'probe-fallback',attemptId:'1000010',promptKey:'/c/manual-retry-fence|user'});
+ assert.equal(result.ok,true,'optional native claim enrichment cannot cancel guarded retry planning');
+}
+{
+ const env=fixture();await env.waitingGoal();
+ env.evaluate(`reconcileNativeGoalAcknowledgement=reconcileAcceptedHandoffGoal=reconcileGoalPreparation=async()=>{throw Error('fixture unavailable');};`);
+ const result=await env.message({type:'CHATGPT_GOAL_INLINE',action:'get',url});
+ assert.equal(result.ok,true,'failed opportunistic reconciliation must retain Goal controls');
+ assert.equal(result.record.id,env.data[goalKey].id);
+}
+
+for(const action of ['pause','stop']) {
+ const env=fixture();await env.waitingGoal();
+ await env.evaluate('goalController.control(options)',{options:{action,url,tabId:7}});
+ await assert.rejects(()=>env.append({kind:'retry.preparation_recovered',operationId:'late-recovery',attemptId:'1000010'}),
+  'Pause/Stop also fences composer preparation recovery');
+}

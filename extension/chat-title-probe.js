@@ -13,21 +13,39 @@ function controlChatTitle(options) {
         ? `${url.origin}${url.pathname.replace(/\/$/,'')}` : '';
     } catch { return ''; }
   };
+  function ownedSidebar(state) {
+    const id=state?.sidebarPanelId,toggle=state?.sidebarToggle;
+    if(!id||!toggle?.isConnected||toggle.getAttribute('aria-controls')!==id||toggle.getAttribute('aria-expanded')!=='true')return null;
+    const panel=document.getElementById(id);
+    return panel?.getAttribute('role')==='dialog'&&panel.getAttribute('aria-modal')==='true'&&visible(panel)?panel:null;
+  }
+  function savedChatLink(url) {
+    const links=Array.from(document.querySelectorAll('a[aria-current="page"][href]'))
+      .filter(node=>visible(node)&&chatUrl(node.href)===url&&node.closest('[data-sidebar-cycle-item]'));
+    return links.length===1?links[0]:null;
+  }
   if (options.action==='cancel') {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
-      const candidates=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
-      const input=state.input||(state.saved?state.form?.querySelector('input'):state.selected&&candidates.length===1?candidates[0]:null);
-      if(chatUrl(location.href)===state.url && input && [state.title,state.previousTitle].includes(input.value)) input.closest('form')?.querySelector('button[type="button"]')?.click();
+      const input=state.form?.isConnected?state.form.querySelector('input'):null;
+      const unchanged=[state.title,state.previousTitle,state.previousFormTitle];
+      const unchangedInput=input&&input.closest('form')===state.form&&unchanged.includes(input.value);
+      if(chatUrl(location.href)===state.url && unchangedInput) input.closest('form')?.querySelector('button[type="button"]')?.click();
       if(chatUrl(location.href)===state.url && !state.selected) {
         const menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
       }
       const ownDialog=state.form?.closest('[role="dialog"][aria-modal="true"]');
       const ownClosing=chatUrl(location.href)===state.url&&state.sidebarToggle&&ownDialog&&visible(ownDialog)&&
-        input&&[state.title,state.previousTitle].includes(input.value);
+        unchangedInput;
       if(ownClosing&&!options.finalCleanup)return {ok:true,pending:true};
-      if(chatUrl(location.href)===state.url && state.sidebarToggle && visible(state.sidebarToggle) &&
+      const sidebar=ownedSidebar(state);
+      if(chatUrl(location.href)===state.url&&sidebar&&
+          !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(node=>node!==sidebar&&visible(node))) {
+        const close=Array.from(sidebar.querySelectorAll('button[aria-controls][aria-expanded="true"]'))
+          .find(node=>node.getAttribute('aria-controls')===state.sidebarPanelId&&visible(node)&&!node.disabled);
+        close?.click();
+      } else if(chatUrl(location.href)===state.url && state.sidebarToggle && visible(state.sidebarToggle) &&
           state.sidebarToggle.getAttribute('aria-expanded')==='true' &&
           !Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) state.sidebarToggle.click();
       delete globalThis.__chatgptNotifierTitleOperation;
@@ -79,7 +97,9 @@ function controlChatTitle(options) {
     if(query?.state?.data?.conversation_id && query.state.data.conversation_id!==chatId)canonicalMismatch=true;
   }
   ready=ready&&!canonicalMismatch&&!streaming;
-  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,title:document.title,url:location.href,
+  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,
+    modalOpen:Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible),title:document.title,
+    sidebarTitle:savedChatLink(options.url)?.textContent||null,url:location.href,
     conversationId:nativeConversationIds.size===1?Array.from(nativeConversationIds)[0]:null};
   if (Number.isFinite(options.expiresAt)&&Date.now()>=options.expiresAt) return {ok:false,reason:'title-deadline-exceeded'};
   let state=globalThis.__chatgptNotifierTitleOperation;
@@ -87,7 +107,8 @@ function controlChatTitle(options) {
     if (!ready || !actions) return {ok:false,reason:'chat-not-ready'};
     if (document.title!==options.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) return {ok:false,reason:'title-or-form-changed'};
     if (state && state.id!==options.operationId) return {ok:false,reason:'another-title-operation'};
-    state={id:options.operationId,url:options.url,title:options.title,previousTitle:options.previousTitle,triggerId:actions.id,createdAt:Date.now()};
+    state={id:options.operationId,url:options.url,title:options.title,previousTitle:options.previousTitle,
+      previousFormTitle:options.previousTitle,expectedNativeTitle:options.expectedNativeTitle,triggerId:actions.id,createdAt:Date.now()};
     globalThis.__chatgptNotifierTitleOperation=state;
     if (actions.getAttribute('data-state')!=='open') {
       actions.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}));
@@ -96,6 +117,13 @@ function controlChatTitle(options) {
     return {ok:true};
   }
   if (!state || state.id!==options.operationId || state.url!==options.url || state.title!==options.title || Date.now()-state.createdAt>60000) return {ok:false,reason:'title-operation-changed'};
+  if(options.action==='sync-title') {
+    if(state.saved!==true||options.serverConfirmed!==true||savedChatLink(state.url)?.textContent!==state.title)
+      return {ok:false,reason:'native-title-not-confirmed'};
+    if(document.title!==state.previousTitle&&document.title!==state.title)return {ok:false,reason:'title-edited-by-user'};
+    document.title=state.title;
+    return {ok:true};
+  }
   if (options.action==='select') {
     let menu=Array.from(document.querySelectorAll('[role="menu"]')).find(n=>state.triggerId&&visible(n)&&n.getAttribute('aria-labelledby')===state.triggerId);
     const rename=Array.from(menu?.querySelectorAll('[role="menuitem"]')||[]).find(n=>Array.from(n.querySelectorAll('[style]')).some(icon=>{
@@ -105,8 +133,9 @@ function controlChatTitle(options) {
       // A newly saved chat can retain its local header identity. Its native
       // sidebar menu already exposes Rename for the confirmed server URL.
       // Never navigate, touch another row, or substitute a translated label.
-      if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible))return {ok:false,reason:'title-or-form-changed'};
-      const link=Array.from(document.querySelectorAll('a[aria-current="page"][href]')).find(n=>visible(n)&&chatUrl(n.href)===state.url);
+      const sidebar=ownedSidebar(state);
+      if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(node=>node!==sidebar&&visible(node)))return {ok:false,reason:'title-or-form-changed'};
+      const link=savedChatLink(state.url);
       const row=link?.closest('[data-sidebar-cycle-item]');
       const toggle=Array.from(document.querySelectorAll('header button')).find(n=>visible(n)&&!n.disabled&&n.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
       if(!state.sidebarFallback && (row||toggle)) {
@@ -117,9 +146,15 @@ function controlChatTitle(options) {
       }
       if(state.sidebarFallback && !state.triggerId) {
         if(Array.from(document.querySelectorAll('[role="menu"]')).some(visible))return {ok:false,retryable:true,reason:'another-menu-open'};
-        if(!row && toggle && !state.sidebarToggle) {state.sidebarToggle=toggle;toggle.click();return {ok:false,retryable:true,reason:'sidebar-opening'};}
+        if(!row && toggle && toggle.getAttribute('aria-expanded')!=='true' && !state.sidebarToggle) {
+          state.sidebarToggle=toggle;state.sidebarPanelId=toggle.getAttribute('aria-controls')||'';
+          toggle.click();return {ok:false,retryable:true,reason:'sidebar-opening'};
+        }
         const trigger=Array.from(row?.querySelectorAll('button[aria-haspopup="menu"]')||[]).find(n=>visible(n)&&!n.disabled&&n.id&&n.querySelector('use[href*="ellipsis-horizontal"]'));
         if(trigger) {
+          if(typeof state.expectedNativeTitle==='string'&&link.textContent!==state.expectedNativeTitle)
+            return {ok:false,reason:'native-title-changed'};
+          state.previousFormTitle=link.textContent;
           state.triggerId=trigger.id;
           trigger.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}));
           trigger.click();
@@ -134,12 +169,20 @@ function controlChatTitle(options) {
   }
   if (!state.selected) return {ok:false,reason:'rename-not-selected'};
   const inputs=Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"] form input')).filter(visible);
-  const input=state.input || (inputs.length===1&&inputs[0]);
+  const input=state.input?.isConnected?state.input:(inputs.length===1&&inputs[0]);
+  // React may replace the input between fill and save. Rebind only inside
+  // this operation's same mounted form with the already verified value.
+  if(options.action==='save'&&state.input&&!state.input.isConnected&&input&&
+      input.closest('form')===state.form&&input.value===state.title&&document.title===state.previousTitle)
+    state.input=input;
   const form=input?.closest('form');
   if (!input || !visible(input) || !form || !form.querySelector('h2') || form.querySelectorAll('input').length!==1 ||
       !form.querySelector('button[type="submit"]') || form.querySelectorAll('button').length!==2) return {ok:false,retryable:true,reason:'rename-form-not-ready'};
   if (options.action==='fill') {
-    if (input.value!==state.previousTitle || document.title!==state.previousTitle) return {ok:false,reason:'title-edited-by-user'};
+    if (input.value!==state.previousFormTitle || document.title!==state.previousTitle) return {ok:false,reason:'title-edited-by-user'};
+    state.form=form;state.input=input;
+    const inputKey=Object.keys(input).find(name=>name.startsWith('__reactProps$'));
+    if(!inputKey||input[inputKey]?.value!==input.value)return {ok:false,retryable:true,reason:'title-model-not-ready'};
     state.input=input;
     state.form=form;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,state.title);
@@ -155,8 +198,9 @@ function controlChatTitle(options) {
     state.saved=true;
     save.click();
     state.input=null;
-    // Keep only sidebar cleanup state until the worker observes the server ACK.
-    if(!state.sidebarToggle)delete globalThis.__chatgptNotifierTitleOperation;
+    // The server ACK may arrive before document.title updates, including with
+    // an already visible sidebar. Keep this operation for guarded sync-title;
+    // the worker always releases it through cancel after confirmation/failure.
     return {ok:true,clicked:true};
   }
   return {ok:false,reason:'unknown-title-action'};

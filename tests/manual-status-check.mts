@@ -17,7 +17,7 @@ const durable:Record<string,any>={};
 let now=1000000;let revision=1;const sent:Message[]=[],listeners:Array<(message:Message)=>void>=[];
 const location={href:'https://chatgpt.com/c/example',pathname:'/c/example'};
 const world=createContext({document,window,location,URL,AbortController,crypto:globalThis.crypto,
- Node:window.Node,Element:window.Element,MutationObserver:window.MutationObserver,performance,
+ Event:window.Event,Node:window.Node,Element:window.Element,MutationObserver:window.MutationObserver,performance,
  Date:class extends Date{static now(){return now;}},
  setInterval:()=>1,clearInterval:()=>{},setTimeout:()=>1,clearTimeout:()=>{},
  chrome:{storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,durable[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(durable,structuredClone(value))}},runtime:{id:'test',getManifest:()=>({version:'fixture'}),onMessage:{addListener:(fn:(m:Message)=>void)=>listeners.push(fn),removeListener:()=>{}},
@@ -37,7 +37,10 @@ assert.equal(resets().length,0,'Enter newline alone must preserve indicator');
 await flush();
 assert.equal(durable['chatgpt-journal:meta'].retryDraftByChat[location.href].phase,'saved','Enter without a request must not supersede the saved owner draft');
 assert.equal(durable['chatgpt-journal:meta'].retryByChat.example.blocked,true,'newline must not reset the durable retry budget or unknown-outcome block');
-start();await flush();assert.equal(resets().length,1,'actual manual request acknowledges indicator');assert.equal(await runInContext('readRetryState('+JSON.stringify(location.href)+')',world),null,'actual manual request resets older durable retries through the public state API');assert.equal(durable['chatgpt-journal:meta'].retryDraftByChat[location.href].phase,'superseded');
+start();await flush();assert.equal(resets().length,1,'actual manual request acknowledges indicator');
+assert.equal(resets()[0].text,'Private draft','only the submitted trusted intent forwards its exact text for native follow-up verification');
+assert.equal(resets()[0].baselineKey,'','an empty transcript has an empty captured baseline');
+assert.equal(await runInContext('readRetryState('+JSON.stringify(location.href)+')',world),null,'actual manual request resets older durable retries through the public state API');assert.equal(durable['chatgpt-journal:meta'].retryDraftByChat[location.href].phase,'superseded');
 assert.match(decodeURIComponent(document.querySelector('[data-chatgpt-notifier-status]')!.getAttribute('href')!),/#2563eb/,'manual send replaces green with a waiting loader');
 start();assert.equal(resets().length,1,'one intent acknowledges only one request');
 fire('click',{isTrusted:false,target:button as unknown as Element});start();assert.equal(resets().length,1,'automatic clicks cannot reset indicator');

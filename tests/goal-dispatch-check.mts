@@ -16,7 +16,7 @@ const dispatchFunctions=section('  async function sleepUntilNextCheck() {','  fu
 const url='https://chatgpt.com/c/goal-dispatch-fixture';
 const text='First synthetic goal paragraph.\n\nSecond synthetic paragraph.';
 const ownerEdit='  Owner edit\n\nKeep exact spacing  ';
-async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch') {
+async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed') {
   const {document,window}=parseHTML('<html><body><main><article data-turn="user" data-testid="user-1">Seed fixture</article></main><form><div id="prompt-textarea" contenteditable="true"><p><br class="ProseMirror-trailingBreak"></p></div></form></body></html>');
   const editor=document.querySelector<HTMLElement>('#prompt-textarea')!;
   let now=1000000,normalizePending=false,clicks=0,phase='reserved';
@@ -64,13 +64,13 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch') {
         assert.equal(message.options.operationId,'dispatch-operation');clicks++;
         editor.textContent='';
         const user=document.createElement('article');user.setAttribute('data-turn','user');
-        user.setAttribute('data-testid','user-2');user.textContent=text;document.querySelector('main')!.append(user);
-        context.__chatgptNotifierAttemptId='goal-attempt';
+        user.setAttribute('data-testid','user-2');user.textContent=mode==='collapsed'?'You said: First synthetic… Show more':text;document.querySelector('main')!.append(user);
+        context.__chatgptNotifierAttemptId='goal-attempt';context.__chatgptNotifierRequestId='goal-network-request';context.__chatgptNotifierRequestStartedAt=now;
         return {ok:true,clicked:true};
       }
       if(message.type==='CHATGPT_GOAL_STATUS') {
         statuses.push(structuredClone(message));events.push('status-'+message.status);
-        if(message.status==='confirmed')phase='waiting';
+        if(message.status==='confirmed'){assert.equal(message.requestId,'goal-network-request');assert.equal(message.startedAt,now);phase='waiting';}
         if(message.status==='blocked')phase='blocked';
         return {ok:true};
       }
@@ -102,7 +102,7 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch') {
   assert.equal(env.clicks,1,'a settled multi-paragraph insertion receives one click');
   assert.equal(env.phase,'waiting');
   assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed']);
-  assert.equal(env.statuses.at(-1).newPromptKey,'/c/goal-dispatch-fixture|user-2');
+  assert.equal(env.statuses.at(-1).requestId,'goal-network-request');
   assert.ok(env.nativeChecks.length>=3,'the existing exact native stability verification still runs');
   assert.ok(env.nativeChecks.at(-1).at-env.nativeChecks[0].at>=500);
   assert.ok(env.nativeChecks.every(check=>check.raw===text));
@@ -126,3 +126,5 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch') {
 }
 
 console.log('Goal dispatch: transient paragraph normalization, strict native verification and concurrent draft priority passed.');
+
+{const env=await fixture('collapsed');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed'],'collapsed sent UI does not cause another send or an unknown result');}

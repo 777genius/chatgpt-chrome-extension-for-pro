@@ -148,3 +148,55 @@ function fixture() {
 }
 
 console.log('Goal lifecycle: handoff pause/resume/failure, legacy binding and finite manual-resume budget passed.');
+
+// Readiness recovery preserves the exact Goal and budget; explicit controls win.
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|user');
+ await env.store.handoffBegin({sourceUrl:source,handoffId:'ready-handoff',tabId:7});
+ await env.store.handoffFailed({sourceUrl:source,handoffId:'ready-handoff',tabId:7,reason:'Не удалось дождаться готовности нового чата'});
+ const before=structuredClone(env.state());
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'other',tabId:7})).ok,false);
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:8})).ok,false);
+ const recovered=await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:7});
+ assert.equal(recovered.ok,true);assert.equal(env.state().phase,'handoff');
+ for(const key of ['goal','deadlineAt','continuations','id','maxContinuations'])assert.equal(env.state()[key],before[key]);
+ assert.equal(env.messages.length,1,'preparation recovery never dispatches a Goal message');
+ env.state().pauseRequested=true;
+ assert.equal((await env.store.handoffPreparationReady({sourceUrl:source,handoffId:'ready-handoff',tabId:7})).ok,false);
+}
+
+// A positively refused retry preparation may recover without a Goal send/budget reset.
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|user');
+ await env.store.retry({url:source,tabId:7,kind:'retry.failed',attemptId:'1000000'});
+ const before=structuredClone(env.state());
+ await env.store.retry({url:source,tabId:7,kind:'retry.preparation_recovered',attemptId:'1000000',promptKey:'/c/goal-edge-source|other'});
+ assert.equal(env.state().phase,'blocked');
+ await env.store.retry({url:source,tabId:7,kind:'retry.preparation_recovered',attemptId:'1000000',promptKey:before.expectedPromptKey});
+ assert.equal(env.state().phase,'recovering');
+ assert.equal(env.state().deadlineAt,before.deadlineAt);assert.equal(env.state().continuations,before.continuations);
+ assert.equal(env.messages.length,1,'recovery returns control to the shared retry sender');
+}
+
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|user');
+ await env.store.retry({url:source,tabId:7,kind:'retry.planned',attemptId:'1000000'});
+ assert.equal(env.state().phase,'recovering');
+ await env.store.retry({url:source,tabId:7,kind:'draft.restore_failed',attemptId:'1000000'});
+ assert.equal(env.state().phase,'blocked','failed native cleanup cannot leave Goal pretending recovery is active');
+}
+
+// A verified native reload can renumber an already confirmed user turn.
+{
+ const env=fixture();await env.start();await env.confirm('/c/goal-edge-source|fallback-7');
+ const before=structuredClone(env.state());
+ const args={url:source,tabId:7,id:before.id,oldPromptKey:before.expectedPromptKey,
+  promptKey:'/c/goal-edge-source|fallback-4',userId:'stable-user',operationId:'confirmed-send'};
+ assert.equal((await env.store.rebindPrompt({...args,id:'other'})).ok,false);
+ assert.equal((await env.store.rebindPrompt({...args,promptKey:'/c/other|user'})).ok,false);
+ assert.equal((await env.store.rebindPrompt(args)).ok,true);
+ assert.equal(env.state().expectedPromptKey,args.promptKey);
+ for(const key of ['goal','deadlineAt','continuations','id','phase'])assert.equal(env.state()[key],before[key]);
+ assert.equal(env.messages.length,1,'key migration never sends');
+ assert.equal((await env.store.rebindPrompt(args)).ok,false,'stale repeated migration cannot rewrite state');
+}

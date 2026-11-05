@@ -23,6 +23,16 @@ function rememberRequestReceipt(tabId,request) {
     return {write:true,value:entry};
   });
 }
+// Correlate the actual observed POST only after its worker journal grant was
+// committed. This is observation metadata, never a new send authorization.
+function bindRequestOperationReceipt(tabId,requestId,startedAt,operationId) {
+  if(typeof operationId!=='string'||!operationId)return Promise.resolve(false);
+  return changeRequestReceipts(records=>{
+    const entry=records.find(item=>item.tabId===tabId&&item.requestId===requestId&&item.startedAt===startedAt);
+    if(!entry||entry.operationId&&entry.operationId!==operationId)return {value:false};
+    entry.operationId=operationId;return {write:true,value:true};
+  });
+}
 function readRequestReceipt(tabId,{requestId,startedAt,url,consume=false}={}) {
   return changeRequestReceipts(records=>{
     const candidates=records.filter(item=>item.tabId===tabId&&(!url||!item.url||item.url===url));
