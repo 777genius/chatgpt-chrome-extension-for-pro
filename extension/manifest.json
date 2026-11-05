@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Prompt-Bound Completion Alert",
-  "version": "1.8.76",
+  "version": "1.8.78",
   "description": "ChatGPT completion alerts, guarded error retries, Goal continuations, and context handoffs when a chat reaches its limit.",
   "permissions": [
     "notifications",

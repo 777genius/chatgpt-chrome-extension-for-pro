@@ -22,7 +22,7 @@ function fixture(){
  ctx.deps={storage,tabs,appendJournal:async(e:V)=>{events.push(e);return{ok:true};},now:()=>1000,uuid:()=> 'operation'};
  const store=runInContext('ChatGPTGoalStore.create(deps)',ctx);ctx.goalController=store;
  runInContext(source,ctx);
- return{data,goal,handoff,native,messages,events,run:()=>runInContext(`reconcileAcceptedHandoffGoal(7,'${url}')`,ctx),after:(f:()=>void)=>{after=f;},route:(u:string)=>{live=u;}};
+ return{data,goal,handoff,native,messages,events,run:()=>runInContext(`reconcileAcceptedHandoffGoal(7,'${url}')`,ctx),waiting:()=>runInContext(`reconcileWaitingGoalAnswer(7,'${url}')`,ctx),after:(f:()=>void)=>{after=f;},route:(u:string)=>{live=u;}};
 }
 {
  const h=fixture();await h.run();
@@ -50,3 +50,18 @@ for(const scenario of ['unknown-send','different-handoff','wrong-target','stoppe
  await h.run();assert.equal(h.messages.length,0,scenario);
 }
 console.log('Handoff Goal catch-up: exact accepted native completion, marker/one continuation, unknown-send/stop/route/state fences passed.');
+
+{
+ const h=fixture();
+ Object.assign(h.goal,{handoffPending:false,expectedPromptKey:h.native.promptKey});
+ assert.equal((await h.waiting()).ok,true);
+ assert.equal(h.messages.length,1,'a missed native answer reserves and dispatches one continuation');
+ await h.waiting();assert.equal(h.messages.length,1);
+}
+for(const patch of [{generating:true},{promptKey:'wrong'},{hasError:true},{isLatest:false},{assistantPhase:'commentary'}]){
+ const h=fixture();
+ Object.assign(h.goal,{handoffPending:false,expectedPromptKey:h.native.promptKey});
+ Object.assign(h.native,patch);
+ await h.waiting();assert.equal(h.messages.length,0);
+}
+console.log('Waiting Goal catch-up: missed matching final answer resumes once, unrelated or unfinished answers do not dispatch.');
