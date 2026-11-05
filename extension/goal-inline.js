@@ -16,7 +16,7 @@
     const cleanups=[];
     let observer=null,binding=null,bindTimer=null,bindGeneration=0,failedBinding=null;
     const ROOT_URL='https://chatgpt.com/';
-    const BIND_WINDOW=30000;
+    const BIND_WINDOW=30*60*1000;
     const node=(tag,attrs={},text='')=>{
       const el=document.createElement(tag);
       for(const [name,value] of Object.entries(attrs))el.setAttribute(name,value);
@@ -131,7 +131,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
       }
       if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
-      if(composer?.phase==='intent')message='Waiting to confirm your sent message. If ChatGPT no longer shows it, Restore saved goal keeps the objective and sent follow-ups without sending the original message again.';
+      if(composer?.phase==='intent')message='Confirmation pending. Your objective is saved. Background verification continues without resending your message.';
       status.textContent=error||(busy?'Saving Goal…':message);
       toggle.setAttribute('aria-description',status.textContent);
       if(open)position();
@@ -273,11 +273,12 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function scheduleBind() {
       if(!binding||binding.stopped||!binding.persisted||binding.inFlight||bindTimer!==null||!valid())return;
       if(Date.now()>=binding.deadline) {
-        bindingFailure('Message confirmation timed out. The saved objective is preserved. Open Goal settings to restore it without resending the original message.');
-        render();return;
+        binding.observationExpired=true;render();return;
       }
       const token=binding.token;
-      bindTimer=win.setTimeout(()=>{bindTimer=null;void pollBind(token);},Math.min(250,binding.deadline-Date.now()));
+      const age=Date.now()-(binding.deadline-BIND_WINDOW);
+      const interval=age<30000?5000:age<300000?30000:300000;
+      bindTimer=win.setTimeout(()=>{bindTimer=null;void pollBind(token);},Math.min(interval,binding.deadline-Date.now()));
     }
     function resumeBinding() {
       if(composer?.phase!=='intent') {if(binding?.persisted)stopBinding();return;}
@@ -289,7 +290,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
           deadline:Number(composer.intent?.eventAt??composer.eventAt)+BIND_WINDOW};
       } else binding.persisted=true;
       if(!Number.isFinite(binding.deadline)||binding.deadline<=BIND_WINDOW) {
-        bindingFailure('Goal intent has no valid confirmation time. Turn Goal off and check this chat.');render();return;
+        binding.observationExpired=true;render();return;
       }
       scheduleBind();
     }
@@ -309,7 +310,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'bind',armId:id,url});
         if(!contextMatches(token))return;
-        if(!result?.ok)throw Error(result?.error||result?.reason||'Goal message confirmation failed');
+        if(!result?.ok)throw Object.assign(Error(result?.error||result?.reason||'Goal message confirmation is pending'),{confirmationRefused:result?.refused===true});
         // Re-read the real page URL in contextMatches before accepting a result.
         if(deferAllocation(result))return;
         if(result?.url&&![url,route].includes(policy.pageUrl(result.url)))throw Error('Goal confirmation belongs to another chat');
@@ -324,7 +325,10 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         stopBinding();error='';failedBinding=null;render();
       } catch(cause) {
         if(!contextMatches(token))return;
-        binding.inFlight=false;bindingFailure('Goal: '+String(cause?.message||cause));render();
+        binding.inFlight=false;
+        if(cause?.confirmationRefused===true)bindingFailure('Goal: '+String(cause?.message||cause));
+        else {error='';scheduleBind();}
+        render();
       }
     }
     async function refresh() {

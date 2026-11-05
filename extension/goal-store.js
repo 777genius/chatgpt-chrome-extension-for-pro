@@ -117,7 +117,12 @@
           throw Error('Ручная цель должна содержать точный текст до 10000 символов');
         if(baselineKey&&(target==='https://chatgpt.com/'||!baselineKey.startsWith(new URL(target).pathname+'|')))
           throw Error('Исходное сообщение Goal относится к другому чату');
-        const record={...current,phase:'intent',intent:{text,eventAt,baselineKey}};
+        const candidate=current.requestCandidate;
+        const attachCandidate=!current.requestCandidateAmbiguous&&candidate&&candidate.url===target&&
+          candidate.startedAt>=eventAt&&candidate.startedAt-eventAt<=10000&&
+          policy.submittedTextMatches(text,candidate.submission?.userText,null);
+        const record={...current,phase:'intent',intent:{text,eventAt,baselineKey},
+          ...(attachCandidate?{request:candidate}:{})};
         await storage.set({[composerKey(tabId)]:record});
         return {ok:true,record};
       });
@@ -128,7 +133,23 @@
       requireTab(tabId);
       return serialize(async()=>{
         const current=await readComposer(tabId),intent=current?.intent;
-        if(current?.id!==armId||current.phase!=='intent'||!intent||
+        if(current?.id===armId&&current.phase==='armed') {
+          // Network observation may beat the saved trusted UI intent. Keep at
+          // most one exact candidate; it cannot start Goal or authorize a send.
+          if(current.requestCandidateAmbiguous||typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
+              startedAt<current.armedAt||policy.pageUrl(url)!==current.url||
+              typeof submission?.userId!=='string'||!submission.userId||submission.userId.length>256||
+              typeof submission.userText!=='string'||!submission.userText.trim()||submission.userText.length>10000)return {ok:false};
+          const candidate={requestId,startedAt,url:current.url,submission:{userId:submission.userId,userText:submission.userText}};
+          if(current.requestCandidate) {
+            if(JSON.stringify(current.requestCandidate)===JSON.stringify(candidate))return {ok:true,record:current};
+            const next={...current,requestCandidateAmbiguous:true};
+            await storage.set({[composerKey(tabId)]:next});return {ok:false,ambiguous:true,record:next};
+          }
+          const next={...current,requestCandidate:candidate};
+          await storage.set({[composerKey(tabId)]:next});return {ok:true,record:next};
+        }
+        if(current?.id!==armId||current.phase!=='intent'||!intent||current.requestCandidateAmbiguous||
             typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
             startedAt<intent.eventAt||startedAt-intent.eventAt>10000||
             (url&&requirePage(url)!==current.url))return {ok:false};
@@ -181,6 +202,7 @@
         const current=await readComposer(tabId),intent=current?.intent;
         if(!current||current.id!==armId||!['intent','bound'].includes(current.phase)||!intent)
           throw Error('Нет сохранённого намерения ручной отправки Goal');
+        if(current.requestCandidateAmbiguous)throw Error('Наблюдалось несколько запросов до сохранения ручного намерения Goal');
         if(current.request&&(current.request.requestId!==requestId||current.request.startedAt!==startedAt))
           throw Error('Ручная отправка Goal уже связана с другим запросом');
         if(nativeVerified!==true||typeof requestId!=='string'||!requestId||typeof userId!=='string'||!userId||

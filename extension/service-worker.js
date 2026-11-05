@@ -324,8 +324,8 @@ chrome.webRequest.onBeforeRequest.addListener((details) => {
       const pending=await goalController.composerGet({tabId:details.tabId});
       if(pending?.phase==='intent'&&pending.request&&pending.request.requestId!==request.requestId)
         await goalController.composerFollowup({tabId:details.tabId,requestId:request.requestId,startedAt:request.startedAt,url:event.sourceUrl,submission:ChatGPTGoalRequestProof.read(details)});
-      else if(pending?.phase==='intent')await goalController.composerRequest({tabId:details.tabId,armId:pending.id,
-        requestId:request.requestId,startedAt:request.startedAt,url:request.url,submission:ChatGPTGoalRequestProof.read(details)});
+      else if(['armed','intent'].includes(pending?.phase))await goalController.composerRequest({tabId:details.tabId,armId:pending.id,
+        requestId:request.requestId,startedAt:request.startedAt,url:event.sourceUrl,submission:ChatGPTGoalRequestProof.read(details)});
     }
     const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl);
     if(url)await broadcastChatStatus(await markChatLoading(url,details.timeStamp,receipt));
