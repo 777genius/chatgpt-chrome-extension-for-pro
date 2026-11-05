@@ -18,6 +18,7 @@ const chrome={
 const ctx=createContext({document,chrome,URL,Blob,setTimeout,console});
 runInContext(source,ctx);
 const objective=document.getElementById('goal-text') as HTMLTextAreaElement|null;
+assert.ok(objective,'popup has a goal textarea');
 const followups=document.getElementById('goal-followups');
 assert.ok(followups,'popup has a distinct read-only follow-up view');
 assert.match(html,/#goal-followups\s*\{[^}]*white-space:pre-wrap/);
