@@ -9,15 +9,15 @@ const inline=readFileSync(new URL('../extension/goal-inline.js',import.meta.url)
 const {document}=parseHTML(html);
 const chrome={
   runtime:{
-    sendMessage:async message=>message.type==='CHATGPT_GOAL_CONTROL'?
+    sendMessage:async (message:{type:string})=>message.type==='CHATGPT_GOAL_CONTROL'?
       {ok:true,tabId:1,url:'https://chatgpt.com/c/synthetic',record:null}:{ok:true,available:false},
-    getURL:path=>'chrome-extension://synthetic/'+path
+    getURL:(path:string)=>'chrome-extension://synthetic/'+path
   },
   tabs:{create:()=>{}}
 };
 const ctx=createContext({document,chrome,URL,Blob,setTimeout,console});
 runInContext(source,ctx);
-const objective=document.getElementById('goal-text');
+const objective=document.getElementById('goal-text') as HTMLTextAreaElement|null;
 const followups=document.getElementById('goal-followups');
 assert.ok(followups,'popup has a distinct read-only follow-up view');
 assert.match(html,/#goal-followups\s*\{[^}]*white-space:pre-wrap/);
