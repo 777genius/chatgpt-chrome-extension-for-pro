@@ -1099,29 +1099,52 @@ async function reconcileGoalPromptBinding(tabId,url) {
       !native.promptKey||native.promptKey===goal.expectedPromptKey||!Number.isFinite(native.userSentAtMs))return {ok:false};
   const journal=await readJournal();
   if(!journal.ok||journal.storageError)return {ok:false};
-  const confirmed=journal.events.filter(e=>e.sourceUrl===url&&e.goalId===goal.id&&e.kind==='goal.confirmed').at(-1);
-  if(!confirmed||confirmed.tabId!==tabId||confirmed.promptKey!==goal.expectedPromptKey&&
-      (goal.confirmedPromptBinding?.operationId!==confirmed.operationId||goal.confirmedPromptBinding.userId!==native.userId))return {ok:false};
-  const own=journal.events.filter(e=>e.operationId===confirmed.operationId&&e.tabId===tabId&&e.sourceUrl===url);
-  const sends=own.filter(e=>e.kind==='send.dispatched'),requests=own.filter(e=>e.kind==='request.started');
-  if(sends.length!==1||requests.length!==1||!requests[0].requestId||
-      !Number.isFinite(requests[0].eventAt)||Math.abs(requests[0].eventAt-native.userSentAtMs)>10000||
-      sends[0].text!==native.userText||
-      journal.events.filter(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
-        Number.isFinite(e.eventAt)&&Math.abs(e.eventAt-native.userSentAtMs)<=10000).length!==1||
-      journal.events.some(e=>(e.tabId===tabId||e.sourceUrl===url)&&e.kind==='request.started'&&e.sequence>requests[0].sequence)||
-      ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+
+  let operationId='',requestAt=0;
+  // A manually submitted Goal (or verified follow-up) has a durable native
+  // message ID and exact request receipt, but no goal.confirmed auto-send.
+  const manual=[goal.manualSupplementBinding,goal.manualStart].find(value=>value?.requestId&&
+    value.userId===native.userId&&value.userText===native.userText&&
+    value.userSentAtMs===native.userSentAtMs&&Number.isFinite(value.startedAt)&&
+    (value.promptKey===goal.expectedPromptKey||
+      goal.confirmedPromptBinding?.operationId==='manual:'+value.requestId&&
+      goal.confirmedPromptBinding.userId===native.userId));
+  if(manual) {
+    const requests=journal.events.filter(e=>e.kind==='request.started'&&!e.operationId&&e.tabId===tabId&&
+      e.requestId===manual.requestId&&e.eventAt===manual.startedAt&&e.sourceUrl===(manual.sourceUrl||url));
+    if(manual.tabId!==tabId||Math.abs(manual.startedAt-native.userSentAtMs)>10000||requests.length!==1||
+        journal.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
+          e.sequence>requests[0].sequence)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+    operationId='manual:'+manual.requestId;
+    requestAt=manual.startedAt;
+  } else {
+    const confirmed=journal.events.filter(e=>e.sourceUrl===url&&e.goalId===goal.id&&e.kind==='goal.confirmed').at(-1);
+    if(!confirmed||confirmed.tabId!==tabId||confirmed.promptKey!==goal.expectedPromptKey&&
+        (goal.confirmedPromptBinding?.operationId!==confirmed.operationId||goal.confirmedPromptBinding.userId!==native.userId))return {ok:false};
+    const own=journal.events.filter(e=>e.operationId===confirmed.operationId&&e.tabId===tabId&&e.sourceUrl===url);
+    const sends=own.filter(e=>e.kind==='send.dispatched'),requests=own.filter(e=>e.kind==='request.started');
+    if(sends.length!==1||requests.length!==1||!requests[0].requestId||
+        !Number.isFinite(requests[0].eventAt)||Math.abs(requests[0].eventAt-native.userSentAtMs)>10000||
+        sends[0].text!==native.userText||
+        journal.events.filter(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
+          Number.isFinite(e.eventAt)&&Math.abs(e.eventAt-native.userSentAtMs)<=10000).length!==1||
+        journal.events.some(e=>(e.tabId===tabId||e.sourceUrl===url)&&e.kind==='request.started'&&e.sequence>requests[0].sequence)||
+        ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
+    operationId=confirmed.operationId;
+    requestAt=requests[0].eventAt;
+  }
+
   const result=await goalController.rebindPrompt({url,tabId,id:goal.id,oldPromptKey:goal.expectedPromptKey,
-    promptKey:native.promptKey,userId:native.userId,operationId:confirmed.operationId});
+    promptKey:native.promptKey,userId:native.userId,operationId});
   if(!result.ok)return result;
   await completionCheckpointChange(tabId,current=>current?.url===url&&current.state==='active'&&
-    current.promptKey===goal.expectedPromptKey&&current.startedAt===requests[0].eventAt
+    current.promptKey===goal.expectedPromptKey&&current.startedAt===requestAt
       ?{record:{...current,promptKey:native.promptKey},value:true}:{value:false});
   const receipt=manualRequestReceiptsByTab.get(tabId);
-  if(receipt?.url===url&&receipt.startedAt===requests[0].eventAt&&receipt.recoveredPromptKey===goal.expectedPromptKey)
+  if(receipt?.url===url&&receipt.startedAt===requestAt&&receipt.recoveredPromptKey===goal.expectedPromptKey)
     manualRequestReceiptsByTab.set(tabId,{...receipt,recoveredPromptKey:native.promptKey});
-  // Rebinding alone never authorizes a send. Only a fully completed native
-  // answer may enter the existing coordinator and its protected sender.
+  // Rebinding alone never authorizes a send; a completed native answer is
+  // reconciled through the same guarded Goal coordinator as before.
   if(native.turnStatus==='complete'&&native.generating===false&&native.assistantCompleted===true&&
       native.assistantPhase==='final_answer'&&native.assistantKey)
     await goalController.completion({url,tabId,promptKey:native.promptKey,

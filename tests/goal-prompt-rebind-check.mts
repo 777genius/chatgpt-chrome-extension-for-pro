@@ -6,7 +6,7 @@ const url='https://chatgpt.com/c/rebind-fixture',oldPromptKey='/c/rebind-fixture
 async function fixture(extra:any={}) {
  let rebinds=0,completions=0,checkpoints=0;
  const goal={id:'goal',phase:'waiting',expectedPromptKey:oldPromptKey,...extra.goal};
- const events=[{kind:'request.started',operationId:'op',tabId:7,sourceUrl:url,requestId:'request',eventAt:1000000,sequence:1},
+ const events=extra.onlyEvents||[{kind:'request.started',operationId:'op',tabId:7,sourceUrl:url,requestId:'request',eventAt:1000000,sequence:1},
   {kind:'send.dispatched',operationId:'op',tabId:7,sourceUrl:url,text:'exact native payload',sequence:2},
   {kind:'goal.confirmed',operationId:'op',tabId:7,sourceUrl:url,goalId:'goal',promptKey:oldPromptKey,sequence:3},...(extra.events||[])];
  const native={ok:true,isLatest:true,isReadOnly:false,hasError:false,userId:'stable-user',userSentAtMs:999990,
@@ -36,3 +36,34 @@ for(const extra of [{goal:{phase:'stopped'}},{goal:{phase:'paused'}},{goal:{oper
 }
 assert.equal((await fixture({accept:false,native:{turnStatus:'complete'}})).completions,0);
 console.log('Goal prompt renumbering: exact confirmed wire payload + unique request, no implicit send, native completion and manual/unknown fences passed.');
+
+// Manually started Goals have no goal.confirmed auto-send; native message and
+// the exact unowned request receipt must be sufficient, but never a timestamp alone.
+{
+ const submitted={requestId:'manual-request',startedAt:1000000,promptKey:oldPromptKey,
+   userId:'stable-user',userText:'exact native payload',userSentAtMs:999990,tabId:7,sourceUrl:url};
+ const event={kind:'request.started',operationId:null,tabId:7,sourceUrl:url,
+   requestId:submitted.requestId,eventAt:submitted.startedAt,sequence:1};
+ const goal={manualStart:submitted};
+ const valid=await fixture({goal,onlyEvents:[event]});
+ assert.equal(valid.rebinds,1,'manual Goal rebinding uses exact persisted request and native user');
+ assert.equal(valid.checkpoints,1);
+ const supplemented=await fixture({goal:{manualSupplementBinding:submitted},onlyEvents:[event]});
+ assert.equal(supplemented.rebinds,1,'the newest confirmed follow-up also rebinds');
+ const repeated=await fixture({goal:{...goal,expectedPromptKey:'/c/rebind-fixture|renumbered',
+   confirmedPromptBinding:{operationId:'manual:manual-request',userId:'stable-user'}},onlyEvents:[event]});
+ assert.equal(repeated.rebinds,1,'later native renumbering remains tied to the same manual request');
+ for(const change of [{userId:'other-user'},{userText:'modified'},{userSentAtMs:10},{hasError:true}]) {
+   const failed=await fixture({goal,onlyEvents:[event],native:change});
+   assert.equal(failed.rebinds,0,JSON.stringify(change));
+ }
+ for(const invalid of [
+   [{...event,requestId:'wrong'}],
+   [{...event,tabId:8}],
+   [event,{...event,sequence:2,requestId:'second'}]
+ ]) {
+   const failed=await fixture({goal,onlyEvents:invalid});
+   assert.equal(failed.rebinds,0,'foreign or newer request must not rebind a manual Goal');
+ }
+}
+console.log('Manual Goal rebind: exact native message, request ownership, later renumbering and negative fences passed.');
