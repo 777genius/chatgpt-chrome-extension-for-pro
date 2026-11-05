@@ -46,7 +46,7 @@ async function fixture(source=chat) {
  return {data,events,messages,binds,completions,probes,store,
   bind:(url=live,armId=armed.record.id)=>{context.input={url,armId};return runInContext('bindNativeComposerGoal(7,input.url,input.armId)',context) as Promise<Value>;},
   native:()=>native!,patchNative:(patch:Value)=>Object.assign(native!,patch),missingNative:()=>{native=undefined;},restoreNative:(value:Value)=>{native=value;},
-  request:(value:Value|null)=>{request=value;},route:(value:string)=>{live=value;},
+  recoverer:(fn:Function)=>{context.recoverNativeComposerGoal=fn;},request:(value:Value|null)=>{request=value;},route:(value:string)=>{live=value;},
   afterProbe:(effect:()=>void|Promise<void>)=>{afterProbe=effect;},bindMode:(value:string)=>{bindMode=value;},probeThrows:()=>{probeThrows=true;}};
 }
 
@@ -119,7 +119,7 @@ for(const race of ['route','request','startedAt']) {
  const h=await fixture();h.patchNative({turnStatus:'complete',generating:false,assistantCompleted:true});
  assert.equal((await h.bind()).record.phase,'completed');
  assert.deepEqual(h.completions,[{url:chat,tabId:7,completionKey:h.native().promptKey+'|native-assistant',
-  promptKey:h.native().promptKey,userId:'native-user',response:'GOAL_COMPLETE',rawExact:true,nativeVerified:true}]);
+  promptKey:h.native().promptKey,userId:'native-user',response:'GOAL_COMPLETE',rawExact:true,nativeMarkerPending:false,nativeVerified:true}]);
  await h.bind();assert.equal(h.completions.length,1,'completed-before-bind replay is not repeated');assert.equal(h.messages.length,0);
 }
 {
@@ -159,3 +159,10 @@ for(const mode of ['unknown','throw','probe-throw']) {
  assert.equal(h.messages.length,0,'recovering initial consent does not send a duplicate');
 }
 console.log('Native composer Goal adoption: request/route freshness, root binding, exact durable proof, idempotence and guarded completion replay passed.');
+
+{
+ const h=await fixture('https://chatgpt.com/');await h.store.composerRequest({tabId:7,armId:'native-arm',requestId:'native-request',startedAt:100011,url:'https://chatgpt.com/'});
+ h.request(null);h.patchNative({userId:'accepted-transfer-user',userText:'Accepted automatic handoff payload',userSentAtMs:200000});let calls=0;
+ h.recoverer(async()=>{calls++;return {ok:true,pending:true,recovered:true};});
+ assert.equal((await h.bind()).recovered,true,'lost request cache must use historical/lineage recovery rather than bind the transfer as original objective');assert.equal(calls,1);assert.equal(h.binds.length,0);assert.equal(h.messages.length,0);
+}

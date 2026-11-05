@@ -63,3 +63,16 @@ const hidden=regular.document.createElement('div') as any;hidden.setAttribute('d
 assert.equal(runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding).idle",regular.context),true);
 const pendingIdle=setup();pendingIdle.controller.pendingSubmit={};const retryable=pendingIdle.inspect();assert.equal(retryable.ok,false);assert.equal(retryable.stopped,false);assert.equal(retryable.retryable,true,'missing idle proof explicitly confirms no Stop click and allows bounded readiness waiting');
 console.log('Recovery visibility: hidden retained users ignored; missing positive idle proof is an explicit no-click retryable refusal.');
+
+// A visible draft replaces Voice with a native Send control. Candidate idle
+// evidence stays read-only and requires worker transport/request verification.
+{
+ const send=regular.document.querySelector('button')! as any;
+ send.setAttribute('data-testid','send-button');send.setAttribute('type','submit');send.innerHTML='<svg></svg>';
+ Object.assign(regular.voiceProps,{isStartButtonAllowed:false,disabled:false});regular.controller.submitReady=true;
+ const inspect=()=>runInContext("inspectChatError(0,false,'inspect-recovery','https://chatgpt.com/c/idle','/c/idle|fallback-turn-0:0:user',expectedBinding)",regular.context);
+ assert.equal(inspect().editorSubmitIdle,true);assert.equal(inspect().ok,false,'Send readiness alone cannot authorize retry');
+ regular.voiceProps.isLoading=true;assert.equal(inspect().editorSubmitIdle,false);
+ regular.voiceProps.isLoading=false;regular.controller.pendingSubmit={};assert.equal(inspect().editorSubmitIdle,false);
+ regular.controller.pendingSubmit=null;send.disabled=true;assert.equal(inspect().editorSubmitIdle,false);
+}

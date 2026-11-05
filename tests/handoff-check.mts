@@ -142,14 +142,14 @@ function probeCheck(){
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
 type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading'|'legacy-model'|'source-model-change';
-async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{escalate?:boolean;source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
+async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{uploadDelayMs?:number;escalate?:boolean;source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
  const loc={href:originalURL,pathname:'/c/source'};
  const notices:any[]=[],sends:string[]=[],updates:string[]=[];
  const logs:any[]=[];
- let begins=0;
+ let begins=0,uploadStartedAt=0;
  let stored:any=null;
  const storage:Record<string,any>={};
  const clock=testClock();
@@ -198,11 +198,12 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     return {ok:true};
    }
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT'&&interference==='upload-edit'&&(document.querySelector('input') as any).files?.length)activeEditor().textContent=ownerEdit;
-   if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?'ready':'missing'};
+   if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?(clock.now()-uploadStartedAt<(effortOptions.uploadDelayMs||0)?'uploading':'ready'):'missing'};
    if(m.type==='CHATGPT_INSPECT_ERROR'){
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
     return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages:effortOptions.escalate&&!m.captureRetryHistory?[]:messages,incomplete:interference==='history-loading'&&++historyInspections<3};
    }
+   if(m.type==='CHATGPT_HANDOFF_SUCCESSOR')return {ok:true,record:stored};
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
     if(m.type==='CHATGPT_HANDOFF_BEGIN'){begins++;assert.equal(loc.href,originalURL,'backup must precede navigation');}
     if(m.type==='CHATGPT_HANDOFF_UPDATE')updates.push(m.stage);
@@ -225,7 +226,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  HTMLTextAreaElement:window.HTMLTextAreaElement,AbortController,crypto:globalThis.crypto,File,DataTransfer:Transfer,
  Date:class extends Date{static now(){return clock.now();}},performance:{now:clock.now},setTimeout:clock.setTimeout,clearTimeout:clock.clearTimeout,setInterval:clock.setInterval,clearInterval:clock.clearInterval});
  document.querySelector('input')!.addEventListener('change',()=>{
-   const file=(document.querySelector('input')! as any).files[0];
+   const file=(document.querySelector('input')! as any).files[0];uploadStartedAt=clock.now();
    if(interference==='destination-attachment-during-upload')addOwnerAttachment();
    let attachments=document.querySelector('[data-app-shell-active-page="true"] [data-composer-attachments]');
    if(!attachments){attachments=document.createElement('div');attachments.setAttribute('data-composer-attachments','');document.querySelector('[data-app-shell-active-page="true"] form')!.append(attachments);}
@@ -301,7 +302,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  const expectedStage=ambiguous||lateTarget?'awaiting-confirmation':'sent';
  const lineageKey='chatgpt-handoff-title:https://chatgpt.com/c/target';
  const transferred=()=>stored?.stage==='sent'&&storage[lineageKey]?.part===1&&Boolean(stored.draftRestoreClaimedAt)&&activeEditor().textContent==='Saved draft\nsecond line';
- await clock.until(()=>expectedStage==='sent'?transferred():stored?.stage===expectedStage,'initial handoff transition');
+ await clock.until(()=>expectedStage==='sent'?transferred():stored?.stage===expectedStage,'initial handoff transition',Math.max(70000,(effortOptions.uploadDelayMs||0)+30000));
  if(lateTarget){
    assert.equal(stored.stage,'awaiting-confirmation','a late permanent route remains recoverable after the 60s observation deadline');
    assert.ok(stored.sendReceipt.submittedText,'native click receipt survives the observation deadline');
@@ -377,3 +378,5 @@ await transferCheck(false,false,false,false,false,false,'legacy-model');
 await transferCheck(false,false,false,false,false,false,'source-model-change');
 
 await transferCheck(false,false,false,false,false,false,'',{escalate:true});
+
+await transferCheck(true,false,false,false,false,false,'',{uploadDelayMs:75000});

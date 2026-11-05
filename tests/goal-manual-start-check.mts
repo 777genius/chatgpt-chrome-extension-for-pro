@@ -49,7 +49,7 @@ function fixture() {
   const armed=await env.store.composerArm({tabId:7,url:root+'?model=fixture'});
   assert.equal(armed.record.url,root);
   assert.equal(armed.record.phase,'armed');
-  assert.deepEqual(structuredClone(armed.record.config),{rules:'',maxContinuations:10,maxMinutes:1440});
+  assert.deepEqual(structuredClone(armed.record.config),{rules:'',maxContinuations:30,maxMinutes:1440});
   assert.equal((await env.fresh().composerGet({tabId:7})).id,armed.record.id);
   assert.equal(env.data[goalKey(root)],undefined);
   const first={tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''};
@@ -378,3 +378,66 @@ for(const target of [root,other]) {
 }
 
 console.log('Goal manual start: explicit arm/intent, exact native root/saved binding, dedupe, atomic persistence and zero initial sends passed.');
+
+// The request observer and trusted inline intent use separate async queues.
+// A request seen first is observation only until the exact UI intent persists.
+{
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});
+ const wire={tabId:7,armId:armed.record.id,url:root,requestId:'wire-first',startedAt:1000100,
+  submission:{userId:'native-user-7',userText:objective}};
+ assert.equal((await env.store.composerRequest(wire)).ok,true);
+ const observed=await env.fresh().composerGet({tabId:7});
+ assert.equal(observed.phase,'armed');assert.deepEqual(observed.requestCandidate,{requestId:wire.requestId,startedAt:wire.startedAt,url:wire.url,submission:wire.submission});
+ assert.equal(observed.request,undefined);assert.equal(env.data[goalKey(saved)],undefined);assert.equal(env.messages.length,0);
+ const count=env.writes.length;await env.fresh().composerRequest(wire);assert.equal(env.writes.length,count,'duplicate observation is idempotent');
+ env.clock(1000300);await env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''});
+ const pending=await env.fresh().composerGet({tabId:7});
+ assert.equal(pending.request.requestId,wire.requestId);assert.deepEqual(pending.request.submission,wire.submission);
+ const native={...env.proof(armed.record.id),requestId:wire.requestId};
+ await assert.rejects(()=>env.store.composerBind({...native,nativeVerified:false}));
+ assert.equal(env.data[goalKey(saved)],undefined,'wire plus intent still needs exact native proof');
+ await env.store.composerBind(native);assert.equal(env.data[goalKey(saved)].phase,'waiting');assert.equal(env.data[goalKey(saved)].goal,objective);
+ assert.equal(env.messages.length,0,'request-first adoption does not replay the initial message');
+}
+for(const scenario of ['text','url','before-arm','late-after-intent','no-body','empty-id','large-body','changed-arm','disarmed']) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});
+ const wire:any={tabId:7,armId:armed.record.id,url:root,requestId:'candidate',startedAt:1000100,submission:{userId:'native-user',userText:objective}};
+ if(scenario==='text')wire.submission.userText='Different message';
+ if(scenario==='url')wire.url=other;
+ if(scenario==='before-arm')wire.startedAt=999999;
+ if(scenario==='late-after-intent')wire.startedAt=1010001;
+ if(scenario==='no-body')delete wire.submission;
+ if(scenario==='empty-id')wire.submission.userId='';
+ if(scenario==='large-body')wire.submission.userText='x'.repeat(10001);
+ await env.store.composerRequest(wire);
+ if(scenario==='changed-arm'){
+  await env.store.composerArm({tabId:7,url:other});
+  await assert.rejects(()=>env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''}));
+  assert.equal((await env.store.composerGet({tabId:7})).requestCandidate,undefined);
+ }else if(scenario==='disarmed'){
+  await env.store.composerDisarm({tabId:7,armId:armed.record.id});
+  assert.equal((await env.store.composerRequest(wire)).ok,false);assert.equal(await env.store.composerGet({tabId:7}),null);
+ }else{
+  env.clock(1000300);await env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''});
+  assert.equal((await env.store.composerGet({tabId:7})).request,undefined,scenario);
+ }
+ assert.equal(env.data[goalKey(saved)],undefined,scenario);assert.equal(env.messages.length,0,scenario);
+}
+{
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});
+ const wire={tabId:7,armId:armed.record.id,url:root,requestId:'candidate-a',startedAt:1000100,submission:{userId:'native-user-7',userText:objective}};
+ await env.store.composerRequest(wire);
+ const ambiguous=await env.store.composerRequest({...wire,requestId:'candidate-b',startedAt:1000200});
+ assert.equal(ambiguous.ok,false);assert.equal(ambiguous.ambiguous,true);
+ env.clock(1000300);await env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''});
+ assert.equal((await env.fresh().composerGet({tabId:7})).requestCandidateAmbiguous,true);
+ assert.equal((await env.store.composerRequest(wire)).ok,false,'late fallback cannot replace ambiguity with latest request');
+ assert.equal((await env.store.composerGet({tabId:7})).request,undefined);
+ await assert.rejects(()=>env.store.composerBind({...env.proof(armed.record.id),requestId:wire.requestId}),/несколько запросов/);
+ assert.equal(env.messages.length,0);assert.equal(env.data[goalKey(saved)],undefined);
+ await env.store.composerDisarm({tabId:7,armId:armed.record.id});
+ const fresh=await env.store.composerArm({tabId:7,url:root});assert.notEqual(fresh.record.id,armed.record.id);
+ assert.equal(fresh.record.requestCandidateAmbiguous,undefined);assert.equal(fresh.record.requestCandidate,undefined);
+ assert.equal((await env.store.composerRequest(wire)).ok,false,'old arm candidate cannot attach to refreshed arm');
+}
+console.log('Pre-intent request observation: durable exact candidate, intent/native proof gates, ambiguity retention and cancellation passed.');

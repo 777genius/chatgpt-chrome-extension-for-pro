@@ -25,21 +25,15 @@ if (typeof module !== 'undefined') module.exports = { completedAttemptEvidence, 
 
 // Positive rendered marker contract, shared by the isolated content reader.
 // The MAIN probe carries the same self-contained predicate for serialization.
-function plainGoalMarkerDOM(rendered,sourceMessageId='') {
-  if(!rendered||rendered.textContent!=='GOAL_COMPLETE')return false;
-  for(let node=rendered;node;node=node.parentElement) {
-    const style=node.ownerDocument?.defaultView?.getComputedStyle?.(node);
-    if(node.hasAttribute('hidden')||node.getAttribute('aria-hidden')==='true'||
-        node.style?.display==='none'||style?.display==='none'||
-        ['hidden','collapse'].includes(node.style?.visibility)||['hidden','collapse'].includes(style?.visibility))return false;
-  }
+function plainGoalMarkerDOM(rendered,sourceMessageId='',marker='GOAL_COMPLETE') {
+  if(!rendered||rendered.textContent!==marker)return false;
   const plain=node=>{
     if(node?.tagName!=='P'||node.childNodes.length!==1)return false;
     const text=node.firstChild;
-    if(text.nodeType===3)return text.textContent==='GOAL_COMPLETE';
+    if(text.nodeType===3)return text.textContent===marker;
     // ChatGPT's ordinary renderer wraps unformatted text in an attribute-free span.
     return text.tagName==='SPAN'&&text.attributes.length===0&&text.childNodes.length===1&&
-      text.firstChild.nodeType===3&&text.firstChild.textContent==='GOAL_COMPLETE';
+      text.firstChild.nodeType===3&&text.firstChild.textContent===marker;
   };
   let paragraph=rendered;
   while(paragraph.tagName==='DIV'&&paragraph.matches('[data-markdown-text-style="assistant-message"], .markdown, [class*="prose"], [data-message-content]')&&paragraph.children.length===1)paragraph=paragraph.firstElementChild;
@@ -50,11 +44,13 @@ function plainGoalMarkerDOM(rendered,sourceMessageId='') {
   if(roots.length!==1||roots[0].getAttribute('data-dil-message-id')!==sourceMessageId)return false;
   const dil=roots[0],p=dil.firstElementChild,run=p?.firstElementChild;
   const neutral=node=>!Array.from(node.attributes).some(a=>/^(?:role|href|contenteditable|aria-hidden|hidden)$/i.test(a.name));
+  const ink=run?.getAttribute('style'),color=ink?.trim().match(/^--d-stream-ink:\s*rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)\s*;?$/);
+  const inkOnly=!run?.hasAttribute('style')||Boolean(color&&color.slice(1).every(v=>Number(v)<=255));
   const streamed=p?.children.length===1&&p.childNodes.length===1&&run?.tagName==='SPAN'&&
     run.hasAttribute('data-d-stream-run')&&run.getAttribute('data-d-text-flow')==='run'&&
     !run.children.length&&run.childNodes.length===1&&run.firstChild.nodeType===3&&
-    run.firstChild.textContent==='GOAL_COMPLETE'&&neutral(run)&&
-    Array.from(run.attributes).every(a=>['data-d-stream-run','data-d-text-flow'].includes(a.name));
+    run.firstChild.textContent===marker&&neutral(run)&&
+    inkOnly&&Array.from(run.attributes).every(a=>['data-d-stream-run','data-d-text-flow','style'].includes(a.name));
   // Completed DIL paragraphs can retain a stream run or flatten it to text.
   if(dil.tagName!=='DIV'||dil.children.length!==1||dil.childNodes.length!==1||p?.tagName!=='P'||
       p.getAttribute('data-d-component')!=='text'||!p.hasAttribute('data-d-text-flow')||!neutral(p)||

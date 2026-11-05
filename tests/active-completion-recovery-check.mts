@@ -6,18 +6,18 @@ const recovery=source.slice(source.indexOf('  function scheduleActiveCompletionR
 assert.ok(recovery.length>100);
 function setup(pending=false){
   let now=0,probes=0,next=0,generating=!pending,alive=true,acceptAt=40,restores=0;
-  const timers=new Map<number,()=>Promise<void>>();
+  const timers=new Map<number,()=>Promise<void>>(),delays:number[]=[];
   const world=createContext({__chatgptNotifierAttemptId:'request',location:{pathname:'/c/test'},watchToken:1,completionRecoveryTimer:null,completionRecoveryLastProbeAt:-Infinity,completionRecoveryInFlight:false,
     completionAttempt:null,restoreCompletionCheckpoint:async()=>pending?(++restores>=3?true:'pending'):undefined,
     Date:{now:()=>now},runtimeAvailable:()=>alive,isGenerating:()=>generating,currentErrors:()=>[],
     recoverActiveCompletion:async()=>++probes>=acceptAt,
-    setTimeout:(fn:()=>Promise<void>,delay:number)=>{assert.ok(delay>=1000&&delay<=5000);const id=++next;timers.set(id,fn);return id;},
+    setTimeout:(fn:()=>Promise<void>,delay:number)=>{assert.ok(delay>=1000&&delay<=5000||delay===300000);delays.push(delay);const id=++next;timers.set(id,fn);return id;},
     clearTimeout:(id:number)=>timers.delete(id)});
   runInContext(recovery+';scheduleActiveCompletionRecovery()',world);
   const settle=()=>new Promise<void>(resolve=>setImmediate(resolve));
-  return {world,timers,get probes(){return probes;},settle,
+  return {world,timers,delays,get probes(){return probes;},settle,
     async step(){const [id,fn]=timers.entries().next().value!;timers.delete(id);now+=5000;await fn();await settle();},
-    stop(){generating=false;},dispose(){alive=false;},neverAccept(){acceptAt=Infinity;}};
+    idle(){generating=false;},stop(){generating=false;world.watchToken++;},dispose(){alive=false;},neverAccept(){acceptAt=Infinity;}};
 }
 {
   const h=setup();await h.settle();
@@ -57,3 +57,5 @@ console.log('Active completion recovery: >30 transient failures, bounded single 
  world.completionAttempt=null;world.__chatgptNotifierAttemptId='';runInContext('wakePendingCompletionRecovery()',world);assert.equal(calls,1,'idle unrelated tabs do not probe');
  assert.match(source,/errorObserver = new MutationObserver\(\(records\) => \{\s*wakePendingCompletionRecovery\(\);/);
 }
+
+{const h=setup();h.neverAccept();await h.settle();h.idle();for(let i=0;i<8;i++)await h.step();assert.equal(h.timers.size,1);assert.equal(h.delays.at(-1),300000,'an idle request without terminal proof retains one five-minute observation timer');h.dispose();await h.step();assert.equal(h.timers.size,0);}

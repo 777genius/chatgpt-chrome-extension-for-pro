@@ -111,11 +111,11 @@ const probeFrom=probe.indexOf('  function plainGoalMarkerDOM(');
 const probeUntil=probe.indexOf('  const url=location.origin',probeFrom);
 assert.ok(probeFrom>0&&probeUntil>probeFrom);
 const mainPredicate=probe.slice(probeFrom,probeUntil);
-function mainMatch(html:string,id=dil.messageId) {
+function mainMatch(html:string,id=dil.messageId,marker='GOAL_COMPLETE') {
  const {document}=parseHTML('<html><body><div id="answer" class="markdown">'+html+'</div></body></html>');
- const context=createContext({document,sourceMessageId:id});
+ const context=createContext({document,sourceMessageId:id,marker});
  runInContext(mainPredicate,context);
- return runInContext('plainGoalMarkerDOM(document.querySelector("#answer"),sourceMessageId)',context);
+ return runInContext('plainGoalMarkerDOM(document.querySelector("#answer"),sourceMessageId,marker)',context);
 }
 assert.equal(mainMatch(dil.html),true);assert.equal(mainMatch(directDIL),true);
 assert.equal(mainMatch(directDIL,'other'),false);
@@ -135,3 +135,22 @@ assert.equal(match('<p><span><code>GOAL_COMPLETE</code></span></p>'),false);
 assert.equal(match('<p><span>GOAL_COMPLETE</span><span></span></p>'),false);
 assert.equal(mainMatch('<div class="markdown"><p><span>GOAL_COMPLETE</span></p></div>'),true);
 assert.equal(mainMatch('<div class="markdown"><p><span hidden>GOAL_COMPLETE</span></p></div>'),false);
+// Current native renderer paints stream text through a color-only custom
+// property. It does not turn a plain completion signal into rich text.
+const inkDIL=dil.html.replace('<span data-d-stream-run','<span style="--d-stream-ink: rgb(237, 237, 237);" data-d-stream-run');
+assert.equal(matchTurn(dilTurn(inkDIL)),true);assert.equal(mainMatch(inkDIL),true);
+for(const style of ['--d-stream-ink: rgb(237,237,237); display:none','--d-stream-ink: rgb(237,237,237); font-weight:bold',
+ '--d-stream-ink: transparent','--d-stream-ink: rgb(999,0,0)','--d-stream-ink: url(https://example.test/)','opacity:0']) {
+ const html=dil.html.replace('<span data-d-stream-run',`<span style="${style}" data-d-stream-run`);
+ assert.equal(matchTurn(dilTurn(html)),false,style);assert.equal(mainMatch(html),false,style);
+}
+
+assert.equal(mainMatch('<p>GOAL_BLOCKED</p>','','GOAL_BLOCKED'),true);
+assert.equal(mainMatch(directDIL.replaceAll('GOAL_COMPLETE','GOAL_BLOCKED'),dil.messageId,'GOAL_BLOCKED'),true);
+for(const html of ['<p>GOAL_BLOCKED не выдаю.</p>','<p><code>GOAL_BLOCKED</code></p>','<p>GOAL_BLOCKED</p><p>Reason</p>','<p> GOAL_BLOCKED</p>'])
+ assert.equal(mainMatch(html,'','GOAL_BLOCKED'),false,'blocked uses the same whole plain-answer gate');
+
+assert.equal(match('<p>GOAL_BLOCKED</p>'),true,'content reader accepts plain blocked marker');
+assert.equal(match('<p>GOAL_BLOCKED</p>','<button>Copy</button>'),true,'toolbar does not alter blocked response');
+for(const html of ['<p>GOAL_BLOCKED не выдаю.</p>','<p><code>GOAL_BLOCKED</code></p>','<p>GOAL_BLOCKED</p><p>Reason</p>','<p> GOAL_BLOCKED</p>'])
+ assert.equal(match(html),false,'content reader rejects ambiguous blocked response');

@@ -96,9 +96,12 @@ function completionPromptRebindEvidence(record,url,native) {
       native.isLatest!==true||native.isReadOnly!==false||!native.userId||
       !Number.isFinite(native.lastUserSentAtMs)||Math.abs(native.lastUserSentAtMs-record.startedAt)>10000||
       typeof record.promptKey!=='string'||typeof native.promptKey!=='string'||
-      record.promptKey===native.promptKey||native.promptKey===record.baselineKey)return null;
+      record.promptKey===native.promptKey)return null;
+  const sameUser=typeof record.nativeUserId==='string'&&record.nativeUserId===native.userId&&
+    record.nativeUserSentAtMs===native.lastUserSentAtMs;
+  if(native.promptKey===record.baselineKey&&!sameUser)return null;
   const path=new URL(url).pathname.replace(/\/$/,'');
   const fallbackPath=key=>{const at=key.indexOf('|fallback-turn-');return at>0?key.slice(0,at).replace(/\/$/,''):'';};
   if(fallbackPath(record.promptKey)!==path||fallbackPath(native.promptKey)!==path)return null;
-  return {promptKey:native.promptKey};
+  return {promptKey:native.promptKey,...(native.promptKey===record.baselineKey?{baselineKey:'',priorBaselineKey:record.baselineKey}: {})};
 }

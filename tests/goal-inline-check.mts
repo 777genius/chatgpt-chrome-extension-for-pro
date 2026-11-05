@@ -7,7 +7,7 @@ type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;cont
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
 type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
-type Result={ok:boolean;record?:GoalRecord|null;composer?:Composer|null;url?:string;error?:string;pending?:boolean};
+type Result={ok:boolean;record?:GoalRecord|null;composer?:Composer|null;url?:string;error?:string;pending?:boolean;refused?:boolean};
 type Instance={refresh:()=>Promise<void>;dispose:()=>void;manualIntent:(value:{text:string;baselineKey:string;eventAt:number})=>Promise<{ok:boolean}>};
 const chat='https://chatgpt.com/c/synthetic-goal-a',other='https://chatgpt.com/c/synthetic-goal-b';
 const tick=()=>new Promise<void>(resolve=>setImmediate(resolve));
@@ -107,7 +107,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
     Object.defineProperty(event,'isTrusted',{value:true});target.dispatchEvent(event);
   }
   return {document,window,calls,state,instance,element,click,context,
-    now:()=>clock,timers:()=>timers.size,advance:async(ms:number)=>{clock+=ms;for(const [id,timer] of Array.from(timers))if(timer.at<=clock){timers.delete(id);timer.run();}await tick();},
+    now:()=>clock,timers:()=>timers.size,nextDelay:()=>timers.size?Math.min(...Array.from(timers.values(),t=>t.at-clock)):null,advance:async(ms:number)=>{clock+=ms;for(const [id,timer] of Array.from(timers))if(timer.at<=clock){timers.delete(id);timer.run();}await tick();},
     composerState:()=>composerState,setComposer:(value:Composer|null)=>{composerState=value;},bindable:(value=true)=>{bindable=value;},
     toggle:()=>element('[role=switch]'),details:()=>element('[aria-label="Goal settings"]'),panel:()=>element<HTMLElement>('[data-chatgpt-goal-inline=panel]'),
     field:(name:string)=>element<HTMLInputElement|HTMLTextAreaElement>('[data-goal-field='+name+']'),
@@ -128,11 +128,11 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   f.details().click();assert.equal(f.panel().parentElement,f.document.body);
   assert.equal(f.document.querySelector('[data-goal-field=goal]'),null);
   assert.equal(f.document.querySelector('[data-goal-action=start]'),null);
-  assert.equal(f.field('maxContinuations').value,'10');assert.equal(f.field('maxMinutes').value,'1440');
+  assert.equal(f.field('maxContinuations').value,'30');assert.equal(f.field('maxMinutes').value,'1440');
   f.field('rules').value='Synthetic criteria';f.click(f.toggle());f.click(f.toggle());await tick();
   assert.equal(f.calls.filter(value=>value.action==='arm').length,1);
   const armed=f.calls.find(value=>value.action==='arm')!;
-  assert.equal(armed.rules,'Synthetic criteria');assert.equal(armed.maxContinuations,10);assert.equal(armed.maxMinutes,1440);
+  assert.equal(armed.rules,'Synthetic criteria');assert.equal(armed.maxContinuations,30);assert.equal(armed.maxMinutes,1440);
   assert.equal('text' in armed,false);assert.equal('goal' in armed,false);
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.field('rules').disabled,true);
   assert.match(f.panel().textContent!,/Write the goal in the message box and send it yourself/);
@@ -153,8 +153,9 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
 {
   const f=fixture('https://chatgpt.com/',false,false,false,true);await tick();
   assert.equal(f.toggle().disabled,false);assert.equal(f.toggle().getAttribute('aria-checked'),'false');
-  assert.match(f.toggle().title,/Retry loading/);assert.equal(f.panel().hidden,false);
-  assert.match(f.panel().textContent!,/Initial Goal load failed/);
+  assert.match(f.toggle().title,/Retry loading/);
+  assert.equal(f.document.querySelector('[data-chatgpt-goal-inline=panel]'),null,'background failure must not open settings');
+  assert.match(f.toggle().getAttribute('aria-description')||'',/Initial Goal load failed/);
   const count=f.calls.length;f.toggle().click();await tick();assert.equal(f.calls.length,count,'untrusted input cannot retry');
   const pending=deferred<Result>();f.respond(()=>pending.promise);f.click(f.toggle());
   assert.equal(f.calls.at(-1)!.action,'get');assert.equal(f.toggle().disabled,true);
@@ -164,6 +165,9 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.ok(f.calls.every(value=>value.action==='get'),'successful retry does not also arm');
   f.respond(null);f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'arm');
   assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);f.instance.dispose();
+  const h=fixture(chat,false,false,false,true);await tick();
+  h.details().click();assert.equal(h.panel().hidden,false);
+  assert.match(h.panel().textContent!,/Initial Goal load failed/);h.instance.dispose();
   const g=fixture(chat,false,false,false,true);await tick();g.setRecord(goal());g.click(g.toggle());await tick();
   assert.equal(g.toggle().getAttribute('aria-checked'),'true','retry reflects existing active Goal');
   assert.ok(g.calls.every(value=>value.action==='get'),'unknown state never grants Stop or Arm');g.instance.dispose();
@@ -237,10 +241,10 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(duplicate.ok,false);assert.equal((await first).ok,true);
   assert.equal(f.calls.filter(value=>value.action==='intent').length,1);
   assert.equal(f.calls.at(-1)!.text,'  User sent this exact goal  ');assert.equal(f.timers(),1);
-  await f.advance(250);assert.equal(f.calls.at(-1)!.action,'bind');assert.equal(f.timers(),1);
+  await f.advance(5000);assert.equal(f.calls.at(-1)!.action,'bind');assert.equal(f.timers(),1);
   f.setUrl(chat);await f.instance.refresh();
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');
-  f.bindable();await f.advance(250);
+  f.bindable();await f.advance(5000);
   assert.equal(f.calls.at(-1)!.action,'bind');assert.equal(f.calls.at(-1)!.url,chat);assert.equal(f.timers(),0);
   f.details().click();assert.match(f.panel().textContent!,/User sent this exact goal/);
   assert.equal(f.document.querySelector('[data-goal-objective]')!.localName,'p','bound objective is read-only');
@@ -273,7 +277,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   await f.instance.manualIntent({text:'Root native goal',baselineKey:'',eventAt:f.now()});
   const bound={...f.composerState()!,phase:'bound' as const,binding:{url:chat}};
   const record={...goal(chat),goal:'Root native goal'};
-  f.respond(()=>({ok:true,url:chat,record,composer:bound}));await f.advance(250);
+  f.respond(()=>({ok:true,url:chat,record,composer:bound}));await f.advance(5000);
   assert.equal(f.timers(),1,'a worker-first allocation stays within the existing confirmation window');
   f.details().click();assert.doesNotMatch(f.panel().textContent!,/another chat/);
   assert.equal(f.document.querySelector('[data-goal-objective]')!.textContent,'','allocated record is not painted at root');
@@ -285,12 +289,12 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   const g=fixture('https://chatgpt.com/');await tick();g.click(g.toggle());await tick();
   await g.instance.manualIntent({text:'Root native goal',baselineKey:'',eventAt:g.now()});
   g.respond(()=>({ok:true,url:chat,record,composer:{...g.composerState()!,phase:'bound',binding:{url:chat}}}));
-  await g.advance(250);g.setUrl(other);g.respond(()=>({ok:true,url:other,record:null,composer:null}));await g.instance.refresh();
+  await g.advance(5000);g.setUrl(other);g.respond(()=>({ok:true,url:other,record:null,composer:null}));await g.instance.refresh();
   assert.equal(g.timers(),0);assert.equal(g.toggle().getAttribute('aria-checked'),'false','allocation evidence cannot follow a different chat');g.instance.dispose();
 }
 
 // Persistence failures never turn the switch on, failed disarm/Stop never
-// pretend it is off, and confirmation errors stop all polling in this instance.
+// pretend it is off. Unknown native outcomes remain pending observations.
 {
   const f=fixture();await tick();f.details().click();
   f.respond(()=>({ok:false,error:'Storage unavailable'}));f.click(f.toggle());await tick();
@@ -299,10 +303,10 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   f.respond(()=>({ok:false,error:'Disarm refused'}));f.click(f.toggle());await tick();
   assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.match(f.panel().textContent!,/Disarm refused/);
   f.respond(null);await f.instance.manualIntent({text:'Native goal',baselineKey:'/c/synthetic-goal-a|before',eventAt:f.now()});
-  f.respond(()=>({ok:false,error:'Native outcome unknown'}));await f.advance(250);
-  assert.equal(f.timers(),0);assert.match(f.panel().textContent!,/Native outcome unknown/);
+  f.respond(()=>({ok:false,error:'Native outcome unknown'}));await f.advance(5000);
+  assert.equal(f.timers(),1);assert.match(f.panel().textContent!,/Confirmation pending/);assert.doesNotMatch(f.panel().textContent!,/Native outcome unknown|timed out/);
   const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);
-  f.respond(null);f.notify();await tick();assert.match(f.panel().textContent!,/Native outcome unknown/);assert.equal(f.timers(),0);
+  f.respond(null);f.notify();await tick();assert.match(f.panel().textContent!,/Confirmation pending/);assert.equal(f.timers(),1);
   f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'disarm');assert.equal(f.toggle().getAttribute('aria-checked'),'false');f.instance.dispose();
 }
 
@@ -312,8 +316,8 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
   const f=fixture();await tick();f.details().click();f.click(f.toggle());await tick();
   await f.instance.manualIntent({text:'Late native goal',baselineKey:'before',eventAt:f.now()});
   const intent=f.composerState()!;
-  f.respond(()=>({ok:false,error:'Native binding temporarily unavailable'}));await f.advance(250);
-  assert.match(f.panel().textContent!,/Native binding temporarily unavailable/);
+  f.respond(()=>({ok:false,refused:true,error:'Native binding explicitly refused'}));await f.advance(5000);
+  assert.match(f.panel().textContent!,/Native binding explicitly refused/);
   if(variant==='unrelated-error') {f.respond(()=>({ok:false,error:'Unrelated permission failure'}));await f.instance.refresh();}
   const id=variant==='different-intent'?'different-arm':intent.id;
   const adopted={...goal(),id,goal:'Late native goal'};
@@ -321,26 +325,27 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
   const bindCount=f.calls.filter(c=>c.action==='bind').length;
   await f.instance.refresh();
   if(variant==='same') {
-    assert.doesNotMatch(f.panel().textContent!,/Native binding temporarily unavailable/);
-    assert.match(f.panel().textContent!,/Waiting for full answer/);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
-  } else assert.match(f.panel().textContent!,variant==='different-intent'?/Native binding temporarily unavailable/:/Unrelated permission failure/);
-  if(variant==='different-intent'){await f.instance.refresh();assert.match(f.panel().textContent!,/Native binding temporarily unavailable/);}
+    assert.doesNotMatch(f.panel().textContent!,/Native binding explicitly refused/);
+    assert.match(f.panel().textContent!,/Active/);assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+  } else assert.match(f.panel().textContent!,variant==='different-intent'?/Native binding explicitly refused/:/Unrelated permission failure/);
+  if(variant==='different-intent'){await f.instance.refresh();assert.match(f.panel().textContent!,/Native binding explicitly refused/);}
   assert.equal(f.calls.filter(c=>c.action==='bind').length,bindCount,'late GET does not restart or replay binding');
   assert.equal(f.state.nativeSends,0);f.instance.dispose();
 }
 
-// Reload resumes a persisted intent only for its original 30-second window.
+// Reload resumes an intent within its original 30-minute observation window.
 // Disposal clears timers, subscriptions and listeners and rejects late results.
 {
   const f=fixture();await tick();
-  f.setComposer({id:'saved-arm',phase:'intent',url:chat,intent:{text:'Saved native goal',baselineKey:'before',eventAt:f.now()-29500},
+  f.setComposer({id:'saved-arm',phase:'intent',url:chat,intent:{text:'Saved native goal',baselineKey:'before',eventAt:f.now()-(30*60*1000-10000)},
     config:{rules:'Saved criteria',maxContinuations:10,maxMinutes:1440}});await f.instance.refresh();
-  assert.equal(f.timers(),1);await f.advance(250);assert.equal(f.timers(),1);await f.advance(250);
-  assert.equal(f.timers(),0);f.details().click();assert.match(f.panel().textContent!,/timed out/);
+  assert.equal(f.timers(),1);await f.advance(5000);assert.equal(f.timers(),1);await f.advance(5000);
+  assert.equal(f.timers(),0);f.details().click();assert.match(f.panel().textContent!,/Confirmation pending/);assert.doesNotMatch(f.panel().textContent!,/timed out|Turn Goal off/);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true','observation expiry does not disarm the saved intent');
   const count=f.calls.length;await f.advance(1000);assert.equal(f.calls.length,count);f.instance.dispose();
   const g=fixture();await tick();g.click(g.toggle());await tick();
   await g.instance.manualIntent({text:'Native goal',baselineKey:'before',eventAt:g.now()});
-  const pending=deferred<Result>();g.respond(()=>pending.promise);await g.advance(250);g.instance.dispose();g.instance.dispose();
+  const pending=deferred<Result>();g.respond(()=>pending.promise);await g.advance(5000);g.instance.dispose();g.instance.dispose();
   pending.resolve({ok:true,record:goal(),composer:{...g.composerState()!,phase:'bound',binding:{url:chat}}});await tick();
   assert.equal(g.timers(),0);assert.equal(g.unsubscribed(),1);assert.equal(g.document.querySelector('[data-chatgpt-goal-inline]'),null);
   g.remount();await tick();assert.equal(g.document.querySelector('[role=switch]'),null);assert.equal(g.nativeForm().isConnected,true);
@@ -474,3 +479,56 @@ console.log('Inline Goal native arming, explicit intent, bounded confirmation, d
  assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
  replacement.dispose();assert.equal(f.document.querySelector('[data-chatgpt-goal-inline]'),null);
 }
+// A legacy unconfirmed intent remains reviewable and requires a fresh trusted
+// Restore action. Neither background refresh nor a page-created click consents.
+{
+ const f=fixture(chat);await tick();
+ const saved:Composer={id:'saved-arm',phase:'intent',url:'https://chatgpt.com/',
+  config:{rules:'Original criteria',maxContinuations:10,maxMinutes:1440},
+  intent:{text:'Saved original objective',baselineKey:'',eventAt:f.now()-40000}};
+ f.setComposer(saved);await f.instance.refresh();f.click(f.details());
+ assert.equal(f.action('restore').hidden,false);assert.match(f.panel().textContent!,/Saved original objective/);
+ const count=f.calls.length;f.action('restore').click();await tick();assert.equal(f.calls.length,count,'untrusted Restore is ignored');
+ f.respond(value=>value.action==='restore'?{ok:true,url:chat,record:{...goal(chat),goal:saved.intent!.text},
+  composer:{...saved,phase:'bound',binding:{url:chat}}}:{ok:true,url:chat,composer:saved});
+ f.click(f.action('restore'));await tick();assert.equal(f.calls.at(-1)!.action,'restore');assert.equal(f.calls.at(-1)!.armId,'saved-arm');
+ assert.equal(f.action('restore').hidden,true);assert.equal(f.state.nativeSends,0);assert.equal(f.state.draftReads,0);f.instance.dispose();
+}
+
+// Slow tabs may need minutes to expose the accepted native user. Observation
+// remains presentation only: no replay, no deadline reset and one sparse timer.
+{
+ const f=fixture();await tick();f.click(f.toggle());await tick();
+ const sentAt=f.now();await f.instance.manualIntent({text:'Saved lagging native objective',baselineKey:'before',eventAt:sentAt});
+ f.details().click();assert.equal(f.nextDelay(),5000);
+ await f.advance(30000);assert.equal(f.nextDelay(),30000);
+ await f.advance(270000);assert.equal(f.nextDelay(),300000);
+ f.respond(()=>{throw Error('Synthetic observation transport unavailable');});await f.advance(300000);
+ assert.equal(f.timers(),1);assert.match(f.panel().textContent!,/Confirmation pending/);assert.doesNotMatch(f.panel().textContent!,/timed out|transport unavailable|Turn Goal off/);
+ f.respond(null);await f.advance(10*60000);f.bindable();await f.advance(300000);
+ assert.equal(f.timers(),0);assert.equal(f.composerState()!.phase,'bound');assert.match(f.panel().textContent!,/Active/);
+ assert.equal(f.calls.filter(c=>c.action==='intent').length,1);assert.equal(f.calls.filter(c=>c.action==='disarm').length,0);
+ assert.equal(f.calls.some(c=>c.action==='start'),false);assert.equal(f.state.nativeSends,0);assert.equal(f.state.draftReads,0);f.instance.dispose();
+}
+{
+ const f=fixture();await tick();f.click(f.toggle());await tick();const at=f.now();
+ await f.instance.manualIntent({text:'Long native confirmation',baselineKey:'before',eventAt:at});f.details().click();
+ while(f.timers()) {assert.equal(f.timers(),1);const delay=f.nextDelay()!;assert.ok(delay>=0&&delay<=300000);await f.advance(delay);}
+ assert.equal(f.now(),at+30*60000,'UI observation duration is exactly 30 minutes from original intent');
+ assert.ok(f.calls.filter(c=>c.action==='bind').length<=21,'observation does not create a polling storm');
+ assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.composerState()!.phase,'intent');
+ assert.match(f.panel().textContent!,/Confirmation pending.*objective is saved.*Background verification continues/);
+ assert.doesNotMatch(f.panel().textContent!,/timed out|resend the original|Turn Goal off/);
+ const count=f.calls.length;await f.advance(60*60000);assert.equal(f.calls.length,count);
+ await f.instance.refresh();assert.equal(f.timers(),0,'GET/reload state cannot restart the original observation window');
+ f.bindable();const saved=f.composerState()!;f.setRecord({...goal(),id:saved.id});f.setComposer({...saved,phase:'bound',binding:{url:chat}});
+ await f.instance.refresh();assert.match(f.panel().textContent!,/Active/,'background accepted proof resolves expired UI observation');
+ assert.equal(f.state.nativeSends,0);assert.equal(f.state.draftReads,0);f.instance.dispose();
+}
+{
+ const f=fixture();await tick();f.click(f.toggle());await tick();
+ await f.instance.manualIntent({text:'Intent cancelled by owner',baselineKey:'before',eventAt:f.now()});assert.equal(f.timers(),1);
+ f.click(f.toggle());await tick();assert.equal(f.timers(),0,'explicit disarm cancels the only confirmation timer');
+ const calls=f.calls.length;await f.advance(30*60000);assert.equal(f.calls.length,calls);assert.equal(f.composerState()!.phase,'disabled');f.instance.dispose();
+}
+console.log('Lag-tolerant Goal confirmation: 30-minute original window, sparse single timer, pending-not-failure, late proof and explicit cancellation passed.');

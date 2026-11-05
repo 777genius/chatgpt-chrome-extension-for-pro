@@ -119,7 +119,19 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         }
       }
       if(sameRecovery&&voice&&nativeVoiceIdle&&controller&&controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&typeof controller.submitReady==='boolean')return {ok:true,stopped:false,idle:true,proof:'native-voice-idle',recoveryBinding};
-      return {ok:false,stopped:false,retryable:true,reason:'Нативная остановка или свободный редактор пока не подтверждены'};
+      const send=Array.from(root.querySelectorAll('button[data-testid="send-button"],button#composer-submit-button,[data-composer-body] button[type="submit"]')).find(node=>visible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true');
+      let nativeSendIdle=false;
+      const sendFiber=send&&Object.keys(send).find(key=>key.startsWith('__reactFiber$'));
+      for(let current=sendFiber&&send[sendFiber],i=0;current&&i<12;i++,current=current.return){
+        const props=current.memoizedProps;
+        if(props?.isLoading===false&&props.disabled===false&&props.isStartButtonAllowed===false)nativeSendIdle=true;
+      }
+      const sameComposer=send&&editor&&send.closest('form,[data-composer-body]')===editor.closest('form,[data-composer-body]');
+      const editorSubmitIdle=Boolean(sameRecovery&&sameComposer&&nativeSendIdle&&controller&&controller.submitReady===true&&
+        controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null);
+      // A draft replaces Voice with Send. This is only a candidate: the worker
+      // must additionally prove this exact request's terminal transport failure.
+      return {ok:false,stopped:false,retryable:true,needsIdleProof:sameRecovery,editorSubmitIdle,reason:'Нативная остановка или свободный редактор пока не подтверждены'};
     }
     if(recoveryAction==='inspect-recovery')return {ok:true,stopped:false,idle:false,needsStop:true,recoveryBinding};
     if (stop.disabled || stop.getAttribute('aria-disabled') === 'true') return {ok:false,reason:'Остановка временно недоступна'};
@@ -156,20 +168,6 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   return { action, messages, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
     messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
 
-}
-
-function inspectChatAttachment(fileName) {
-  const page = document.querySelector('[data-app-shell-active-page="true"]') || document;
-  const root = page.querySelector('[data-composer-attachments]');
-  if (!root) return { status: 'missing' };
-  const label = Array.from(root.querySelectorAll('*')).find((node) => !node.children.length && node.textContent === fileName);
-  if (!label) return { status: 'missing' };
-  const key = Object.keys(label).find((name) => name.startsWith('__reactFiber$'));
-  for (let fiber = key && label[key], i = 0; fiber && i < 20; i += 1, fiber = fiber.return) {
-    const attachment = fiber.memoizedProps?.attachment;
-    if (attachment?.name === fileName) return { status: attachment.status || 'unknown' };
-  }
-  return { status: 'unknown' };
 }
 
 // Read-only acknowledgement of an already clicked handoff. The composer being
@@ -228,6 +226,39 @@ function controlChatComposer(options) {
     const rects=typeof node.getClientRects==='function'?Array.from(node.getClientRects()):[node.getBoundingClientRect()];
     return rects.some(rect=>rect.width>0&&rect.height>0);
   };
+  // Host fibers can retain an old uploading object after their owner committed
+  // the ready file. Correlate snapshots by uploadId, never by filename alone.
+  function nativeFiles(container) {
+    const snapshots=new Set();
+    for(const node of container?.querySelectorAll('*')||[]) {
+      const key=Object.keys(node).find(name=>name.startsWith('__reactFiber$'));
+      for(let f=key&&node[key],i=0;f&&i<20;i++,f=f.return) {
+        const a=f.memoizedProps?.attachment;if(typeof a?.name==='string')snapshots.add(a);
+      }
+    }
+    const groups=new Map();
+    for(const a of snapshots){const key=typeof a.uploadId==='string'&&a.uploadId?'upload:'+a.uploadId:a;
+      if(!groups.has(key))groups.set(key,[]);groups.get(key).push(a);}
+    const files=[];
+    for(const items of groups.values()) {
+      const first=items[0];
+      if(items.some(a=>a.name!==first.name||Number.isFinite(a.size)&&Number.isFinite(first.size)&&a.size!==first.size))return null;
+      if(items.length===1){files.push(first);continue;}
+      if(items.some(a=>!['uploading','ready'].includes(a.status)))return null;
+      const ready=items.filter(a=>a.status==='ready'&&typeof a.id==='string'&&a.id);
+      if(ready.length&&new Set(ready.map(a=>a.id)).size===1)files.push(ready[0]);
+      else if(items.every(a=>a.status==='uploading'))files.push(first);
+      else return null;
+    }
+    return files;
+  }
+  if(options.action==='inspect-attachment') {
+    if(location.href!==options.url)return {ok:false,status:'unknown'};
+    const container=root.querySelector('[data-composer-attachments]'),files=nativeFiles(container);
+    if(!container||!container.children.length)return {ok:true,status:'missing'};
+    if(!files||files.length!==1||files[0].name!==options.fileName)return {ok:true,status:'unknown'};
+    return {ok:true,status:files[0].status||'unknown'};
+  }
   const editor = Array.from(root.querySelectorAll('#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, [data-composer-markdown][contenteditable="true"]')).find(visible);
   if (!editor || location.href !== options.url) return { ok: false, reason: 'Чат или поле сообщения изменились' };
   const composer=editor.closest('form')||editor.closest('[data-composer-body]');
@@ -316,7 +347,7 @@ function controlChatComposer(options) {
     const attachments=composer.querySelector('[data-composer-attachments]');
     const plain=typeof controller.getPlainText==='function'?controller.getPlainText():null;
     return {...inspection,ok:noSystemHints&&typeof prompt==='string'&&plain===prompt&&visibleText()===prompt&&
-      controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&ready&&!attachments?.children.length};
+      controller.pendingSubmit==null&&controller.pendingBrowserAutocompleteSubmission==null&&(ready||prompt==='')&&!attachments?.children.length};
   }
   if(options.action==='inspect-empty-retry') {
     const attachments=composer.querySelector('[data-composer-attachments]');
@@ -338,15 +369,8 @@ function controlChatComposer(options) {
   const attachments = composer.querySelector('[data-composer-attachments]');
   if (attachments?.children.length && !options.fileName) return {ok:false,reason:'В поле есть пользовательское вложение'};
   if (options.fileName) {
-    const found = new Set();
-    for (const node of attachments?.querySelectorAll('*') || []) {
-      const key = Object.keys(node).find((name) => name.startsWith('__reactFiber$'));
-      for(let fiber=key&&node[key],i=0;fiber&&i<5;i++,fiber=fiber.return){
-        const attachment=fiber.memoizedProps?.attachment;
-        if(attachment?.name)found.add(attachment);
-      }
-    }
-    if(found.size!==1 || !Array.from(found).every(file=>file.name===options.fileName&&file.status==='ready')) return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
+    const files=nativeFiles(attachments);
+    if(!files||files.length!==1||files[0].name!==options.fileName||files[0].status!=='ready') return {ok:false,reason:'Вложение истории не подтверждено или есть лишние файлы'};
   }
   if (options.action === 'inspect' || inspectingSeed || inspectingEmptyHandoff) return inspection;
   const button = Array.from(composer.querySelectorAll('button[data-testid="send-button"], button#composer-submit-button, [data-composer-body] button[type="submit"]')).find(visible);

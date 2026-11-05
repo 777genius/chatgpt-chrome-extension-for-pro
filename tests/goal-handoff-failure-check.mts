@@ -188,3 +188,13 @@ async function waitingGoal(url:string,tabId:number) {
   assert.equal(dispatches.length,beforeDispatches);
 }
 console.log('Goal handoff: preparation safety, failed UPDATE, durable GET replay and legacy binding passed.');
+
+{
+ const url='https://chatgpt.com/c/completed-file-preparation',tabId=77;
+ await waitingGoal(url,tabId);const prompt=new URL(url).pathname+'|user';
+ await goals.completion({url,tabId,completionKey:prompt+'|done',promptKey:prompt,response:'GOAL_COMPLETE',nativeVerified:true,rawExact:true});
+ assert.equal(saved['chatgpt-goal:'+url].phase,'completed');
+ assert.equal((await goals.handoffPreparationReady({sourceUrl:url,handoffId:'ordinary-file-transfer',tabId})).ok,true,
+  'an already completed Goal cannot strand an independent ordinary file handoff');
+ assert.equal(saved['chatgpt-goal:'+url].phase,'completed','preparation recovery does not resume the old Goal');
+}

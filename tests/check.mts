@@ -152,8 +152,8 @@ async function domCheck() {
   assert.equal(restoredBlock.sends.length,0,'sticky stop survives an extension update even outside the rolling window');
   assert.match(restoredBlock.messages[0].retryReason,/Saved sticky stop/);
   const extras=setup('',true,true,'',{failures:[],remainingRetries:2,blocked:false});
-  await extras.fail('Extra one');extras.advance(5000);
-  await extras.fail('Extra two');extras.advance(5000);
+  await extras.fail('Extra one');await waitFor(()=>extras.logs.filter(e=>e.kind==='retry.finished').length===1);extras.advance(5000);
+  await extras.fail('Extra two');await waitFor(()=>extras.logs.filter(e=>e.kind==='retry.finished').length===2);extras.advance(5000);
   await extras.fail('Extra budget exhausted');
   assert.equal(extras.sends.length,2,'explicit extra budget must allow exactly two sends');
   assert.match(extras.messages[0].retryReason,/Дополнительные автоповторы исчерпаны/);
@@ -286,6 +286,13 @@ async function domCheck() {
   await waitFor(()=>carried.sends.length===1);
   await waitFor(()=>carried.document.querySelector('#prompt-textarea')!.textContent==='Preserved synthetic draft');
   assert.deepEqual(carried.sends,['доделай е2е'],'carried backup is never submitted');
+  const carriedRecovery=setup('Preserved synthetic draft',true,true,'',{preparationRecovered:true,preparationDraftOperationId:'prior-recovery',preparationDraftSequence:12,
+    fixtureDraft:{operationId:'prior-recovery',savedSequence:12,attemptId:'',phase:'not-clicked',draft:'Preserved synthetic draft'}});
+  carriedRecovery.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div role="status"><span class="text-chatgpt-recovery">Recovery</span></div>');
+  await pause();carriedRecovery.advance(3500);
+  await waitFor(()=>carriedRecovery.logs.some(e=>e.kind==='draft.restored'));
+  assert.deepEqual(carriedRecovery.sends,['доделай е2е']);
+  assert.equal(carriedRecovery.document.querySelector('#prompt-textarea')!.textContent,'Preserved synthetic draft','carried recovery never doubles or submits the same owner draft');
   const historical = setup();
   historical.document.querySelector('main')!.innerHTML = `<article data-testid="conversation-turn-old" data-turn="assistant">${alertHTML('Old')}</article>${user}<article data-testid="conversation-turn-2" data-turn="assistant"><div class="markdown">${alertHTML('Example')}</div></article>`;
   await pause();
@@ -355,11 +362,12 @@ async function workerCheck() {
   assert.equal(storage[quietGoalKey].phase,'stopped');
   assert.equal(notifications.length,quietNoticeCount,'budget exhaustion must not emit a false success notice');
   storage[quietGoalKey]={...storage[quietGoalKey],phase:'waiting',operation:null,lastCompletionKey:null,expectedPromptKey:'final-prompt',continuations:0};
+  nativeGoalProof={ok:true,isLatest:true,isReadOnly:false,generating:false,hasError:false,turnStatus:'complete',assistantCompleted:true,assistantPhase:'final_answer',userId:'quiet-user',promptKey:'final-prompt',assistantKey:'answer',goalRawExact:true,goalResponse:'GOAL_COMPLETE'};
   callbacks.message({...quietAnswer,goalPromptKey:'final-prompt',completionKey:'final-prompt|answer',response:'GOAL_COMPLETE',goalRawExact:true},sender);await pause();
   assert.equal(storage[quietGoalKey].phase,'completed');
   assert.equal(notifications.length,quietNoticeCount+1,'completed Goal notifies exactly once');
   assert.ok(soundCalls>quietSoundCount,'completed Goal plays its sound');
-  delete storage[quietGoalKey];
+  delete storage[quietGoalKey];nativeGoalProof=null;
   callbacks.before({ tabId: 8, method: 'POST', timeStamp: 123456, url: 'https://chatgpt.com/backend-api/f/conversation' }); await pause();
   assert.equal(injections.at(-1).target.tabId, 8);
   assert.equal(injections.at(-1).args[0], 123456);
@@ -449,7 +457,8 @@ async function workerCheck() {
   nativeGoalProof=null;
   goal=storage[goalKey];assert.equal(goal.phase,'waiting');
   const goalCompletion={...success,requestId:'goal-native-request',attemptId:String(goalRequestAt),completionStartedAt:goalRequestAt,response:'GOAL_COMPLETE',completionKey:'/c/example|goal-user-1|goal-assistant-1',
-    goalPromptKey:'/c/example|goal-user-1',goalNativeVerified:true,goalRawExact:true};
+    goalPromptKey:'/c/example|goal-user-1',goalNativeUserId:'goal-native-user',goalNativeVerified:true,goalRawExact:true};
+  nativeGoalProof={ok:true,isLatest:true,isReadOnly:false,generating:false,hasError:false,turnStatus:'complete',assistantCompleted:true,assistantPhase:'final_answer',userId:'goal-native-user',promptKey:'/c/example|goal-user-1',assistantKey:'goal-assistant-1',goalRawExact:true,goalResponse:'GOAL_COMPLETE'};
   callbacks.message(goalCompletion,goalSender);await pause();
   goal=storage[goalKey];
   assert.equal(goal.phase,'completed','only the native-final, entire marker completes the Goal');

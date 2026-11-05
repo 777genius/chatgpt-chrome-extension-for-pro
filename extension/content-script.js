@@ -1,9 +1,9 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.47';
+  const SCRIPT_VERSION = '1.8.76';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
-  document.dispatchEvent(new Event('chatgpt-notifier-retire-invalidated'));
+  document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
   globalThis.__chatgptNotifierVersion = SCRIPT_VERSION;
   let contextAlive = true;
@@ -28,15 +28,37 @@
   let visibleErrors = new Set();
   let errorScanTimer = null;
   let errorObserver = null;
+  let goalRecoveryTimer=null,goalRecoveryBusy=false,goalRecoveryAgain=false,goalRecoveryPath='',goalRecoveryFirstAt=0;
   function runtimeAvailable() {
     try { return contextAlive && Boolean(chrome.runtime?.id); } catch { return false; }
   }
+  async function recoverGoalState() {
+    if(!runtimeAvailable())return;
+    if(goalRecoveryBusy){goalRecoveryAgain=true;return;}
+    if(goalRecoveryTimer!==null)clearTimeout(goalRecoveryTimer);goalRecoveryTimer=null;
+    const path=location.pathname;
+    if(goalRecoveryPath!==path||!goalRecoveryFirstAt){goalRecoveryPath=path;goalRecoveryFirstAt=Date.now();}
+    goalRecoveryBusy=true;
+    try {
+      const result=await runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
+      if(!runtimeAvailable())return;
+      if(location.pathname!==path){goalRecoveryAgain=true;return;}
+      if(result?.pending===true&&result.canRetry===true)
+        goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState();},Date.now()-goalRecoveryFirstAt<30000?5000:300000);
+      else goalRecoveryFirstAt=0;
+    }catch{}finally{
+      goalRecoveryBusy=false;
+      if(goalRecoveryAgain&&runtimeAvailable()){goalRecoveryAgain=false;void recoverGoalState();}
+    }
+  }
+
   function stopContext() {
     contextAlive = false;
     statusIndicator?.dispose();
     inlineGoal?.dispose();
     deferredTaskObserver?.dispose();
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
+    if(goalRecoveryTimer!==null)clearTimeout(goalRecoveryTimer);goalRecoveryTimer=null;
     if(handoffReadinessTimer!==null)clearTimeout(handoffReadinessTimer);
     handoffReadinessTimer=null;
     if(retryReadinessTimer!==null)clearTimeout(retryReadinessTimer);
@@ -179,12 +201,13 @@
       (roleNode.matches?.('[data-chatgpt-search-unit-key$=":assistant"]')?roleNode:null);
     const ids=new Set((unit?.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).filter(Boolean));
     const sourceMessageId=ids.size===1?Array.from(ids)[0]:'';
-    if(!plainGoalMarkerDOM(rendered,sourceMessageId))return false;
+    const marker=rendered?.textContent;
+    if(!['GOAL_COMPLETE','GOAL_BLOCKED'].includes(marker)||!plainGoalMarkerDOM(rendered,sourceMessageId,marker))return false;
     const semantic=roleNode.cloneNode(true);
     // Fallback turns expose the speaker label as a screen reader heading,
     // outside the answer itself. It is interface text in every locale.
     semantic.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],h4.sr-only[data-conversation-role="assistant"]').forEach(node=>node.remove());
-    return semantic.textContent.trim()==='GOAL_COMPLETE';
+    return semantic.textContent.trim()===marker;
   }
 
   function assistantText(turn) {
@@ -524,6 +547,8 @@
         try {replaceEditorText(editor,'');}catch{}
       }
       void audit('goal.dispatch_failed',{operationId,sourceUrl:url,reason});
+      if(!clicked&&!intentRequested&&String(error?.message)==='Чат занят или другой механизм восстановления активен'&&sameChat())
+        void recoverGoalState();
     } finally {
       goalDispatchBusy=false;
     }
@@ -603,6 +628,7 @@
     let recoveryStopped = false;
     let recoveryVerifiedIdle = false;
     let recoveryDraft = null;
+    let carriedDraftText = null;
     let readinessPhase = 'planned';
     const readiness = async (phase,details={}) => {
       if(readinessPhase===phase)return;
@@ -617,11 +643,23 @@
     try {
       await logRetry('retry.planned', {operationId,text:RETRY_TEXT,error:error.response,
         failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,promptKey},true);
+      if(state.preparationDraftOperationId) {
+        const carried=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url:sourceUrl});
+        const backup=carried?.ok&&carried.record;
+        if(!stillCurrent()||!backup||backup.operationId!==state.preparationDraftOperationId||
+            backup.savedSequence!==state.preparationDraftSequence||backup.attemptId!==attempt||backup.claimedAt||
+            !['saved','not-clicked'].includes(backup.phase)||typeof backup.draft!=='string'||!backup.draft)
+          throw new Error('Резервная копия черновика изменилась; повтор остановлен');
+        carriedDraftText=backup.draft;
+      }
       if (error.recovery) {
         if (!stillCurrent()) return;
         const beforeStop = composer();
         recoveryDraft = beforeStop ? rawEditorText(beforeStop) : null;
-        if (recoveryDraft) await logRetry('draft.saved',{operationId,draft:recoveryDraft,draftChars:recoveryDraft.length,phase:'before-recovery-stop'},true);
+        if (recoveryDraft) {
+          const saved=carriedDraftText&&carriedDraftText!==recoveryDraft?carriedDraftText+'\n\n'+recoveryDraft:recoveryDraft;
+          await logRetry('draft.saved',{operationId,draft:saved,draftChars:saved.length,phase:'before-recovery-stop'},true);
+        }
         if (!stillCurrent() || (beforeStop && rawEditorText(beforeStop) !== recoveryDraft)) return;
         const alert = currentErrors().find(node=>node.querySelector('.text-chatgpt-recovery'));
         let result;
@@ -664,19 +702,12 @@
       if (form?.querySelector('[data-testid*="attachment"], [data-testid="file-upload-progress"]') || form?.querySelector('[data-composer-attachments]')?.children.length) {
         throw new Error('В поле есть вложение');
       }
-      if(state.preparationDraftOperationId) {
-        const carried=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url:sourceUrl});
-        const backup=carried?.ok&&carried.record;
-        if(!stillCurrent()||!backup||backup.operationId!==state.preparationDraftOperationId||
-            backup.savedSequence!==state.preparationDraftSequence||backup.attemptId!==attempt||backup.claimedAt||
-            !['saved','not-clicked'].includes(backup.phase)||typeof backup.draft!=='string'||!backup.draft)
-          throw new Error('Резервная копия черновика изменилась; повтор остановлен');
-        recoveryDraft=backup.draft;
-      }
       insertedEditor = editor;
       const visibleDraft = rawEditorText(editor);
-      const draft = recoveryDraft && visibleDraft !== recoveryDraft
+      const settledDraft = recoveryDraft && visibleDraft !== recoveryDraft
         ? (visibleDraft ? `${recoveryDraft}\n\n${visibleDraft}` : recoveryDraft) : visibleDraft;
+      const draft=carriedDraftText&&settledDraft!==carriedDraftText
+        ?(settledDraft?carriedDraftText+'\n\n'+settledDraft:carriedDraftText):settledDraft;
       if (draft) {
         await logRetry('draft.saved',{operationId,draftChars:draft.length,draft},true);
         state.preparationDraftOperationId=null;state.preparationDraftSequence=null;
@@ -962,15 +993,16 @@
   window.addEventListener('popstate',scheduleHandoffCheck,{signal:listeners.signal});
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){scheduleHandoffCheck();void renameHandoff();}},{signal:listeners.signal});
 
-  async function waitHandoff(check, timeoutMs = 20000) {
+  async function waitHandoff(check, timeoutMs = 20000, preparationPhase = 'editor') {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!runtimeAvailable()) throw new Error('Расширение обновлено');
       const result = await check();
       if (result) return result;
-      await sleepUntilNextCheck();
+      if(preparationPhase==='upload'){const waited=await runtimeMessage({type:'CHATGPT_WAIT',delayMs:1000});if(!waited?.ok)throw new Error('Ожидание расширения недоступно');}
+      else await sleepUntilNextCheck();
     }
-    throw new Error('Не удалось дождаться готовности нового чата');
+    throw Object.assign(new Error('Не удалось дождаться готовности нового чата'),{preparationPhase});
   }
 
   async function submitHandoff() {
@@ -1034,7 +1066,7 @@
           }
           if (file?.status === 'error') throw new Error('Ошибка загрузки файла истории');
           return file?.ok && file.status === 'ready';
-        }, 60000);
+        }, 180000, 'upload');
         if (!nativeSeed) {
           const attachments = await inspectComposer(existing, 'inspect', { fileName: record.fileName });
           verifyPreparation();
@@ -1076,13 +1108,98 @@
       if(clicked) {
         try {await awaitHandoffConfirmation(String(cause.message||cause));}catch{}
       } else {
-        try { await updateHandoff('failed', { reason: String(cause.message || cause) }); } catch {}
+        try { await updateHandoff('failed', { reason: String(cause.message || cause),preparationPhase:cause.preparationPhase||null }); } catch {}
         notifyOperationWarning({ sessionTitle: document.title, response: `Передача в новый чат остановлена: ${cause.message}. Копия истории сохранена в расширении.` },'Историю можно скачать из меню расширения');
       }
     } finally {
       handoffBusy = false;
       scheduleHandoffReadiness();
     }
+  }
+
+  async function resolveHandoffSuccessor(sourceUrl,stillCurrent) {
+    // The worker may retire a prior uncertain transfer only from a positively
+    // accepted later manual message. This never retries its historical send.
+    const result=await runtimeMessage({type:'CHATGPT_HANDOFF_SUCCESSOR',url:sourceUrl});
+    if(!stillCurrent())throw new Error('Исходный чат или запрос изменился во время проверки предыдущей передачи');
+    if(!result?.ok)throw new Error(result?.reason||'Предыдущая передача ещё ожидает подтверждения');
+    if(result.record)handoffRecord=result.record;
+  }
+
+  function handoffNavigationButton(alert,info,escalated=false) {
+    const root=pageRoot();
+    if(!alert||!root.contains(alert)||!isElementVisible(alert)||!escalated&&info?.action!=='new-chat')return null;
+    const enabled=node=>isElementVisible(node)&&!node.disabled&&node.getAttribute('aria-disabled')!=='true'&&node.getAttribute('aria-busy')!=='true';
+    const local=alert.querySelector('button');
+    // An explicit disabled native control is a refusal, not permission to use
+    // a different button. Escalation still selects navigation, never Retry.
+    if(local&&!enabled(local))return null;
+    if(local&&!escalated)return local;
+    return Array.from(document.querySelectorAll('a[href="/"],button.button-toolbar:has(svg path[d^="M8.16675 2.501"])')).find(node=>{
+      const owner=node.closest('[data-app-shell-active-page]');
+      return (!owner||owner===root)&&enabled(node);
+    })||null;
+  }
+
+  const handoffNavigationClaims=new Set();
+  const handoffNavigationRecoveryClaims=new Set();
+  async function navigateHandoffSource(record,alert,info,{sourceEditor,draft,sourceEffort,sourceModel,sameSource,escalated=false}) {
+    if(handoffNavigationClaims.has(record.id))return;
+    let button;
+    function verifySource(mode) {
+      if(!sameSource()||handoffRecord?.id!==record.id||handoffRecord.stage!=='navigating')
+        throw new Error('Исходный чат или запрос изменился; переход отменён');
+      if(isGenerating())throw new Error('В исходном чате идёт генерация; переход отменён');
+      if(mode.value!==sourceEffort||mode.model!==sourceModel)
+        throw new Error('Режим рассуждения изменился; переход отменён');
+      const editor=composer();
+      if((sourceEditor&&!editor)||(editor&&(rawEditorText(editor)!==draft||composerHasAttachments(editor))))
+        throw new Error('Черновик или вложения изменились; переход отменён');
+    }
+    try {
+      verifySource(await reasoningMode());
+      button=handoffNavigationButton(alert,info,escalated);
+      if(!button)throw new Error('Кнопка нового чата недоступна');
+      if(handoffNavigationClaims.has(record.id))return;
+      handoffNavigationClaims.add(record.id);
+      await audit('handoff.navigation_intent',{operationId:record.id,sourceUrl:record.sourceUrl},true);
+      if(!runtimeAvailable())return;
+      verifySource(await reasoningMode());
+      button=handoffNavigationButton(alert,info,escalated);
+      if(!button)throw new Error('Кнопка нового чата изменилась; переход отменён');
+    } catch(cause) {
+      if(cause?.code==='RETRY_DUPLICATE')return; // Another context owns this navigation; do not overwrite its stage.
+      // A refused pre-click preparation is durable. A persisted navigation
+      // intent remains a fence even if a later observer cannot prove a click.
+      await updateHandoff('failed',{reason:String(cause.message||cause)});
+      throw cause;
+    }
+    if(!runtimeAvailable())return;
+    button.click();
+    await audit('handoff.navigation_clicked',{operationId:record.id,sourceUrl:record.sourceUrl},true);
+    await waitHandoff(()=>location.href!==record.sourceUrl);
+    await submitHandoff();
+  }
+
+  async function resumeHandoffSourceNavigation(message) {
+    if(!runtimeAvailable()||message.url!==location.href||handoffNavigationRecoveryClaims.has(message.id))return;
+    handoffNavigationRecoveryClaims.add(message.id);
+    const promptKey=latestPromptSnapshot()?.promptKey||location.pathname,attempt=globalThis.__chatgptNotifierAttemptId||'',request=globalThis.__chatgptNotifierRequestId||null;
+    const sameSource=()=>runtimeAvailable()&&location.href===message.url&&
+      (latestPromptSnapshot()?.promptKey||location.pathname)===promptKey&&
+      (globalThis.__chatgptNotifierAttemptId||'')===attempt&&(globalThis.__chatgptNotifierRequestId||null)===request;
+    const saved=await runtimeMessage({type:'CHATGPT_HANDOFF_GET'}),record=saved?.record;
+    if(!sameSource()||!saved?.ok||record?.id!==message.id||record.sourceUrl!==message.url||
+        record.stage!=='navigating'||record.navigationRecoveries!==1)return;
+    const alert=currentErrors().find(node=>node.matches('aside[role="alert"].text-danger'));
+    if(!alert)return;
+    const info=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
+    if(!sameSource()||!info?.ok||info.action!=='new-chat'||info.incomplete||!info.messages?.length)return;
+    const editor=composer();
+    if(!editor||rawEditorText(editor)!==record.draft||composerHasAttachments(editor))return;
+    handoffRecord=record;
+    await navigateHandoffSource(record,alert,info,{sourceEditor:editor,draft:record.draft,
+      sourceEffort:record.reasoningEffort,sourceModel:record.reasoningModel,sameSource:()=>sameSource()&&alert.isConnected});
   }
 
   async function beginHandoff(error, info, alert) {
@@ -1114,6 +1231,7 @@
     if (handoffRecord && handoffRecord.sourceUrl !== sourceUrl && Date.now() - handoffRecord.createdAt < RETRY_WINDOW_MS) {
       throw new Error('Новый чат тоже завершился ошибкой; повторная передача остановлена');
     }
+    await resolveHandoffSuccessor(sourceUrl,sameSource);
     const goalContext=await runtimeMessage({type:'CHATGPT_GOAL_CONTEXT',url:sourceUrl});
     if(!goalContext?.ok)throw Error('Не удалось сохранить контекст Goal перед переносом чата');
     const text=handoffText(info.messages,error.response,sourceUrl)+(goalContext.text?'\n\n'+goalContext.text:'');
@@ -1133,27 +1251,7 @@
     const result = await runtimeMessage({ type: 'CHATGPT_HANDOFF_BEGIN', record });
     if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить передачу');
     handoffRecord = result.record;
-    let button;
-    try {
-      button = error.escalated
-        ?Array.from(document.querySelectorAll('a[href="/"],button.button-toolbar:has(svg path[d^="M8.16675 2.50127C8.53391"])')).find(isElementVisible)
-        :alert.querySelector('button');
-      if (!button || button.disabled) throw new Error('Кнопка нового чата недоступна');
-      const liveMode=await reasoningMode();
-      if (location.href !== sourceUrl || !alert.isConnected || composer() !== sourceEditor || (liveMode.value !== sourceEffort || liveMode.model !== sourceModel) ||
-          sourceEditor && (rawEditorText(sourceEditor) !== draft || composerHasAttachments(sourceEditor))) {
-        throw new Error('Исходный чат или черновик изменились; переход отменён');
-      }
-    } catch (cause) {
-      // Cancellation before the native click must also survive reinjection.
-      await updateHandoff('failed', { reason: String(cause.message || cause) });
-      throw cause;
-    }
-    // Use the real page action to preserve its mode/model behavior.
-    if (!runtimeAvailable()) return;
-    button.click();
-    await waitHandoff(() => location.href !== sourceUrl);
-    await submitHandoff();
+    await navigateHandoffSource(handoffRecord,alert,info,{sourceEditor,draft,sourceEffort,sourceModel,sameSource,escalated:Boolean(error.escalated)});
   }
 
   function notifySuppressedError(error,state,promptKey,attemptId) {
@@ -1224,7 +1322,7 @@
     handoffReadinessTimer=setTimeout(()=>{
       handoffReadinessTimer=null;
       if(runtimeAvailable())void resumeSavedHandoff();
-    },300000);
+    },handoffRecord.preparationPhase==='upload'?5000:300000);
   }
 
   async function resumeSavedHandoff() {
@@ -1427,18 +1525,21 @@
       };
       const release = answerWaitSlot.replace(() => finish(null));
 
+      let lastRebindCandidate='';
       const check = () => {
         if (settled) return;
         if (!runtimeAvailable()) { stopContext(); return; }
         if (!isCurrent()) { finish(null); return; }
         lastCheckAt = performance.now();
+        const snapshot=latestPromptSnapshot();
         if (currentErrors().length) {
           checkErrors();
-          finish(null);
+          // Request-start can precede mounting its new user turn. A retained
+          // baseline error must not retire the new completion observer.
+          if(attempt.promptKey&&snapshot?.promptKey===attempt.promptKey)finish(null);
           return;
         }
 
-        const snapshot=latestPromptSnapshot();
         if(!attempt.promptKey&&snapshot){
           const bound=bindAttemptPrompt(attempt,{...snapshot,url:attempt.url,attemptId:globalThis.__chatgptNotifierAttemptId});
           if(bound){attempt.promptKey=bound.promptKey;persistCompletionAttempt(attempt);void audit('completion.bound',{promptKey:attempt.promptKey,startedAt:attempt.startedAt});}
@@ -1456,6 +1557,20 @@
           stableText = '';
           stableSince = 0;
           generationEndedAt = 0;
+          return;
+        }
+
+        if(attempt.promptKey&&snapshot?.promptKey&&snapshot.promptKey!==attempt.promptKey&&
+            snapshot.promptKey!==lastRebindCandidate&&!completionProbeBusy) {
+          lastRebindCandidate=snapshot.promptKey;completionProbeBusy=true;
+          void runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:attempt.url}).then(result=>{
+            const record=result?.ok&&result.record,latest=latestPromptSnapshot();
+            if(!isCurrent()||settled||record?.state!=='active'||record.startedAt!==attempt.startedAt||
+                record.requestId!==attempt.requestId||record.promptKey!==latest?.promptKey)return;
+            attempt.promptKey=record.promptKey;attempt.baselineKey=record.baselineKey;
+            stableText='';stableSince=0;
+            void audit('completion.live_prompt_rebound',{promptKey:record.promptKey,startedAt:attempt.startedAt});
+          }).finally(()=>{completionProbeBusy=false;});
           return;
         }
 
@@ -1515,6 +1630,7 @@
               if(nativeFinal||(attempt.httpCompleted && native?.ok===false && native.reason==='native-turn-missing')){
                 attempt.goalNativeVerified=nativeFinal;
                 attempt.goalNativeUserId=nativeFinal&&typeof native.userId==='string'?native.userId:'';
+                attempt.goalNativeMarkerPending=nativeFinal&&native.goalMarkerPending===true;
                 void audit('completion.confirmed',{promptKey:attempt.promptKey,assistantKey:latest.assistantKey,startedAt:attempt.startedAt,proof:native?.ok?'native-final':'completed-transport'});
                 sendCompletion(latest,attempt);
                 finish(text);
@@ -1584,7 +1700,7 @@
       sessionTitle: document.title,
       response: snapshot.response,
       goalPromptKey:snapshot.promptKey,goalNativeVerified:attempt.goalNativeVerified===true,
-      goalRawExact:snapshot.goalMarkerExact===true,goalNativeUserId:attempt.goalNativeUserId||'',
+      goalRawExact:snapshot.goalMarkerExact===true,goalNativeMarkerPending:attempt.goalNativeMarkerPending===true,goalNativeUserId:attempt.goalNativeUserId||'',
       fingerprint,
       completionKey: snapshot.assistantKey
         ? `${snapshot.promptKey}|${snapshot.assistantKey}`
@@ -1617,7 +1733,7 @@
       completionRecoveryInFlight=true;
       let recovered=false,pendingRestore=false;
       try{
-        if(!completionAttempt||completionAttempt.path!==location.pathname){
+        if(!completionAttempt||completionAttempt.path!==location.pathname||!isGenerating()){
           const restored=await restoreCompletionCheckpoint();recovered=restored===true;pendingRestore=restored==='pending'||Boolean(globalThis.__chatgptNotifierAttemptId);
         }
         if(!recovered)recovered=await recoverActiveCompletion()===true;
@@ -1626,8 +1742,8 @@
       observedGeneration ||= generating;
       // Keep observing a long-running request through temporary probe failures.
       // Before controls mount, allow only a short startup grace period.
-      if(!recovered&&!currentErrors().length&&(generating||allowStartupGrace&&pendingRestore&&!observedGeneration&&Date.now()-scheduledAt<30000))
-        completionRecoveryTimer=setTimeout(retry,Date.now()-scheduledAt<5000?1000:5000);
+      if(!recovered&&!currentErrors().length&&(generating||pendingRestore||Boolean(id)))
+        completionRecoveryTimer=setTimeout(retry,generating||allowStartupGrace&&!observedGeneration&&Date.now()-scheduledAt<30000?(Date.now()-scheduledAt<5000?1000:5000):300000);
     };
     void retry();
   }
@@ -1676,6 +1792,7 @@
     const path=location.pathname,token=watchToken,initial=globalThis.__chatgptNotifierAttemptId,initialRequestId=globalThis.__chatgptNotifierRequestId;
     const result=await runtimeMessage({type:'CHATGPT_COMPLETION_CHECKPOINT',action:'restore',url:location.href});
     if(!runtimeAvailable()||path!==location.pathname||token!==watchToken||initial!==globalThis.__chatgptNotifierAttemptId||initialRequestId!==globalThis.__chatgptNotifierRequestId)return;
+    if(result?.detached?.changed){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;return true;}
     if(result?.rollback?.changed){
       statusIndicator?.accept(result.rollback);
       if(completionAttempt){watchToken+=1;answerWaitSlot.cancel();completionAttempt=null;}
@@ -1747,6 +1864,22 @@
 
   function onRuntimeMessage(message,sender,sendResponse) {
     if(!runtimeAvailable())return;
+    if(message?.type==='CHATGPT_HANDOFF_NAVIGATION_READY'){
+      sendResponse?.({ok:true});
+      void resumeHandoffSourceNavigation(message).catch(cause=>notifyOperationWarning({sourceUrl:message.url,sessionTitle:document.title,response:String(cause.message||cause)},'Переход в новый чат остановлен'));
+      return;
+    }
+    if(message?.type==='CHATGPT_GOAL_MARKER_PENDING'){
+      if(ChatGPTHandoffTitle.chatUrl(location.href)===message.url)void recoverGoalState();
+      sendResponse?.({ok:true});return;
+    }
+    if(message?.type==='CHATGPT_HANDOFF_SUPERSEDED'){
+      if(message.id===handoffRecord?.id&&ChatGPTHandoffTitle.chatUrl(location.href)===message.url){
+        handoffRecord={...handoffRecord,stage:'superseded'};
+        if(message.recheck===true){retryState().terminalHandled=false;visibleErrors.clear();scheduleErrorCheck(0);}
+      }
+      sendResponse?.({ok:true});return;
+    }
     if(message?.type==='CHATGPT_GOAL_READINESS') {
       const editor=composer();
       const idle=ChatGPTHandoffTitle.chatUrl(location.href)===message.url&&
@@ -1780,6 +1913,7 @@
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_FAILED'&&currentRequest){armForCurrentPrompt();void reconcileFailedCompletionLoading().catch(()=>{});}
     if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_COMPLETED'].includes(message?.type))scheduleHandoffCheck();
+    if(runtimeAvailable()&&['CHATGPT_HANDOFF_ROUTE_CHANGED','CHATGPT_CONVERSATION_REQUEST_STARTED','CHATGPT_CONVERSATION_REQUEST_COMPLETED','CHATGPT_CONVERSATION_REQUEST_FAILED'].includes(message?.type))void recoverGoalState();
   }
   try { chrome.runtime.onMessage.addListener(onRuntimeMessage); } catch { stopContext(); }
   const initialDraftRecovery=restoreDraft(null,true).catch(()=>{});
@@ -1787,6 +1921,6 @@
     if(!runtimeAvailable())return;void reconcileLegacyCompletionStatus().catch(()=>{});if(!completionAttempt)scheduleActiveCompletionRecovery();
   });
   void Promise.all([initialDraftRecovery,initialCompletionRecovery]).then(()=>{
-    if(runtimeAvailable())return runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
+    if(runtimeAvailable())return recoverGoalState();
   }).catch(()=>{});
 })();

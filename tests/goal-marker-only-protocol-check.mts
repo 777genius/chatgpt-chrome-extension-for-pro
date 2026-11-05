@@ -9,6 +9,11 @@ for(const text of [policy.initialText(record),policy.continuationText(record),po
  assert.match(text,/Всё сообщение должно состоять только из этой строки/);
  assert.match(text,/без Markdown, кавычек, пояснений, итогов и любого другого текста/);
  assert.match(text,/Не обсуждай сигнал завершения/);
+ assert.match(text,/Ожидание само по себе не является блокировкой/);
+ assert.match(text,/очередь CI, ожидание runner/);
+ assert.match(text,/Сохраняй цель активной, используй штатное ожидание результата/);
+ assert.match(text,/а простое ожидание результата не поможет/);
+ assert.match(text,/Соблюдай заданные лимиты цели и ручную остановку пользователя/);
  assert.doesNotMatch(text,/Итог:|первым абзацем|1–3 коротких пункта/);
  assert.equal(text.match(/GOAL_COMPLETE/g)?.length,1,'completion protocol states the token once, without instructions to discuss it');
 }

@@ -75,3 +75,44 @@ assert.equal((await log('retry.send_intent','retry-9',8)).ok,true);
 assert.equal((await api.readJournal()).events.some((e:any)=>
   e.kind==='goal.confirmed'&&e.operationId==='goal-1'),true);
 console.log('Journal: cross-tab Goal fences, tab-close uncertainty, exact grant clearing and unrelated chats passed.');
+// Reopened-tab acknowledgement must release the old owner through the same
+// normal confirmed event, not just change the Goal's UI state.
+for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),sandbox);
+sandbox.deps={storage:local,tabs:{get:async()=>({id:17,url:'https://chatgpt.com/c/reopened-fence'}),sendMessage:async()=>({ok:true})},
+ appendJournal:api.appendJournal,now:()=>1000,uuid:()=> 'reopened-operation'};
+const store=runInContext('ChatGPTGoalStore.create(deps)',sandbox);
+const reopened='https://chatgpt.com/c/reopened-fence';
+await store.start({url:reopened,tabId:17,goal:'Synthetic objective',maxContinuations:10,maxMinutes:1440});
+let goal=storage['chatgpt-goal:'+reopened];
+await store.intent({url:reopened,tabId:17,id:goal.id,operationId:goal.operation.id,text:goal.operation.text,baselineKey:'/c/reopened-fence|before'});
+await api.appendJournal({kind:'send.authorized',sourceUrl:reopened,operationId:goal.operation.id},{id:17,url:reopened});
+await store.report({url:reopened,tabId:17,id:goal.id,operationId:goal.operation.id,status:'clicked'});
+await store.report({url:reopened,tabId:17,id:goal.id,operationId:goal.operation.id,status:'blocked'});
+goal=storage['chatgpt-goal:'+reopened];
+assert.equal(meta().active[17].consumed,true);
+await store.recoverAcknowledgement({url:reopened,tabId:18,expectedRecord:structuredClone(goal),operationId:goal.operation.id,
+ promptKey:'/c/reopened-fence|accepted',userId:'accepted-native',nativeVerified:true});
+assert.equal(meta().active[17],undefined,'native recovery retires only the accepted old grant');
+assert.equal((await log('retry.send_intent','next-recovery',18,reopened,{promptKey:'/c/reopened-fence|accepted'})).ok,true);
+
+// A later accepted manual successor can retire an uncertain handoff only with
+// its own native witness. Keep the old consumed operation in immutable history.
+{
+ const u='https://chatgpt.com/c/superseded-handoff',id=101,op='superseded-transfer';
+ await log('handoff.sending',op,id,u,{targetUrl:'https://chatgpt.com/'});
+ await log('send.authorized',op,id,u);
+ const at=meta().active[id].at;
+ for(const extra of [{},{nativeVerified:false,manualRequestId:'new',manualStartedAt:at+1,userId:'native-user',promptKey:'/c/superseded-handoff|user'},
+  {nativeVerified:true,manualRequestId:'new',manualStartedAt:at-1,userId:'native-user',promptKey:'/c/superseded-handoff|user'}]){
+  await log('handoff.superseded',op,id,u,extra);assert.equal(meta().active[id].operationId,op);
+ }
+ await log('handoff.superseded',op,id,u,{nativeVerified:true,manualRequestId:'new',manualStartedAt:at+1,userId:'native-user',promptKey:'/c/superseded-handoff|user'});
+ assert.equal(meta().active[id],undefined);await assert.rejects(()=>log('send.authorized',op,id,u),/Повторная/);
+ await log('goal.send_intent','fresh-goal-after-native-successor',id,u);assert.equal(meta().active[id].operationId,'fresh-goal-after-native-successor');
+ assert.equal((await api.readJournal()).events.filter((e:any)=>e.kind==='send.authorized'&&e.operationId===op).length,1);
+}
+{
+ const workerSource=readFileSync('extension/service-worker.js','utf8'),from=workerSource.indexOf("  if (message?.type === 'CHATGPT_LOG_EVENT')"),until=workerSource.indexOf("  if (message?.type === 'CHATGPT_INSPECT_HANDOFF_SEED')",from);let reply:any=null,writes=0;
+ const c=createContext({message:{type:'CHATGPT_LOG_EVENT',event:{kind:'handoff.superseded',operationId:'unknown',nativeVerified:true,manualRequestId:'forged',manualStartedAt:Date.now()+1000,userId:'forged-user',promptKey:'/c/fixture|user'}},sender:{tab:{id:7,url:'https://chatgpt.com/c/fixture'},frameId:0},sendResponse:(v:any)=>{reply=v;},appendJournal:()=>{writes++;}});
+ runInContext('(function(){'+workerSource.slice(from,until)+'})()',c);assert.equal(reply?.ok,false);assert.equal(writes,0,'content telemetry cannot mint its own handoff retirement proof');
+}

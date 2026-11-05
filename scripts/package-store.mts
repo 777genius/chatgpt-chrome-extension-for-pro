@@ -9,7 +9,7 @@ import {execFileSync} from 'node:child_process';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const runtimeFiles=[
   'chat-title-probe.js','completion-checkpoint.js','completion-probe.js','completion-state.js',
-  'content-script.js','deferred-task-status.js','goal-inline.js','goal-policy.js','goal-store.js',
+  'content-script.js','deferred-task-status.js','goal-inline.js','goal-lineage.js','goal-request-proof.js','reply-probe.js','goal-policy.js','goal-store.js',
   'handoff-renamer.js','handoff-title.js','journal-store.js','journal.html','journal.js',
   'legacy-handoff-status.js','manifest.json','memory-maintenance.js','offscreen.html','offscreen.js',
   'page-probe.js','popup.html','popup.js','request-receipts.js','service-worker.js',

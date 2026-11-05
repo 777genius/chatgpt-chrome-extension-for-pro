@@ -49,6 +49,12 @@ for(const change of [{lastUserSentAtMs:20000},{isLatest:false},{isReadOnly:true}
 context.stopped={...context.rebindRecord,state:'stopped'};
 assert.equal(await run('completionPromptRebindEvidence(stopped,stopped.url,rebindNative)'),null);
 
+context.identified={...context.rebindRecord,nativeUserId:'native-user',nativeUserSentAtMs:1001};
+context.collision={...context.rebindNative,promptKey:context.rebindRecord.baselineKey};
+const collision=await run('completionPromptRebindEvidence(identified,identified.url,collision)');
+assert.equal(collision.promptKey,context.rebindRecord.baselineKey);assert.equal(collision.baselineKey,'');
+context.wrong={...context.identified,nativeUserId:'previous-user'};
+assert.equal(await run('completionPromptRebindEvidence(wrong,wrong.url,collision)'),null,'baseline reuse still needs exact bound native identity');
 context.slashRecord={...context.rebindRecord,promptKey:context.rebindRecord.promptKey.replace('/c/a|','/c/a/|')};
 context.slashNative={...context.rebindNative,promptKey:context.rebindNative.promptKey.replace('/c/a|','/c/a/|')};
 assert.ok(await run('completionPromptRebindEvidence(slashRecord,slashRecord.url,slashNative)'),
