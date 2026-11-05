@@ -1146,19 +1146,27 @@
   async function navigateHandoffSource(record,alert,info,{sourceEditor,draft,sourceEffort,sourceModel,sameSource,escalated=false}) {
     if(handoffNavigationClaims.has(record.id))return;
     let button;
-    const unchanged=mode=>sameSource()&&handoffRecord?.id===record.id&&handoffRecord.stage==='navigating'&&
-      !isGenerating()&&composer()===sourceEditor&&mode.value===sourceEffort&&mode.model===sourceModel&&
-      (!sourceEditor||rawEditorText(sourceEditor)===draft&&!composerHasAttachments(sourceEditor));
+    function verifySource(mode) {
+      if(!sameSource()||handoffRecord?.id!==record.id||handoffRecord.stage!=='navigating')
+        throw new Error('Исходный чат или запрос изменился; переход отменён');
+      if(isGenerating())throw new Error('В исходном чате идёт генерация; переход отменён');
+      if(mode.value!==sourceEffort||mode.model!==sourceModel)
+        throw new Error('Режим рассуждения изменился; переход отменён');
+      const editor=composer();
+      if((sourceEditor&&!editor)||(editor&&(rawEditorText(editor)!==draft||composerHasAttachments(editor))))
+        throw new Error('Черновик или вложения изменились; переход отменён');
+    }
     try {
+      verifySource(await reasoningMode());
       button=handoffNavigationButton(alert,info,escalated);
       if(!button)throw new Error('Кнопка нового чата недоступна');
-      if(!unchanged(await reasoningMode()))throw new Error('Исходный чат или черновик изменились; переход отменён');
       if(handoffNavigationClaims.has(record.id))return;
       handoffNavigationClaims.add(record.id);
       await audit('handoff.navigation_intent',{operationId:record.id,sourceUrl:record.sourceUrl},true);
       if(!runtimeAvailable())return;
-      if(!unchanged(await reasoningMode())||handoffNavigationButton(alert,info,escalated)!==button)
-        throw new Error('Исходный чат, черновик или кнопка изменились; переход отменён');
+      verifySource(await reasoningMode());
+      button=handoffNavigationButton(alert,info,escalated);
+      if(!button)throw new Error('Кнопка нового чата изменилась; переход отменён');
     } catch(cause) {
       if(cause?.code==='RETRY_DUPLICATE')return; // Another context owns this navigation; do not overwrite its stage.
       // A refused pre-click preparation is durable. A persisted navigation
