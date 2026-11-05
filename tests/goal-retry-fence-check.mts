@@ -227,21 +227,23 @@ function fixture() {
  assert.equal(env.data[goalKey].phase,'blocked','unresolved send retains its fence');
 }
 
-// A transient prompt probe failure must not prevent the coordinator from
-// recovering its persisted state and buffered completion.
-{
+// A transient native probe failure must not hide the existing durable Goal.
+for(const failure of ['supplement','prompt']) {
  let recovered=0;
  let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
  const context=createContext({
   chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
   ChatGPTGoalPolicy:{canonical:(value:string)=>value},
-  bindNativeManualSupplement:async()=>({ok:true}),
-  reconcileGoalPromptBinding:async()=>{throw Error('fixture native probe unavailable');},
-  goalController:{recoverTab:async()=>{recovered++;return {ok:true};}}
+  bindNativeManualSupplement:async()=>{if(failure==='supplement')throw Error('native supplement probe unavailable');return {ok:true};},
+  reconcileGoalMarker:async()=>null,
+  reconcileWaitingGoalAnswer:async()=>null,
+  reconcileGoalPromptBinding:async()=>{if(failure==='prompt')throw Error('native prompt probe unavailable');},
+  goalController:{composerGet:async()=>null,get:async()=>null,recoverTab:async()=>{recovered++;return {ok:true};}}
  });
  runInContext(listenerSource,context);
  const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
- assert.equal(result.ok,true,JSON.stringify(result));assert.equal(recovered,1,'native reconciliation failure must still reach durable recovery');
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(recovered,1,failure+' failure must still reach durable recovery');
 }
 
 // Pause/Stop may arrive after recovery preflight or after its durable intent.

@@ -1590,7 +1590,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if(!recovered?.ok)return {ok:true,pending:true,canRetry:true};
           return {ok:true};
         }
-        await bindNativeManualSupplement(tabId,url);await reconcileGoalPromptBinding(tabId,url);return goalController.recoverTab({id:tabId,url});
+        // Unavailable native probes must not hide a persisted Goal. The
+        // coordinator still enforces pending and unknown-send fences.
+        await bindNativeManualSupplement(tabId,url).catch(()=>({ok:false,pending:true}));
+        await reconcileGoalPromptBinding(tabId,url).catch(()=>({ok:false}));
+        return goalController.recoverTab({id:tabId,url});
       }
       if(message.type==='CHATGPT_GOAL_CONTEXT'){await bindNativeManualSupplement(tabId,url);return {ok:true,text:await goalController.context(url)};}
       if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
