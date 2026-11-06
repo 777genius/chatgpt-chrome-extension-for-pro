@@ -64,7 +64,7 @@ async function indexedRetryDraft(meta,url) {
   const key=`${JOURNAL_PREFIX}${String(record.savedSequence).padStart(12,'0')}`;
   const entry=(await chrome.storage.local.get(key))[key];
   return entry?.kind==='draft.saved'&&entry.operationId===record.operationId&&retryDraftUrl(entry.sourceUrl)===record.sourceUrl&&
-    typeof entry.draft==='string'&&entry.draft?{...record,draft:entry.draft}:null;
+    typeof entry.draft==='string'&&entry.draft?{...record,draft:entry.draft,retryText:entry.text}:null;
 }
 function reduceRetrySummary(retryByChat, event) {
   const chatId = journalChatId(event.sourceUrl || event.observedTabUrl || event.url);
@@ -313,7 +313,7 @@ function appendJournal(event, tab = {}) {
           (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl))
         throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
-        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,attemptId:event.attemptId||''}:{})};
+        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,retryText:event.text,attemptId:event.attemptId||''}:{})};
     }
     if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
       const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];

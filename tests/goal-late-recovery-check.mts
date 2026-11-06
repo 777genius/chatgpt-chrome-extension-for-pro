@@ -20,7 +20,7 @@ async function fixture(){
   chrome:{tabs:{get:async()=>({id:7,url:live})},scripting:{executeScript:async({args}:V)=>{
    const result=structuredClone(args.length>2?original:latest);await afterProbe?.();return [{result}];
   }}}});
- for(const file of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+file,'utf8'),ctx);
+ for(const file of ['goal-policy.js','goal-lineage.js','goal-store.js'])runInContext(readFileSync('extension/'+file,'utf8'),ctx);
  ctx.dependencies={storage:{get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>{if(failSave&&v['chatgpt-goal:'+url])throw Error('Synthetic disk failure');Object.assign(data,structuredClone(v));}},
   tabs:{get:async()=>({id:7,url:live}),sendMessage:async(id:number,message:V)=>{messages.push({id,message});return {ok:true};}},
   appendJournal:async(e:V)=>{events.push(structuredClone(e));return {ok:true};},now:()=>200000,uuid:()=> 'late-arm'};

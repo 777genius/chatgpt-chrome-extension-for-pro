@@ -8,6 +8,11 @@
   const WAIT_FORMAT='Ожидание само по себе не является блокировкой: очередь CI, ожидание runner, выполняющиеся проверки, сборка, развёртывание или распространение изменений требуют времени. Сохраняй цель активной, используй штатное ожидание результата или подписку на событие и после него продолжай работу end-to-end. Не завершай попытку только из-за ожидания и не объявляй цель заблокированной; не подменяй ожидание частыми проверками, повторными запусками или обходом ограничений. Соблюдай заданные лимиты цели и ручную остановку пользователя.';
   const BLOCKED_FORMAT='Если цель действительно заблокирована, сначала выполни всю доступную полезную работу и проверь разумные штатные способы продолжения. Не обходи ограничения странными, сомнительными или небезопасными путями. Только когда для продолжения действительно требуется вмешательство пользователя или владельца (например, отсутствующие права, данные или решение), а простое ожидание результата не поможет, ответь ровно одной строкой GOAL_BLOCKED без оформления и другого текста.';
   const INCOMPLETE_FORMAT='Пока цель не выполнена полностью, продолжай работу и сообщай конкретный прогресс или блокировки. Не обсуждай сигнал завершения и не поясняй, почему ты его не подаёшь.';
+  const RETRY_MESSAGE_KEY='chatgpt-retry-message';
+  const DEFAULT_RETRY_MESSAGE='доделай е2е';
+  function retryMessage(value) {
+    return typeof value==='string'&&value.trim().length<=500&&value.trim()?value.trim():DEFAULT_RETRY_MESSAGE;
+  }
   const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. '+INCOMPLETE_FORMAT+' '+WAIT_FORMAT+' '+COMPLETION_FORMAT+' '+BLOCKED_FORMAT;
   function canonical(value) {
     try {
@@ -87,7 +92,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
+  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,RETRY_MESSAGE_KEY,DEFAULT_RETRY_MESSAGE,retryMessage,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

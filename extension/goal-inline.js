@@ -3,7 +3,7 @@
 // Presentation only: the worker and existing guarded sender own authorization.
 (function(root) {
   let instance=0;
-  function create({document,getUrl,request,subscribe=()=>()=>{},alive=()=>true}) {
+  function create({document,getUrl,request,subscribe=()=>()=>{},alive=()=>true,composerActivity=()=>'unknown'}) {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
@@ -60,7 +60,13 @@
         elapsedId=id;elapsedBase=0;
         try{if(id)elapsedBase=Math.max(0,Number(win.localStorage.getItem('cggi-elapsed:'+id))||0);}catch{}
       }
-      elapsedSince=pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
+      const activity=record?.phase==='waiting'?composerActivity():null;
+      if(activity!==null) {
+        const label='◎ '+(activity==='generating'?'Active':record.manualPending?'Confirming message':
+          activity==='idle'?'Waiting to continue':'Checking chat');
+        if(bannerStatus.textContent!==label)bannerStatus.textContent=label;
+      }
+      elapsedSince=(activity===null||activity==='generating')&&pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
       const seconds=Math.floor(elapsedBase/1000),minutes=Math.floor(seconds/60);
       bannerTime.textContent=id?(minutes>=60?Math.floor(minutes/60)+'h '+minutes%60+'m':minutes?minutes+'m':seconds+'s'):'';
     }

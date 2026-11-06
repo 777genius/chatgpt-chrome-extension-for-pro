@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.78';
+  const SCRIPT_VERSION = '1.8.82';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -32,9 +32,10 @@
   function runtimeAvailable() {
     try { return contextAlive && Boolean(chrome.runtime?.id); } catch { return false; }
   }
-  async function recoverGoalState() {
+  async function recoverGoalState(fromTimer=false) {
     if(!runtimeAvailable())return;
     if(goalRecoveryBusy){goalRecoveryAgain=true;return;}
+    const retrying=(fromTimer||goalRecoveryTimer!==null)&&goalRecoveryPath===location.pathname;
     if(goalRecoveryTimer!==null)clearTimeout(goalRecoveryTimer);goalRecoveryTimer=null;
     const path=location.pathname;
     if(goalRecoveryPath!==path||!goalRecoveryFirstAt){goalRecoveryPath=path;goalRecoveryFirstAt=Date.now();}
@@ -43,8 +44,8 @@
       const result=await runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
       if(!runtimeAvailable())return;
       if(location.pathname!==path){goalRecoveryAgain=true;return;}
-      if(result?.pending===true&&result.canRetry===true)
-        goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState();},Date.now()-goalRecoveryFirstAt<30000?5000:300000);
+      if(result?.pending===true&&result.canRetry===true||result==null&&retrying)
+        goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},Date.now()-goalRecoveryFirstAt<30000?5000:30000);
       else goalRecoveryFirstAt=0;
     }catch{}finally{
       goalRecoveryBusy=false;
@@ -130,11 +131,13 @@
       ? Date.now() - startedAt : null;
   }
 
-  statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,
-    load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:isGenerating(),startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
+  let activeStatusRequest=null;
+  statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,composerActivity,
+    hasActiveRequest:(url,startedAt)=>activeStatusRequest?.path===new URL(url).pathname&&activeStatusRequest.startedAt===startedAt,
+    load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:composerActivity()==='generating',startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
 
 
-  inlineGoal=globalThis.ChatGPTGoalInline?.create({document,getUrl:()=>location.href,request:runtimeMessage,alive:runtimeAvailable,
+  inlineGoal=globalThis.ChatGPTGoalInline?.create({document,getUrl:()=>location.href,request:runtimeMessage,alive:runtimeAvailable,composerActivity,
     subscribe:changed=>{
       const listener=(changes,area)=>{
         const url=globalThis.ChatGPTGoalPolicy?.canonical(location.href);
@@ -152,11 +155,11 @@
     runtimeMessage({type:'CHATGPT_PAGE_RETURNED',url}).then(result=>{if(!result?.ok&&returnedPageUrl===url)returnedPageUrl='';});
   }
 
-  window.addEventListener('focus', event=>{returnedPageUrl='';void statusIndicator?.refresh();deferredTaskObserver?.refresh();notifyPageReturned(event);}, { capture: true, signal: listeners.signal });
+  window.addEventListener('focus', event=>{returnedPageUrl='';void statusIndicator?.refresh();deferredTaskObserver?.refresh();notifyPageReturned(event);void recoverGoalState();}, { capture: true, signal: listeners.signal });
   window.addEventListener('blur',()=>{returnedPageUrl='';},{capture:true,signal:listeners.signal});
   document.addEventListener('visibilitychange', event => {
     returnedPageUrl='';
-    if (document.visibilityState === 'visible') {void statusIndicator?.refresh();deferredTaskObserver?.refresh();notifyPageReturned(event);}
+    if (document.visibilityState === 'visible') {void statusIndicator?.refresh();deferredTaskObserver?.refresh();notifyPageReturned(event);void recoverGoalState();}
   }, { capture: true, signal: listeners.signal });
   document.addEventListener('pointerdown', notifyPageReturned, { capture: true, passive: true, signal: listeners.signal });
   document.addEventListener('keydown', notifyPageReturned, { capture: true, passive: true, signal: listeners.signal });
@@ -304,7 +307,6 @@
   // example inside an answer or an error belonging to an older turn as live UI.
   const ERROR_SELECTOR = 'aside[role="alert"].text-danger, [role="status"]:has(.text-chatgpt-recovery)';
   const RECOVERY_GRACE_MS = 3000;
-  const RETRY_TEXT = 'доделай е2е';
   const RETRY_WINDOW_MS = 120000;
   const retryStates = new Map();
   let retryRestoredPath = '';
@@ -415,16 +417,17 @@
     if(startup)draftRestorePath=path;
     if(composerHasAttachments(editor))return;
     const current = rawEditorText(editor);
-    if(startup&&current!==''&&current!==RETRY_TEXT)return;
     draftRestoreBusy=true;
     try {
       const result=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url});
       const record=result?.ok&&result.record;
       if(!record||operationId&&record.operationId!==operationId||localDraft&&record.draft!==localDraft)return;
+      const retryText=ChatGPTGoalPolicy.retryMessage(record.retryText);
+      if(startup&&current!==''&&current!==retryText)return;
       // A saved backup alone does not prove automation changed the editor.
       // Unknown sends stay parked even when their retry text is still visible.
       if(!['saved','intent','not-clicked','confirmed'].includes(record.phase)||record.claimedAt){if(localDraft)pendingDrafts.delete(path);return;}
-      if(startup&&!record.replacementProven&&!record.stopProven&&current!==RETRY_TEXT)return;
+      if(startup&&!record.replacementProven&&!record.stopProven&&current!==retryText)return;
       if(!runtimeAvailable()||location.pathname!==path||composer()!==editor||rawEditorText(editor)!==current||composerHasAttachments(editor))return;
       const claim=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_CLAIM',url,operationId:record.operationId,savedSequence:record.savedSequence});
       if(!claim?.claimed) {if(localDraft)pendingDrafts.delete(path);return;}
@@ -434,7 +437,7 @@
       if(!runtimeAvailable()||location.pathname!==path||composer()!==editor||rawEditorText(editor)!==current||composerHasAttachments(editor))return;
       const draft=claim.record?.draft;
       if(typeof draft!=='string'||draft!==record.draft)return;
-      const restored=current===draft?draft:current===''||current===RETRY_TEXT?draft:`${draft}\n\n${current}`;
+      const restored=current===draft?draft:current===''||current===retryText?draft:`${draft}\n\n${current}`;
       if(current!==restored)replaceEditorText(editor,restored);
       pendingDrafts.delete(path);
       void audit('draft.restored',{operationId:record.operationId,draftChars:draft.length,restoredChars:restored.length});
@@ -630,6 +633,7 @@
     let recoveryDraft = null;
     let carriedDraftText = null;
     let readinessPhase = 'planned';
+    let retryText;
     const readiness = async (phase,details={}) => {
       if(readinessPhase===phase)return;
       readinessPhase=phase;
@@ -641,7 +645,10 @@
       (!error.recovery || recoveryStopped || recoveryVerifiedIdle || currentErrors().some(node=>node.querySelector('.text-chatgpt-recovery'))) &&
       (latestPromptSnapshot()?.promptKey || path) === promptKey;
     try {
-      await logRetry('retry.planned', {operationId,text:RETRY_TEXT,error:error.response,
+      const key=ChatGPTGoalPolicy.RETRY_MESSAGE_KEY;
+      retryText=ChatGPTGoalPolicy.retryMessage((await chrome.storage.local.get(key))[key]);
+      if(!stillCurrent())return;
+      await logRetry('retry.planned', {operationId,text:retryText,error:error.response,
         failureCount:state.failures.length,windowMs:RETRY_WINDOW_MS,promptKey},true);
       if(state.preparationDraftOperationId) {
         const carried=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url:sourceUrl});
@@ -658,7 +665,7 @@
         recoveryDraft = beforeStop ? rawEditorText(beforeStop) : null;
         if (recoveryDraft) {
           const saved=carriedDraftText&&carriedDraftText!==recoveryDraft?carriedDraftText+'\n\n'+recoveryDraft:recoveryDraft;
-          await logRetry('draft.saved',{operationId,draft:saved,draftChars:saved.length,phase:'before-recovery-stop'},true);
+          await logRetry('draft.saved',{operationId,draft:saved,text:retryText,draftChars:saved.length,phase:'before-recovery-stop'},true);
         }
         if (!stillCurrent() || (beforeStop && rawEditorText(beforeStop) !== recoveryDraft)) return;
         const alert = currentErrors().find(node=>node.querySelector('.text-chatgpt-recovery'));
@@ -709,28 +716,28 @@
       const draft=carriedDraftText&&settledDraft!==carriedDraftText
         ?(settledDraft?carriedDraftText+'\n\n'+settledDraft:carriedDraftText):settledDraft;
       if (draft) {
-        await logRetry('draft.saved',{operationId,draftChars:draft.length,draft},true);
+        await logRetry('draft.saved',{operationId,draftChars:draft.length,draft,text:retryText},true);
         state.preparationDraftOperationId=null;state.preparationDraftSequence=null;
         if (!stillCurrent() || rawEditorText(editor) !== visibleDraft) return;
         pendingDrafts.set(path, draft);
       }
       replaced = true;
       replacingDraft = true;
-      replaceEditorText(editor, RETRY_TEXT);
+      replaceEditorText(editor, retryText);
       if(draft)await logRetry('draft.replaced',{operationId},true);
       let stableSince=0;
       while(Date.now()<deadline) {
         if (!stillCurrent()) return;
-        if(composer()!==editor||rawEditorText(editor)!==RETRY_TEXT||isGenerating()) {
+        if(composer()!==editor||rawEditorText(editor)!==retryText||isGenerating()) {
           await logRetry('retry.readiness_cancelled',{phase:readinessPhase,reason:isGenerating()?'generation-resumed':'editor-changed'});
           return;
         }
         const button=sendButton();
         const buttonReady=button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true';
-        const native=buttonReady?await inspectComposer(RETRY_TEXT):null;
+        const native=buttonReady?await inspectComposer(retryText):null;
         if(!stillCurrent())return;
         if(Date.now()>=deadline)break;
-        if(composer()!==editor||rawEditorText(editor)!==RETRY_TEXT||isGenerating()) {
+        if(composer()!==editor||rawEditorText(editor)!==retryText||isGenerating()) {
           await logRetry('retry.readiness_cancelled',{phase:readinessPhase,reason:isGenerating()?'generation-resumed':'editor-changed'});
           return;
         }
@@ -747,22 +754,22 @@
       }
       if(readinessPhase!=='ready')throw new Error(readinessPhase==='send-button'?'Кнопка отправки недоступна':'Редактор ChatGPT не подтвердил готовность точного текста для отправки');
       if(Date.now()>=deadline)throw new Error('Истекло время подготовки автопродолжения');
-      if (!stillCurrent() || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
+      if (!stillCurrent() || composer()!==editor || rawEditorText(editor)!==retryText || isGenerating()) return;
       // Exactly one click. An uncertain send is never automatically repeated.
-      await logRetry('retry.send_intent',{operationId,text:RETRY_TEXT,promptKey},true);
-      if (!stillCurrent() || Date.now()>=deadline || composer()!==editor || rawEditorText(editor)!==RETRY_TEXT || isGenerating()) return;
+      await logRetry('retry.send_intent',{operationId,text:retryText,promptKey},true);
+      if (!stillCurrent() || Date.now()>=deadline || composer()!==editor || rawEditorText(editor)!==retryText || isGenerating()) return;
       if (!runtimeAvailable()) return;
       rememberCompletionSendIntent();
       clicked = true; // A lost reply may still mean the page received the click.
       manualSendIntent=null;
-      const sent = await inspectComposer(RETRY_TEXT,'send',{operationId});
+      const sent = await inspectComposer(retryText,'send',{operationId});
       if (sent?.ok === false&&!sent.unknown) clicked = false;
       if (sent?.duplicate) {
         await logRetry('retry.duplicate_suppressed',{operationId});
         return;
       }
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка не подтверждена');
-      void logRetry('retry.clicked',{operationId,text:RETRY_TEXT});
+      void logRetry('retry.clicked',{operationId,text:retryText});
       const confirmationDeadline = Date.now() + 10000;
       while (Date.now() < confirmationDeadline) {
         if (!runtimeAvailable()) return;
@@ -770,9 +777,9 @@
         const currentEditor = composer();
         if ((latestPromptSnapshot()?.promptKey || path) !== promptKey &&
             (globalThis.__chatgptNotifierAttemptId || '') !== attempt &&
-            currentEditor && editorText(currentEditor) !== RETRY_TEXT) {
+            currentEditor && editorText(currentEditor) !== retryText) {
           confirmed = true;
-          await logRetry('retry.confirmed',{operationId,text:RETRY_TEXT,
+          await logRetry('retry.confirmed',{operationId,text:retryText,
             confirmation:'new-user-turn-and-cleared-composer',newPromptKey:latestPromptSnapshot()?.promptKey},true);
           return;
         }
@@ -805,7 +812,7 @@
               notifyError(error,'Черновик сохранён в журнале; автоматическое восстановление остановлено до подтверждения отправки');
             }
           }
-          else if (!clicked && insertedEditor && editorText(insertedEditor) === RETRY_TEXT) {
+          else if (!clicked && insertedEditor && editorText(insertedEditor) === retryText) {
             replaceEditorText(insertedEditor, '');
           }
         } catch (cause) {
@@ -1478,16 +1485,20 @@
   checkErrors();
   void resumeSavedHandoff();
 
-  function isGenerating() {
+  function composerActivity() {
     try {
-      const stopButtons = pageRoot().querySelectorAll(STOP_BUTTON_SELECTOR);
-      for (const button of stopButtons) {
-        if (isElementVisible(button)) return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
+      const root=pageRoot();
+      if(Array.from(root.querySelectorAll(STOP_BUTTON_SELECTOR)).some(isElementVisible))return 'generating';
+      const idle=sendButton()||Array.from(root.querySelectorAll(
+        '[data-composer-body] button[aria-label="Start voice mode"], [data-composer-body] button[aria-label="Начать голосовой разговор"]'
+      )).find(isElementVisible);
+      if(idle&&!idle.disabled&&idle.getAttribute('aria-disabled')!=='true')return 'idle';
+    } catch {}
+    return 'unknown';
+  }
+
+  function isGenerating() {
+    return composerActivity()==='generating';
   }
 
   function waitForAnswerBoundToLatestPrompt(isCurrent, attempt) {
@@ -1916,6 +1927,10 @@
     if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
     const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
+    if(currentRequest&&message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')
+      activeStatusRequest={path:location.pathname,startedAt:message.startedAt};
+    if(currentRequest&&['CHATGPT_CONVERSATION_REQUEST_COMPLETED','CHATGPT_CONVERSATION_REQUEST_FAILED'].includes(message?.type))
+      activeStatusRequest=null;
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&currentRequest){deferredObservedStart=0;deferredTaskObserver?.requestStarted(message.startedAt);armForCurrentPrompt();}
     if(message?.type==='CHATGPT_HANDOFF_ROUTE_CHANGED'){void inlineGoal?.refresh();scheduleActiveCompletionRecovery();deferredTaskObserver?.refresh();void statusIndicator?.refresh();notifyPageReturned();void restoreDraft(null,true).catch(()=>{});}
     if (runtimeAvailable() && message?.type === 'CHATGPT_CONVERSATION_REQUEST_COMPLETED'&&currentRequest){deferredTaskObserver?.refresh();armForCurrentPrompt({completed:true});}

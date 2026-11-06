@@ -597,8 +597,11 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
   const candidates=requests.filter(e=>e.sourceUrl===pending.url&&e.eventAt>=pending.intent.eventAt&&e.eventAt-pending.intent.eventAt<=10000);
   if(candidates.length!==1)return waiting();
   const request=candidates[0];
+  const lineage=pending.url==='https://chatgpt.com/'&&pending.intent.baselineKey===''&&
+    ChatGPTGoalLineage.trace(journal.events,tabId,{requestId:request.requestId,startedAt:request.eventAt});
+  const scheduledRecovery=lineage?.originUrl===url&&lineage.targetUrl===url&&lineage.handoffs.length===0;
   const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',
-    func:inspectCompletedTurn,args:[url,true,null,request.eventAt,null,pending.request?.submission?.userText||pending.intent.text]});
+    func:inspectCompletedTurn,args:[url,true,null,request.eventAt,null,pending.request?.submission?.userText||pending.intent.text,scheduledRecovery]});
   const native=checked?.result,allUsers=native?.recoveryTimeline;
   const start=Array.isArray(allUsers)?allUsers.findIndex(item=>item.userId===native.userId):-1;
   const timeline=start>=0?allUsers.slice(start):null;
@@ -621,7 +624,7 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
     if(index&&found.eventAt<=following[index-1].eventAt||Math.abs(found.eventAt-user.userSentAtMs)>10000)return waiting();
     supplements.push({...user,requestId:found.requestId,startedAt:found.eventAt});
   }
-  const [currentNative]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const [currentNative]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:scheduledRecovery?[url,true,null,null,null,null,true]:[url,true]});
   const latest=currentNative?.result,last=timeline.at(-1),current=await goalController.composerGet({tabId});
   if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url||current?.id!==pending.id||
       current.phase!=='intent'||JSON.stringify(current)!==JSON.stringify(pending)||
@@ -1575,7 +1578,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const current=await goalController.composerGet({tabId});
           if(current?.phase==='bound'){const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;}
           return {ok:true,pending:current?.phase==='intent',armId:current?.id,
-            canRetry:current?.phase==='intent'&&Boolean(current.request?.submission)&&
+            canRetry:current?.phase==='intent'&&!current.requestCandidateAmbiguous&&Boolean(current.request?.requestId)&&
               Date.now()<current.request.startedAt+current.config.maxMinutes*60000};
         }
         if(typeof reconcileBlockedManualHandoff==='function')await reconcileBlockedManualHandoff(tabId,url);
@@ -1708,7 +1711,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const active = meta?.active?.[sender.tab.id];
         if (!active || active.operationId !== options.operationId || Date.now() - active.at > 15000) throw new Error('Нет сохранённого разрешения на эту автоматическую отправку');
         if (active.kind === 'retry.send_intent') {
-          if (options.text !== 'доделай е2е' || options.fileName || options.requireMax || options.expectedEffort !== undefined || options.expectedModel !== undefined) throw new Error('Автоповтор может отправлять только команду «доделай е2е»');
+          const key=ChatGPTGoalPolicy.RETRY_MESSAGE_KEY;
+          const configured=ChatGPTGoalPolicy.retryMessage((await chrome.storage.local.get(key))[key]);
+          if (options.text !== configured || options.text !== ChatGPTGoalPolicy.retryMessage(active.retryText) || options.fileName || options.requireMax || options.expectedEffort !== undefined || options.expectedModel !== undefined) throw new Error('The retry message changed or does not match the authorized text');
           if(!active.sourceUrl||active.sourceUrl!==retryDraftUrl(options.url)||typeof active.promptKey!=='string'||!active.promptKey)throw new Error('Исходный запрос автоповтора не подтверждён');
           retryBinding={sourceUrl:active.sourceUrl,promptKey:active.promptKey};
         } else if (active.kind === 'goal.send_intent') {

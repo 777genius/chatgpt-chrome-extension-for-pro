@@ -39,7 +39,7 @@ async function check(mode:Mode) {
     })};
     const location=new URL(tab.url);
     content=createContext({URL,document,window,location,chrome:{runtime},AbortController,crypto:globalThis.crypto,Node:window.Node,Element:window.Element,Event:window.Event,HTMLTextAreaElement:window.HTMLTextAreaElement,MutationObserver:window.MutationObserver,Date,performance,setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,clearInterval(){}});
-    for(const name of ['memory-maintenance.js','handoff-title.js','content-script.js'])runInContext(readFileSync('extension/'+name,'utf8'),content);
+    for(const name of ['memory-maintenance.js','handoff-title.js','goal-policy.js','content-script.js'])runInContext(readFileSync('extension/'+name,'utf8'),content);
   }
   async function drain(){for(let i=0;i<35;i++)await new Promise<void>(resolve=>setImmediate(resolve));}
   try {

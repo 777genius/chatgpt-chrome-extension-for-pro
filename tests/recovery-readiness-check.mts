@@ -70,6 +70,7 @@ async function check(mode:Mode) {
   if(mode==='assistant-idle')document.querySelector('[data-turn=user]')!.remove();
   if(mode==='selector-miss'){const original=document.querySelectorAll.bind(document);document.querySelectorAll=((selector:string)=>selector.includes('fruitjuice-stop-button')?[]:original(selector)) as typeof document.querySelectorAll;}
   runInContext(readFileSync('extension/journal-store.js','utf8'),context);
+  runInContext(readFileSync('extension/goal-policy.js','utf8'),context);
   runInContext(source,context);
   // A watcher for the original interrupted request must be retired when its
   // recovery error is observed, even though its partial answer remains mounted.
