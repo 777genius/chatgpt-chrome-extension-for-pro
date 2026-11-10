@@ -1125,14 +1125,23 @@ async function reconcileGoalPromptBinding(tabId,url) {
   // message ID and exact request receipt, but no goal.confirmed auto-send.
   const manual=[goal.manualSupplementBinding,goal.manualStart].find(value=>value?.requestId&&
     value.userId===native.userId&&value.userText===native.userText&&
-    value.userSentAtMs===native.userSentAtMs&&Number.isFinite(value.startedAt)&&
+    Number.isFinite(value.startedAt)&&Number.isFinite(value.userSentAtMs)&&
     (value.promptKey===goal.expectedPromptKey||
       goal.confirmedPromptBinding?.operationId==='manual:'+value.requestId&&
       goal.confirmedPromptBinding.userId===native.userId));
   if(manual) {
+    // The server can replace a local timestamp when the same immutable
+    // message ID is committed. Accept that shift only if the original
+    // request and its earlier native identity were durably bound together.
+    if(manual.userSentAtMs!==native.userSentAtMs) {
+      const checkpoint=await completionCheckpointRead(tabId);
+      if(checkpoint?.state!=='active'||checkpoint.url!==url||checkpoint.requestId!==manual.requestId||
+          checkpoint.startedAt!==manual.startedAt||checkpoint.promptKey!==goal.expectedPromptKey||
+          checkpoint.nativeUserId!==manual.userId||checkpoint.nativeUserSentAtMs!==manual.userSentAtMs)return {ok:false};
+    }
     const requests=journal.events.filter(e=>e.kind==='request.started'&&!e.operationId&&e.tabId===tabId&&
       e.requestId===manual.requestId&&e.eventAt===manual.startedAt&&e.sourceUrl===(manual.sourceUrl||url));
-    if(manual.tabId!==tabId||Math.abs(manual.startedAt-native.userSentAtMs)>10000||requests.length!==1||
+    if(manual.tabId!==tabId||Math.abs(manual.startedAt-manual.userSentAtMs)>10000||requests.length!==1||
         journal.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
           e.sequence>requests[0].sequence)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
     operationId='manual:'+manual.requestId;
@@ -1628,15 +1637,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId=sender.tab?.id,source=ChatGPTGoalPolicy.pageUrl(sender.tab?.url);
     const requested=ChatGPTGoalPolicy.pageUrl(message.url);
     const actions=['get','arm','disarm','intent','bind','restore','start','pause','resume','stop'];
-    if(sender.frameId>0||typeof tabId!=='number'||!source||!requested||!actions.includes(message.action)) {
+    const temporarySource=ChatGPTGoalPolicy.temporaryPageUrl(sender.tab?.url);
+    if(sender.frameId>0||typeof tabId!=='number'||!source&&!temporarySource||!requested||!actions.includes(message.action)) {
       sendResponse?.({ok:false,error:'Goal chat binding mismatch'});return false;
     }
     (async()=>{
-      const live=ChatGPTGoalPolicy.pageUrl((await chrome.tabs.get(tabId)).url);
+      const liveUrl=(await chrome.tabs.get(tabId)).url,live=ChatGPTGoalPolicy.pageUrl(liveUrl);
       const pending=await goalController.composerGet({tabId});
+      const temporaryLive=ChatGPTGoalPolicy.temporaryPageUrl(liveUrl);
+      const temporaryIntent=message.action==='intent'&&requested==='https://chatgpt.com/'&&pending?.url===requested&&
+        pending?.id===message.armId&&pending?.phase==='armed'&&
+        (source===requested||temporarySource)&&temporaryLive&&(!temporarySource||temporarySource===temporaryLive);
       const allocatedIntent=['intent','bind'].includes(message.action)&&requested==='https://chatgpt.com/'&&
         pending?.url===requested&&Boolean(ChatGPTGoalPolicy.canonical(live));
-      if((source!==requested||live!==requested)&&!allocatedIntent)throw Error('Чат изменился');
+      if((source!==requested||live!==requested)&&!allocatedIntent&&!temporaryIntent)throw Error('Чат изменился');
       let result;
       if(message.action==='bind')return bindNativeComposerGoal(tabId,live,message.armId);
       if(message.action==='restore')return restoreMissingComposerGoal(tabId,live,message.armId,true);

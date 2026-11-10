@@ -293,6 +293,32 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(g.timers(),0);assert.equal(g.toggle().getAttribute('aria-checked'),'false','allocation evidence cannot follow a different chat');g.instance.dispose();
 }
 
+// A fresh conversation passes through ChatGPT's temporary local alias while
+// the trusted first-message intent is still being persisted.
+{
+  const root='https://chatgpt.com/',alias='https://chatgpt.com/c/local-chatgpt%3Aabc-123';
+  const f=fixture(root);await tick();f.click(f.toggle());await tick();
+  const pending=deferred<Result>();const armed=f.composerState()!;
+  f.respond(value=>value.action==='intent'?pending.promise:{ok:true,url:value.url,record:null,composer:f.composerState()});
+  const intent=f.instance.manualIntent({text:'Original first goal',baselineKey:'',eventAt:f.now()});
+  f.setUrl(alias);await f.instance.refresh();
+  const saved:Composer={...armed,phase:'intent',intent:{text:'Original first goal',baselineKey:'',eventAt:f.now()}};
+  f.setComposer(saved);pending.resolve({ok:true,url:root,record:null,composer:saved});
+  assert.equal((await intent).ok,true,'temporary alias cannot discard a persisted first-message intent');
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+  f.setUrl(chat);f.respond(null);f.bindable();await f.instance.refresh();await f.advance(5000);
+  assert.equal(f.composerState()?.phase,'bound','permanent chat receives the original intent');
+  assert.equal(f.state.nativeSends,0,'allocation recovery never resends the first message');f.instance.dispose();
+  const g=fixture(root);await tick();g.click(g.toggle());await tick();
+  const slow=deferred<Result>(),old=g.composerState()!;
+  g.respond(value=>value.action==='intent'?slow.promise:{ok:true,url:value.url,record:null,composer:null});
+  const pendingIntent=g.instance.manualIntent({text:'First goal',baselineKey:'',eventAt:g.now()});
+  g.setUrl(alias);await g.instance.refresh();
+  g.setUrl('https://chatgpt.com/c/local-chatgpt%3Adifferent');await g.instance.refresh();
+  slow.resolve({ok:true,url:root,record:null,composer:{...old,phase:'intent',intent:{text:'First goal',baselineKey:'',eventAt:g.now()}}});
+  assert.equal((await pendingIntent).ok,false,'another temporary allocation cannot adopt a stale intent');g.instance.dispose();
+}
+
 // Persistence failures never turn the switch on, failed disarm/Stop never
 // pretend it is off. Unknown native outcomes remain pending observations.
 {

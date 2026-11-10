@@ -83,6 +83,14 @@ assert.equal((await call(request('intent',{url:composerUrlOverride,armId:'armed'
 assert.equal(calls.findLast(value=>value.kind==='intent')!.value.url,composerUrlOverride);
 composerUrlOverride='';
 
+const alias='https://chatgpt.com/c/local-chatgpt%3Aabc-123';
+currentUrl=alias;composerUrlOverride='https://chatgpt.com/';
+const rootIntent=request('intent',{url:composerUrlOverride,armId:'armed',eventAt:100000,text:'Sent root goal',baselineKey:''});
+assert.equal((await call(rootIntent,{tab:{id:7,url:alias},frameId:0})).ok,true,'temporary allocation accepts only the already-armed root intent');
+assert.equal((await call({...rootIntent,armId:'another'},{tab:{id:7,url:alias},frameId:0})).ok,false,'another arm cannot use the temporary allocation');
+assert.equal((await call({...rootIntent,action:'arm'},{tab:{id:7,url:alias},frameId:0})).ok,false,'temporary route cannot start another Goal');
+currentUrl=source;composerUrlOverride='';
+
 const mutations=()=>calls.filter(value=>!['get','composerGet'].includes(value.kind));
 const accepted=mutations().length;
 const reads=tabReads.length;

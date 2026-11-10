@@ -25,6 +25,13 @@
   function pageUrl(value) {
     try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&url.pathname==='/'?url.origin+'/':canonical(value);}catch{return '';}
   }
+  function temporaryPageUrl(value) {
+    try {
+      const url=new URL(value),match=url.pathname.match(/^\/c\/([^/]+)\/?$/);
+      if(url.origin!=='https://chatgpt.com'||!match||!/^local-chatgpt:[a-z0-9-]+$/.test(decodeURIComponent(match[1])))return '';
+      return url.origin+url.pathname.replace(/\/$/,'');
+    } catch {return '';}
+  }
   function composerSettings(input={}) {
     const {rules,maxContinuations,maxMinutes}=settings({...DEFAULTS,...Object.fromEntries(Object.entries(input).filter(([,value])=>value!==undefined)),goal:'Native message'});
     return {rules,maxContinuations,maxMinutes};
@@ -100,7 +107,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,RETRY_MESSAGE_KEY,DEFAULT_RETRY_MESSAGE,retryMessage,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
+  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,RETRY_MESSAGE_KEY,DEFAULT_RETRY_MESSAGE,retryMessage,DEFAULTS,canonical,pageUrl,temporaryPageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

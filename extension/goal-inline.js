@@ -233,9 +233,17 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(bindTimer!==null)win.clearTimeout(bindTimer);
       bindTimer=null;binding=null;
     }
+    function temporaryAllocation() {
+      const temporary=policy.temporaryPageUrl(getUrl());
+      if(!temporary||!binding||binding.origin!==ROOT_URL||route!==ROOT_URL||
+          binding.temporary&&binding.temporary!==temporary)return false;
+      binding.temporary=temporary;
+      return true;
+    }
     function syncRoute() {
       const next=current();
       if(next===route)return false;
+      if(temporaryAllocation())return false;
       const allocation=binding&&binding.origin===ROOT_URL&&route===ROOT_URL&&!!policy.canonical(next)&&
         (!binding.allocated||binding.allocated===next);
       route=next;epoch++;sequence++;
@@ -310,7 +318,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function contextMatches(token) {
       if(!valid()||!binding||binding.token!==token)return false;
       syncRoute();
-      return !!binding&&binding.token===token&&current()===route&&
+      return !!binding&&binding.token===token&&(current()===route||temporaryAllocation())&&
         (route===binding.origin||route===binding.allocated);
     }
     function validateResult(result,url) {
@@ -363,6 +371,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     }
     async function pollBind(token) {
       if(!contextMatches(token))return;
+      if(temporaryAllocation()){scheduleBind();return;}
       if(Date.now()>=binding.deadline){scheduleBind();return;}
       binding.inFlight=true;
       const url=route,id=binding.id;
@@ -393,6 +402,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     async function refresh() {
       if(!valid()||!mount())return;
       syncRoute();attach();
+      if(temporaryAllocation()){render();return;}
       if(!route){loaded=true;render();return;}
       if(busy){pendingRefresh=true;return;}
       const url=route,revision=epoch,serial=++sequence;
