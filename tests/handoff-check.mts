@@ -147,7 +147,7 @@ function probeCheck(){
  console.log('PASS: locale-independent recovery action, original message order, full DIL fallback, no reasoning capture');
 }
 type HandoffInterference = ''|'reasoning-edit'|'upload-edit'|'whitespace'|'route-before-file'|'source-attachment'|'source-edit'|'destination-attachment'|'destination-attachment-during-upload'|'rich-seed'|'rich-native-mismatch'|'rich-native-edited'|'rich-owner-edit'|'rich-owner-attachment'|'source-mode-change'|'unavailable-effort'|'legacy-effort'|'history-loading'|'legacy-model'|'source-model-change';
-async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{uploadDelayMs?:number;transientMode?:boolean;settleAfterStep?:boolean;delayedModeCommit?:boolean;remountSlider?:boolean;sourceStillGenerating?:boolean;pauseDuringSourceWait?:boolean;timeoutRecovery?:boolean;escalate?:boolean;source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
+async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,temporaryTarget=false,lateTarget=false,restoredUnknown=false,interference:HandoffInterference='',effortOptions:{uploadDelayMs?:number;transientMode?:boolean;settleAfterStep?:boolean;delayedModeCommit?:boolean;remountSlider?:boolean;sourceStillGenerating?:boolean;pauseDuringSourceWait?:boolean;errorChangesDuringWait?:boolean;timeoutRecovery?:boolean;escalate?:boolean;source?:string;destination?:string;available?:string[];sourceModel?:string;destinationModel?:string;availableModes?:{effort:string;model:string}[]}={}){
  const {document,window}=parseHTML('<html><head><title>Fixture task</title></head><body><section data-app-shell-active-page="false"><article data-testid="conversation-turn-cached" data-turn="user">Cached history</article><div data-composer-markdown contenteditable="true">Cached draft</div></section><section data-app-shell-active-page="true"><main><article data-testid="conversation-turn-0" data-turn="user">Last request</article></main><form data-composer-body><div data-composer-markdown contenteditable="true">Saved draft\nsecond line</div><button type="submit">Send</button><input type="file"></form></section></body></html>');
  Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
  Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
@@ -211,7 +211,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
     if(effortOptions.sourceStillGenerating&&m.captureRetryHistory&&!generationFixture){
       generationFixture=true;const stop=document.createElement('button');stop.setAttribute('data-testid','stop-button');stop.type='button';
       document.querySelector('[data-app-shell-active-page="true"] form')!.append(stop);
-      clock.setTimeout(()=>{stop.remove();sourceIdleAt=clock.now();if(effortOptions.pauseDuringSourceWait)goalPhase='paused';},2000);
+      clock.setTimeout(()=>{stop.remove();sourceIdleAt=clock.now();if(effortOptions.pauseDuringSourceWait)goalPhase='paused';if(effortOptions.errorChangesDuringWait)alert.firstElementChild!.textContent='Different error';},2000);
     }
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
     return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages:effortOptions.escalate&&!m.captureRetryHistory?[]:messages,incomplete:interference==='history-loading'&&++historyInspections<3};
@@ -304,11 +304,11 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    assert.equal(activeEditor().textContent,'Last request');
    modeAvailable=true;
  }
- if(effortOptions.pauseDuringSourceWait){
-   await clock.until(()=>notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'),'pause during source wait');
-   assert.equal(begins,0,'manual pause prevents reserving a handoff');
-   assert.equal(sends.length,0,'manual pause prevents a send');
-   assert.equal(loc.href,originalURL,'manual pause keeps the source chat open');
+ if(effortOptions.pauseDuringSourceWait||effortOptions.errorChangesDuringWait){
+   await clock.until(()=>notices.some(n=>n.type==='CHATGPT_OPERATION_WARNING'),'changed state during source wait');
+   assert.equal(begins,0,'a manual pause or changed error prevents reserving the old handoff');
+   assert.equal(sends.length,0,'a manual pause or changed error prevents sending the old history');
+   assert.equal(loc.href,originalURL,'changed state keeps the source chat open');
    (context as any).__chatgptNotifierDispose();return;
  }
  if(interference&&interference!=='rich-seed'&&interference!=='history-loading'){
@@ -425,5 +425,6 @@ await transferCheck(false,false,false,false,false,false,'source-model-change');
 await transferCheck(false,false,false,false,false,false,'',{escalate:true});
 await transferCheck(false,false,false,false,false,false,'',{escalate:true,sourceStillGenerating:true});
 await transferCheck(false,false,false,false,false,false,'',{escalate:true,sourceStillGenerating:true,pauseDuringSourceWait:true});
+await transferCheck(false,false,false,false,false,false,'',{escalate:true,sourceStillGenerating:true,errorChangesDuringWait:true});
 
 await transferCheck(true,false,false,false,false,false,'',{uploadDelayMs:75000});

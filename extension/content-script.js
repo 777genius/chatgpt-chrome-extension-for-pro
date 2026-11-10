@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.119';
+  const SCRIPT_VERSION = '1.8.120';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -1273,6 +1273,7 @@
     const sourceAttempt = globalThis.__chatgptNotifierAttemptId || '';
     const sourceRequest = globalThis.__chatgptNotifierRequestId || null;
     const sameSource = () => location.href === sourceUrl && alert.isConnected &&
+      errorTextForAlert(alert)===error.response &&
       (latestPromptSnapshot()?.promptKey || location.pathname) === sourcePromptKey &&
       (globalThis.__chatgptNotifierAttemptId || '') === sourceAttempt &&
       (globalThis.__chatgptNotifierRequestId || null) === sourceRequest;
@@ -1482,6 +1483,12 @@
     if(result?.ok===false){record.titleRetryPaused=true;notifyOperationWarning({sourceUrl:record.targetUrl,sessionTitle:document.title,response:`История передана, но название нового чата не изменено: ${result.reason}`},'','title');}
   }
 
+  function errorTextForAlert(alert) {
+    const content=alert.cloneNode(true);
+    content.querySelectorAll('button, [role="button"], [aria-hidden="true"]').forEach(node=>node.remove());
+    return normalize(content.textContent);
+  }
+
   function currentErrors() {
     const turns = turnNodes();
     let latestUser = null;
@@ -1509,9 +1516,7 @@
     const errors = currentErrors();
     for (const node of recoveryFirstSeen.keys()) if (!errors.includes(node)) recoveryFirstSeen.delete(node);
     for (const alert of errors) {
-      const content = alert.cloneNode(true);
-      content.querySelectorAll('button, [role="button"], [aria-hidden="true"]').forEach((node) => node.remove());
-      const errorText = normalize(content.textContent);
+      const errorText = errorTextForAlert(alert);
       if (!errorText) continue;
       const promptKey = latestPromptSnapshot()?.promptKey || location.pathname;
       const identity=`${globalThis.__chatgptNotifierAttemptId||''}|${promptKey}`;
