@@ -2079,6 +2079,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return {ok:true,record:{...record,receipt:request?.receipt||view.status.receipt}};
     })().then(sendResponse).catch(()=>sendResponse?.({ok:false}));return true;
   }
+  if(message?.type==='CHATGPT_RETRY_CONFIRMATION') {
+    const url=messageChatUrl(message,sender),tabId=sender.tab?.id;
+    if(!url||sender.frameId>0||!Number.isInteger(tabId)||typeof message.operationId!=='string'||
+        !message.operationId||typeof message.promptKey!=='string'||!message.promptKey||
+        typeof message.text!=='string'||!message.text.trim()||message.text.length>10000) {
+      sendResponse?.({ok:false});return false;
+    }
+    (async()=>{
+      const receipt=await latestRequestReceipt(tabId);
+      if(!receipt||receipt.operationId!==message.operationId||receipt.url!==url||
+          !receipt.requestId||!Number.isFinite(receipt.startedAt))return {ok:false};
+      const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+      const claims=Object.values(meta?.retrySendClaims||{}).filter(claim=>
+        claim.operationId===message.operationId&&claim.tabId===tabId&&claim.sourceUrl===url&&claim.phase==='consumed');
+      if(claims.length!==1)return {ok:false};
+      const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+      const native=checked?.result;
+      if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||!native.userId||
+          claims[0].retryUserId&&claims[0].retryUserId===native.userId||
+          native.promptKey!==message.promptKey||!Number.isFinite(native.userSentAtMs)||
+          Math.abs(native.userSentAtMs-receipt.startedAt)>10000||
+          native.userText!==message.text&&native.userVisibleText!==message.text)return {ok:false};
+      const fresh=await latestRequestReceipt(tabId),tab=await chrome.tabs.get(tabId);
+      return {ok:ChatGPTHandoffTitle.chatUrl(tab.url)===url&&fresh?.operationId===receipt.operationId&&
+        fresh.requestId===receipt.requestId&&fresh.startedAt===receipt.startedAt};
+    })().then(sendResponse).catch(()=>sendResponse?.({ok:false}));return true;
+  }
   if(message?.type==='CHATGPT_COMPLETION_PROBE') {
     const url=messageChatUrl(message,sender),initial=manualRequestReceiptsByTab.get(sender.tab?.id);
     if(!url||!Number.isFinite(message.startedAt)||message.startedAt<=0||initial&&(initial.startedAt!==message.startedAt||initial.requestId&&initial.requestId!==message.requestId||initial.url&&initial.url!==url&&initial.url!=='https://chatgpt.com/')){

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.122';
+  const SCRIPT_VERSION = '1.8.123';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -808,7 +808,7 @@
       }
       if (!sent?.ok || !sent.clicked) throw new Error(sent?.reason || 'Безопасная отправка не подтверждена');
       void logRetry('retry.clicked',{operationId,text:retryText});
-      const confirmationDeadline = Date.now() + 10000;
+      const confirmationDeadline = Date.now() + 120000;
       while (Date.now() < confirmationDeadline) {
         if (!runtimeAvailable()) return;
         if (location.pathname !== path) return;
@@ -816,10 +816,16 @@
         if ((latestPromptSnapshot()?.promptKey || path) !== promptKey &&
             (globalThis.__chatgptNotifierAttemptId || '') !== attempt &&
             currentEditor && editorText(currentEditor) !== retryText) {
-          confirmed = true;
-          await logRetry('retry.confirmed',{operationId,text:retryText,
-            confirmation:'new-user-turn-and-cleared-composer',newPromptKey:latestPromptSnapshot()?.promptKey},true);
-          return;
+          const newPromptKey=latestPromptSnapshot()?.promptKey;
+          const proof=await runtimeMessage({type:'CHATGPT_RETRY_CONFIRMATION',url:sourceUrl,operationId,
+            promptKey:newPromptKey,text:retryText});
+          if (!runtimeAvailable() || location.pathname!==path) return;
+          if (proof?.ok===true && (latestPromptSnapshot()?.promptKey||path)===newPromptKey) {
+            await logRetry('retry.confirmed',{operationId,text:retryText,
+              confirmation:'native-user-and-request',newPromptKey},true);
+            confirmed = true;
+            return;
+          }
         }
         await sleepUntilNextCheck();
       }

@@ -29,6 +29,7 @@ async function check(mode:Mode) {
     setTimeout:()=>0,clearTimeout(){},setInterval:(fn:()=>void)=>{intervals.add(fn);return fn;},clearInterval:(fn:()=>void)=>{intervals.delete(fn);},
     chrome:{storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime:{id:'test-extension',getManifest:()=>({version:'fixture'}),onMessage:{addListener:(fn:(message:Message)=>void)=>{receiver=fn;},removeListener(){}},sendMessage:async(message:Message)=>{
       if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:null};
+      if(message.type==='CHATGPT_RETRY_CONFIRMATION')return {ok:true};
       if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await runInContext('readRetryDraft(location.href)',context)};
       if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
       if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};

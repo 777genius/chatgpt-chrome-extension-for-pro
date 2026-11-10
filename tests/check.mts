@@ -16,7 +16,7 @@ const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><di
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
 const domContexts:ReturnType<typeof createContext>[]=[];
 async function domCheck() {
-  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0, recoveryWait: 'none'|'transient'|'permanent'|'hard'|'lost' = 'none') {
+  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0, recoveryWait: 'none'|'transient'|'permanent'|'hard'|'lost' = 'none', nativeConfirm = true) {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
     Object.defineProperty(window.Node, 'DOCUMENT_POSITION_FOLLOWING', { value: 4, configurable: true });
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
@@ -42,6 +42,7 @@ async function domCheck() {
       chrome: { storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime: {id:'test-extension',getManifest:()=>({version:'fixture'}),sendMessage:async(message:any)=>{
         if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
         if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return {ok:false};
+        if(message.type==='CHATGPT_RETRY_CONFIRMATION')return {ok:nativeConfirm};
         if(message.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS')return {ok:true,changed:false};
         if(message.type==='CHATGPT_GOAL_RECOVER')return {ok:false};
         if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:''};
@@ -209,6 +210,12 @@ async function domCheck() {
   assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].operationId,run.logs.find(e=>e.kind==='retry.planned').operationId);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].attemptId,run.logs.find(e=>e.kind==='retry.planned').attemptId,'retry lifecycle remains bound to its failed request after a newer request starts');
+  const oldTurn=setup('',true,true,'',null,false,false,0,'none',false);
+  await oldTurn.fail('Repeated old message');
+  await waitFor(()=>oldTurn.logs.some(e=>e.kind==='retry.failed'));
+  assert.equal(oldTurn.sends.length,1,'the original guarded send remains one-shot');
+  assert.equal(oldTurn.logs.filter(e=>e.kind==='retry.confirmed').length,0,'a changed DOM key alone cannot confirm an old identical message');
+  assert.equal(oldTurn.logs.find(e=>e.kind==='retry.failed').clicked,true,'unknown delivery remains fenced');
   const noLog=setup('Draft');noLog.breakJournal();await noLog.fail('error');
   assert.equal(noLog.sends.length,0,'journal failure must prevent automatic send');
   assert.equal(noLog.document.querySelector('#prompt-textarea')!.textContent,'Draft');
