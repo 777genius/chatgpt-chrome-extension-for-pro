@@ -239,6 +239,11 @@ function appendJournal(event, tab = {}) {
       // send. Real retry.planned carries this binding before any editor effect.
       if(!retrySource||!operationId||typeof event.promptKey!=='string'||!event.promptKey)return;
       if(retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt))throw duplicate();
+      // A source handoff and a same-chat retry must not both advance the
+      // failed turn, including after the handoff stopped before navigation.
+      // Only a newer positively observed manual request supersedes that fence.
+      const handoff=handoffSourceClaims[retrySource],manualAt=meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt;
+      if(handoff&&!(Number.isFinite(manualAt)&&manualAt>handoff.at&&retryAttemptAtOrAfter(event.attemptId,manualAt)))throw duplicate();
       if(Object.hasOwn(retryConsumedOperations,operationId)||Object.hasOwn(retryReleasedOperations,operationId))throw duplicate();
       if(meta.retryDraftClaims?.[operationId])return;
       const preparing=retryPreparingByChat[retrySource];
