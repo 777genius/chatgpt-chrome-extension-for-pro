@@ -127,6 +127,18 @@ assert.equal(clicks,beforeModelGuard);
 assert.equal(control({text:'Prepared history',expectedEffort:'medium',expectedModel:'gpt-6-pro'}).clicked,true);
 assert.equal(clicks,beforeModelGuard+1);
 
+// React may retain an old fiber on the DOM node after rendering its alternate.
+effortControl.setAttribute('data-selected-reasoning-effort','high');
+(effortControl as any).__reactFiber$reasoning={
+ memoizedProps:{selectedLabelCandidate:{model:'gpt-6-thinking',reasoningEffort:'medium'}},
+ alternate:{memoizedProps:{selectedLabelCandidate:{model:'gpt-6-thinking',reasoningEffort:'high'}}},return:null};
+const beforeAlternate=clicks;
+assert.equal(control({text:'Prepared history',expectedEffort:'high',expectedModel:'gpt-6-thinking'}).clicked,true,'visible effort binds to matching alternate fiber');
+assert.equal(clicks,beforeAlternate+1);
+(effortControl as any).__reactFiber$reasoning.memoizedProps.selectedLabelCandidate={model:'gpt-6-pro',reasoningEffort:'high'};
+assert.equal(control({text:'Prepared history',expectedEffort:'high',expectedModel:'gpt-6-thinking'}).ok,false,'different models at the same effort remain ambiguous');
+assert.equal(clicks,beforeAlternate+1,'ambiguous model must not click');
+
 // A late root-page recovery is read-only and requires exact native emptiness.
 runInContext("location.href='https://chatgpt.com/';location.pathname='/'",ctx);
 richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});
@@ -134,11 +146,27 @@ richController.getPlainText=()=>'';editor.textContent='';
 const emptyRoot=()=>control({action:'inspect-empty-handoff',text:'',url:'https://chatgpt.com/'});
 const beforeRootInspection=clicks;
 assert.equal(emptyRoot().ok,true);
+const seedText='доделай е2е';
+const resumableRoot=()=>control({action:'inspect-resumable-handoff',text:seedText,url:'https://chatgpt.com/'});
+richController.getChatGptPrompt=()=>({prompt:seedText,systemHints:[]});
+richController.getPlainText=()=>seedText;editor.textContent=seedText;
+richController.view.state.doc={toJSON:()=>({type:'doc',content:[{type:'paragraph',content:[{type:'text',text:seedText}]}]})};
+assert.equal(resumableRoot().ok,true,'an exact native root seed is inspectable without a click');
+richController.view.state.doc={toJSON:()=>({type:'doc',content:[{type:'paragraph',content:[{type:'text',text:seedText,marks:[{type:'literalPaste'}]}]}]})};
+assert.equal(resumableRoot().ok,true,'a literal paste of letters and numbers keeps the same plain meaning');
+richController.view.state.doc={toJSON:()=>({type:'doc',content:[{type:'paragraph',content:[{type:'text',text:seedText,marks:[{type:'strong'}]}]}]})};
+assert.equal(resumableRoot().ok,false,'rich owner draft must not be reduced to plain text');
+richController.view.state.doc={toJSON:()=>({type:'doc',content:[{type:'paragraph',content:[{type:'text',text:seedText}]}]})};
+editor.textContent='Owner edit';assert.equal(resumableRoot().ok,false,'a changed draft blocks recovery');editor.textContent=seedText;
+richController.getChatGptPrompt=()=>({prompt:seedText,systemHints:['owner context']});assert.equal(resumableRoot().ok,false);
+richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});richController.getPlainText=()=>'';editor.textContent='';
 richController.pendingBrowserAutocompleteSubmission={queued:true};assert.equal(emptyRoot().ok,false,'native autocomplete submission blocks empty-root recovery');richController.pendingBrowserAutocompleteSubmission=null;
 const nativeTurn=document.createElement('div');nativeTurn.setAttribute('data-chatgpt-search-unit-key','native:user');document.querySelector('[data-app-shell-active-page]')!.append(nativeTurn);
 assert.equal(emptyRoot().ok,false,'new native user unit makes root non-empty before request journaling');nativeTurn.remove();
 pending={queued:true};assert.equal(emptyRoot().ok,false);pending=null;
-ready=false;assert.equal(emptyRoot().ok,false);ready=true;
+ready=false;assert.equal(emptyRoot().ok,true,'a blank native composer is commonly not submit-ready yet remains safe to prepare');
+const activeStop=document.createElement('button');activeStop.setAttribute('data-testid','stop-button');document.querySelector('[data-composer-body]')!.append(activeStop);
+assert.equal(emptyRoot().ok,false,'a visible stop button blocks recovery even when the editor is empty');activeStop.remove();ready=true;
 richController.getChatGptPrompt=()=>({prompt:'hidden draft',systemHints:[]});assert.equal(emptyRoot().ok,false);
 richController.getChatGptPrompt=()=>({prompt:'',systemHints:['owner context']});assert.equal(emptyRoot().ok,false);
 richController.getChatGptPrompt=()=>({prompt:'',systemHints:[]});

@@ -161,7 +161,8 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
       const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused'||
-        record?.phase==='blocked'&&!record.operation&&record.reason==='Восстановление запроса завершилось ошибкой';
+        record?.phase==='blocked'&&!record.operation&&
+        ['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(record.reason);
       for(const input of Object.values(fields))input.disabled=!editable;
       const restorable=!record&&composer?.phase==='intent'&&Boolean(policy.canonical(route));
       buttons.restore.hidden=!restorable;
@@ -186,7 +187,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record.operation&&['blocked','stopped'].includes(record.phase))message+=record.operation.status==='reserved'
           ?' · Message was not sent. Stop Goal before starting again.'
           :' · Previous send is unconfirmed. Review the activity log before a new Goal.';
-        if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
+        if(record.phase==='blocked'&&!paused)message+=' · Review the activity log before continuing.';
       }
       if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
       if(composer?.phase==='intent')message='Confirmation pending. Your objective is saved. Background verification continues without resending your message.';

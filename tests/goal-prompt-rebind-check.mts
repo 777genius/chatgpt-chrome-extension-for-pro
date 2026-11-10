@@ -67,3 +67,12 @@ console.log('Goal prompt renumbering: exact confirmed wire payload + unique requ
  }
 }
 console.log('Manual Goal rebind: exact native message, request ownership, later renumbering and negative fences passed.');
+{
+ const events=[{kind:'request.started',operationId:'retry',tabId:7,sourceUrl:url,requestId:'request',eventAt:1000000,sequence:1},
+  {kind:'send.dispatched',operationId:'retry',tabId:7,sourceUrl:url,text:'exact native payload',sequence:2},
+  {kind:'completion.bound',tabId:7,sourceUrl:url,promptKey:oldPromptKey,attemptId:'1000000',sequence:3},
+  {kind:'retry.confirmed',operationId:'retry',tabId:7,sourceUrl:url,sequence:4}];
+ assert.equal((await fixture({onlyEvents:events,native:{turnStatus:'complete'}})).completions,1);
+ for(const modified of [events.filter(e=>e.kind!=='retry.confirmed'),events.filter(e=>e.kind!=='completion.bound'),[...events,{...events[0],sequence:5,requestId:'new'}]])
+  assert.equal((await fixture({onlyEvents:modified})).rebinds,0);
+}

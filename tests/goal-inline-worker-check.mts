@@ -16,7 +16,7 @@ const other='https://chatgpt.com/c/inline-worker-other';
 const calls:{kind:string,value:any}[]=[];
 const tabReads:number[]=[];
 let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='';
-const context=createContext({URL,
+const context=createContext({URL,setTimeout,
   chrome:{runtime:{onMessage:{addListener:(value:Listener)=>{listener=value;}}},tabs:{
     get:async(id:number)=>{tabReads.push(id);return {id,url:currentUrl};},
     query:async()=>{activeQueries++;return [{id:99,url:other}];}
@@ -43,6 +43,8 @@ const call=(message:any,from=sender())=>new Promise<any>((resolve,reject)=>{
 });
 const request=(action:string,extra:Record<string,unknown>={})=>({type:'CHATGPT_GOAL_INLINE',action,url:source,...extra});
 
+// A stuck page inspection must not hold up the state shown by the switch.
+context.reconcileBlockedManualHandoff=()=>new Promise(()=>{});
 const read=await call(request('get',{tabId:99}));
 assert.equal(read.ok,true);
 assert.equal(read.tabId,7);

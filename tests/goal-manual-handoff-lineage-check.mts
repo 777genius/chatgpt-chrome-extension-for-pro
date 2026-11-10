@@ -29,4 +29,19 @@ for(const change of [
  (e:any[])=>{e[1].reason='Other failure';}
 ]) {const copy=structuredClone(rows);change(copy);assert.equal(trace(copy),null);}
 assert.equal(lineage.traceManualSuccessor(rows,8,a,'first'),null);
+const bridged=[
+ {kind:'request.started',sourceUrl:'https://chatgpt.com/',operationId:null,requestId:'initial',eventAt:500},
+ {kind:'tab.updated',changes:{url:a},operationId:null},...rows
+].map((e,i)=>({...e,tabId:7,sequence:i+1}));
+const explicit=(events:any[])=>lineage.traceExplicitManualBridge(events,7,{requestId:'initial',startedAt:500});
+const restored=explicit(bridged);assert.equal(restored.originUrl,a);assert.equal(restored.targetUrl,c);
+assert.equal(restored.handoffs[0].manualBridge,true);assert.equal(restored.handoffs[0].requestId,'manual');
+for(const mutate of [
+ (e:any[])=>e.splice(3,0,{kind:'send.dispatched',tabId:7,operationId:'first',sequence:3.5}),
+ (e:any[])=>e.push({kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'foreign',operationId:null,sequence:99}),
+ (e:any[])=>e.push({kind:'tab.updated',tabId:7,changes:{url:'https://chatgpt.com/c/unrelated'},sequence:99}),
+ (e:any[])=>{e[1].changes.url='https://chatgpt.com/c/unrelated';},
+ (e:any[])=>{e[4].operationId='other';}
+]) {const copy=structuredClone(bridged);mutate(copy);assert.equal(explicit(copy),null);}
+assert.equal(lineage.traceExplicitManualBridge(bridged,7,{requestId:'initial',startedAt:501}),null);
 console.log('Manual handoff lineage: no-click failure, manual allocation, accepted successor and ambiguity fences passed.');

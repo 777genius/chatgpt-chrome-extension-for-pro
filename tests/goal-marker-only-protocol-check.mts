@@ -11,8 +11,15 @@ for(const text of [policy.initialText(record),policy.continuationText(record),po
  assert.match(text,/Не обсуждай сигнал завершения/);
  assert.match(text,/Ожидание само по себе не является блокировкой/);
  assert.match(text,/очередь CI, ожидание runner/);
- assert.match(text,/Сохраняй цель активной, используй штатное ожидание результата/);
+ assert.match(text,/Дождись результата штатным механизмом, затем проверь результат и продолжай работу end-to-end/);
  assert.match(text,/а простое ожидание результата не поможет/);
+ assert.match(text,/какое именно действие пользователя необходимо/);
+ assert.match(text,/Не выдавай GOAL_BLOCKED, если хоть один из этих пунктов не установлен/);
+ assert.match(text,/Ошибка проверки, уязвимая или неподтверждённая зависимость/);
+ assert.match(text,/продолжай другие независимые части цели/);
+ assert.match(text,/отсутствие функции в одном инструменте само по себе не доказывает блокировку/);
+ assert.match(text,/Не выдумывай доступные инструменты и не обходи запреты или права доступа/);
+ assert.match(text,/Не считай старое сообщение о блокировке или частичный результат доказательством/);
  assert.match(text,/Соблюдай заданные лимиты цели и ручную остановку пользователя/);
  assert.doesNotMatch(text,/Итог:|первым абзацем|1–3 коротких пункта/);
  assert.equal(text.match(/GOAL_COMPLETE/g)?.length,1,'completion protocol states the token once, without instructions to discuss it');

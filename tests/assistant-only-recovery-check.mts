@@ -19,6 +19,7 @@ function setup(){
  return {document,context,entry,voiceProps,controller,binding,inspect};
 }
 const valid=setup();assert.equal(valid.binding.kind,'assistant-only');assert.equal(valid.binding.assistantId,'assistant-uuid');
+delete valid.context.expectedBinding.userId;
 assert.equal(valid.inspect().idle,true,'a no-user background response may recover only with exact native identity and explicit native idle voice proof');
 assert.equal(valid.inspect('stop-recovery').idle,true,'already-idle recovery has no native Stop click to perform');
 const regular=setup();

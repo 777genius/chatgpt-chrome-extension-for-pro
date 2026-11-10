@@ -104,7 +104,7 @@ function showGoal(record) {
   } else goalUi.status.textContent='Enter an objective to start.';
   goalUi.start.disabled=!editable||!goalBinding||!!record?.operation||record?.phase==='blocked';
   goalUi.pause.disabled=goalBusy||!active||!goalBinding||record.phase==='paused'||record.phase==='handoff';
-  goalUi.resume.disabled=goalBusy||(record?.phase!=='paused'&&!(record?.phase==='blocked'&&record.reason==='Восстановление запроса завершилось ошибкой'))||!!record?.operation||!goalBinding;
+  goalUi.resume.disabled=goalBusy||(record?.phase!=='paused'&&!(record?.phase==='blocked'&&['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(record.reason)))||!!record?.operation||!goalBinding;
   goalUi.stop.disabled=goalBusy||(!active&&record?.phase!=='blocked')||!goalBinding;
 }
 async function goalAction(action) {

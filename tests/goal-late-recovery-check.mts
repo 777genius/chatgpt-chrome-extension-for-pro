@@ -123,3 +123,17 @@ console.log('Late Goal recovery: atomic original+all supplements, original limit
  assert.equal((await f.recover()).pending,true,'incomplete journal evidence cannot authorize Goal adoption');
  assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.messages.length,0);
 }
+{
+ const f=await fixture();f.requests[2].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:f.users[2].userText});
+ const r=await f.recover(),g=f.data['chatgpt-goal:'+url];
+ assert.equal(r.ok,true);assert.equal(g.expectedPromptKey,f.users[2].promptKey);
+ assert.deepEqual(g.supplements.map((item:V)=>item.text),['First clarification']);
+ assert.equal(f.messages.length,0);
+}
+{
+ const f=await fixture();f.requests[2].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:'wrong'});
+ assert.equal((await f.recover()).pending,true);
+ assert.equal(f.data['chatgpt-goal:'+url],undefined);
+}

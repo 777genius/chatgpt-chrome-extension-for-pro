@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
+type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;reason?:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
 type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
@@ -532,3 +532,12 @@ console.log('Inline Goal native arming, explicit intent, bounded confirmation, d
  const calls=f.calls.length;await f.advance(30*60000);assert.equal(f.calls.length,calls);assert.equal(f.composerState()!.phase,'disabled');f.instance.dispose();
 }
 console.log('Lag-tolerant Goal confirmation: 30-minute original window, sparse single timer, pending-not-failure, late proof and explicit cancellation passed.');
+{
+ const f=fixture();await tick();
+ f.setRecord({...goal(chat,'blocked'),reason:'Модель ответила точным маркером GOAL_BLOCKED'});
+ await f.instance.refresh();f.details().click();
+ assert.equal(f.action('resume').hidden,false);
+ assert.equal(f.action('resume').disabled,false);
+ f.click(f.action('resume'));await tick();assert.equal(f.calls.at(-1)!.action,'resume');
+ f.instance.dispose();
+}

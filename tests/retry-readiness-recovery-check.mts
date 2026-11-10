@@ -6,15 +6,17 @@ const code=source.slice(source.indexOf('const retryReadinessRecoveries=new Map()
 const url='https://chatgpt.com/c/retry-readiness-fixture',promptKey='/c/retry-readiness-fixture|user-1',attemptId='1000000';
 const baseState={reason:'native-not-ready',blocked:true,blockedAttemptId:attemptId,lastAttemptId:attemptId,lastPromptKey:promptKey,failures:[999999],recentErrors:[{at:999999}],sameErrorCount:1};
 async function fixture(extra:any={}) {
- let state:any={...structuredClone(baseState),...extra.state},writes=0,calls=0,goalCalls=0;
- const events:any[]=[{kind:'retry.planned',operationId:'op',sourceUrl:url,tabId:7,retryUserId:'user',promptKey,attemptId,requestId:'request',recordedAt:1000100},
+ let state:any={...structuredClone(baseState),...extra.state},writes=0,calls=0,goalCalls=0,goalPrompt='';
+ const events:any[]=[...(extra.rebound?[{kind:'request.started',operationId:'handoff',tabId:7,requestId:'request',eventAt:1000000,recordedAt:1000000},{kind:'send.dispatched',operationId:'handoff',tabId:7,text:'Synthetic handoff'}]:[]),{kind:'retry.planned',operationId:'op',sourceUrl:url,tabId:7,retryUserId:'user',promptKey:extra.rebound?'/c/retry-readiness-fixture':promptKey,attemptId,requestId:'request',recordedAt:1000100},
   ...(extra.cleanupOnly?[]:[{kind:'retry.send_intent',operationId:'op'},{kind:'send.authorized',operationId:'op'}]),
   ...(extra.noRefusal?[]:[{kind:'send.not_clicked',operationId:'op'}]),
   {kind:extra.cleanupOnly?'draft.restore_failed':'retry.failed',sourceUrl:url,tabId:7,operationId:'op',attemptId,error:'native-not-ready',clicked:extra.cleanupOnly?undefined:extra.clicked??false},
   {kind:'retry.finished',operationId:'op',clicked:false},...(extra.events||[])];
- const native={ok:true,isLatest:true,isReadOnly:false,hasError:true,userId:'user',promptKey,lastUserSentAtMs:999990,...extra.native};
+ events.forEach((e,i)=>e.sequence=i+1);
+ const native={ok:true,isLatest:true,isReadOnly:false,hasError:true,userId:'user',promptKey,lastUserSentAtMs:999990,...(extra.rebound?{generating:false,userText:'Synthetic handoff'}:{}),...extra.native};
  const appendJournal=async(e:any)=>{writes++;state={...state,blocked:false,preparationRecovered:true};events.push(e);};
- const chrome={tabs:{get:async()=>({url:extra.url||url,status:extra.status||'complete'})},scripting:{executeScript:async(o:any)=>{
+ const handoff={id:'handoff',stage:'sent',targetUrl:url,acceptance:{targetUrl:url,messageId:'user'}};
+ const chrome={storage:{local:{get:async()=>({handoff:extra.rebound?{...handoff,...extra.handoff}:undefined})}},tabs:{get:async()=>({url:extra.url||url,status:extra.status||'complete'})},scripting:{executeScript:async(o:any)=>{
   calls++;
   if(o.func?.name==='restoreNoClickAttemptBinding')return [{result:extra.bindingRace!==true}];
   if(o.func===inspectCompletedTurn)return [{result:native}];
@@ -23,13 +25,21 @@ async function fixture(extra:any={}) {
   return [{result:extra.runtimeEmpty?{}:{attemptId:extra.runtimeAttempt||attemptId,requestId:'request'}}];
  }}};
  function inspectCompletedTurn(){}function inspectChatError(){}function controlChatComposer(){}
- const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn',
+ const identity=source.slice(source.indexOf('function proveHandoffRetryIdentity('),source.indexOf('const retryReadinessRecoveries='));
+ const prove=new Function(identity+';return proveHandoffRetryIdentity;')();
+ const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn','handoffKey','proveHandoffRetryIdentity',
   code+';return recoverNoClickRetry;')(
-  async()=>structuredClone(state),async()=>extra.draftRecord|| (extra.draft?{draft:'owner'}:null),async()=>({ok:true,storageError:'',events}),chrome,
-  {get:async()=>extra.goal||null,retry:async()=>{goalCalls++;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url,promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false}),async()=>native);
- const result=await fn(7,url);return {result,writes,calls,goalCalls,fn};
+  async()=>structuredClone(state),async()=>extra.draftRecord|| (extra.draft?{draft:'owner'}:null),async()=>({ok:true,storageError:'',meta:{sequence:events.length},events}),chrome,
+  {get:async()=>extra.goal||null,retry:async(e:any)=>{goalCalls++;goalPrompt=e.promptKey;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url:extra.rebound?'https://chatgpt.com/':url,promptKey:extra.rebound?'':promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false}),async()=>native,()=> 'handoff',prove);
+ const result=await fn(7,url);return {result,writes,calls,goalCalls,goalPrompt,fn};
 }
 const safe=await fixture();assert.equal(safe.writes,1);assert.equal(safe.result.blocked,false);
+const rebound=await fixture({rebound:true,runtimeEmpty:true,deliveryTime:999990,goal:{phase:'waiting',expectedPromptKey:null,deadlineAt:Date.now()+60000}});
+assert.equal(rebound.writes,1,'accepted handoff, failed root request and current message restore the no-click retry');
+assert.equal(rebound.result.blocked,false);
+assert.equal(rebound.goalPrompt,promptKey,'Goal receives the confirmed rebound prompt key');
+for(const extra of [{handoff:{stage:'awaiting-confirmation'}},{native:{userId:'other'}},{noTransportFailure:true},{deliveryTime:999980},{goal:{phase:'paused',deadlineAt:Date.now()+60000}}])
+ assert.equal((await fixture({rebound:true,runtimeEmpty:true,deliveryTime:999990,goal:{phase:'waiting',expectedPromptKey:null,deadlineAt:Date.now()+60000},...extra})).writes,0);
 await safe.fn(7,url);assert.equal(safe.result.preparationRecovered,true);
 for(const extra of [{clicked:true},{noRefusal:true},{draft:true},{empty:false},{status:'unloaded'},
  {state:{reason:'budget exhausted'}},{state:{terminal:true}},{state:{remainingRetries:0}},{state:{preparationRecoveries:2}},

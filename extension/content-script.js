@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.82';
+  const SCRIPT_VERSION = '1.8.119';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -20,6 +20,7 @@
   let completionRecoveryLastProbeAt = -Infinity;
   let completionRecoveryInFlight = false;
   let handoffReadinessTimer = null;
+  let historyRetryTimer = null;
   let retryReadinessTimer = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
@@ -60,6 +61,7 @@
     deferredTaskObserver?.dispose();
     if(completionRecoveryTimer!==null)clearTimeout(completionRecoveryTimer);
     if(goalRecoveryTimer!==null)clearTimeout(goalRecoveryTimer);goalRecoveryTimer=null;
+    if(historyRetryTimer!==null)clearTimeout(historyRetryTimer);
     if(handoffReadinessTimer!==null)clearTimeout(handoffReadinessTimer);
     handoffReadinessTimer=null;
     if(retryReadinessTimer!==null)clearTimeout(retryReadinessTimer);
@@ -422,7 +424,7 @@
       const result=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url});
       const record=result?.ok&&result.record;
       if(!record||operationId&&record.operationId!==operationId||localDraft&&record.draft!==localDraft)return;
-      const retryText=ChatGPTGoalPolicy.retryMessage(record.retryText);
+      const retryText=record.retryText||ChatGPTGoalPolicy.DEFAULT_RETRY_MESSAGE;
       if(startup&&current!==''&&current!==retryText)return;
       // A saved backup alone does not prove automation changed the editor.
       // Unknown sends stay parked even when their retry text is still visible.
@@ -485,7 +487,7 @@
     const sameChat=()=>runtimeAvailable()&&ChatGPTHandoffTitle.chatUrl(location.href)===url;
     const status=(value,extra={})=>runtimeMessage({type:'CHATGPT_GOAL_STATUS',url,goalId:id,
       operationId,status:value,...extra});
-    let editor=null,inserted=false,clicked=false,intentRequested=false;
+    let editor=null,inserted=false,clicked=false,intentRequested=false,savedDraft=null,confirmed=false;
     try {
       if(!sameChat()||typeof text!=='string'||!text||!id||!operationId)throw Error('Goal изменил чат или операцию');
       let grant=await runtimeMessage({type:'CHATGPT_GOAL_CHECK',url,goalId:id,operationId});
@@ -495,13 +497,22 @@
           currentErrors().length)throw Error('Чат занят или другой механизм восстановления активен');
       editor=composer();
       if(!editor||!isElementVisible(editor))throw Error('Поле сообщения недоступно');
-      if(composerHasAttachments(editor)||rawEditorText(editor)!=='')
+      if(composerHasAttachments(editor))
         throw Error('Черновик или вложение пользователя имеют приоритет; Goal остановлен без изменения ввода');
+      savedDraft=rawEditorText(editor);
+      if(savedDraft) {
+        await audit('draft.saved',{operationId,sourceUrl:url,draft:savedDraft,draftChars:savedDraft.length,text},true);
+        if(!sameChat()||composer()!==editor||rawEditorText(editor)!==savedDraft||composerHasAttachments(editor))
+          throw Error('Черновик изменился во время сохранения');
+        replacingDraft=true;
+        pendingDrafts.set(location.pathname,savedDraft);
+      }
       const baselineKey=latestPromptSnapshot()?.promptKey||'';
       const baselineAttempt=globalThis.__chatgptNotifierAttemptId||'';
       if(!sameChat()||composer()!==editor||isGenerating())throw Error('Чат изменён до подготовки');
       replaceEditorText(editor,text);
       inserted=true;
+      if(savedDraft)await audit('draft.replaced',{operationId,sourceUrl:url},true);
       // Native paragraph normalization is asynchronous after insertText. Let
       // it settle before exact comparison; any concurrent user edit still
       // fails the unchanged checks below and is never overwritten.
@@ -535,7 +546,7 @@
             composer()===editor&&rawEditorText(editor)==='') {
           const result=await status('confirmed',{requestId:globalThis.__chatgptNotifierRequestId||null,
             startedAt:globalThis.__chatgptNotifierRequestStartedAt});
-          if(result?.ok)return;
+          if(result?.ok){confirmed=true;return;}
           if(result?.pending!==true)throw Error(result?.error||'Goal не подтвердил новое сообщение');
         }
         await sleepUntilNextCheck();
@@ -550,9 +561,15 @@
         try {replaceEditorText(editor,'');}catch{}
       }
       void audit('goal.dispatch_failed',{operationId,sourceUrl:url,reason});
-      if(!clicked&&!intentRequested&&['Чат занят или другой механизм восстановления активен','Поле сообщения недоступно'].includes(error?.message)&&sameChat())
+      if(!clicked&&!intentRequested&&['Чат занят или другой механизм восстановления активен','Поле сообщения недоступно',
+        'Черновик или вложение пользователя имеют приоритет; Goal остановлен без изменения ввода'].includes(error?.message)&&sameChat())
         void recoverGoalState();
     } finally {
+      if(savedDraft)replacingDraft=false;
+      if(savedDraft&&runtimeAvailable()&&sameChat()) {
+        if(!clicked)await audit('draft.not_clicked',{operationId,sourceUrl:url},true).catch(()=>{});
+        if(!clicked||confirmed)await restoreDraft(operationId).catch(()=>{});
+      }
       goalDispatchBusy=false;
     }
   }
@@ -592,20 +609,41 @@
           if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
           const slider = await waitHandoff(() => Array.from(document.querySelectorAll('[data-reasoning-slider="true"]')).find(isElementVisible));
           if (!runtimeAvailable() || location.href !== url) throw new Error('Открыт другой чат');
+          const before=selection();
+          // React can remount the slider in response to the keypress. Read the
+          // currently visible control rather than a detached pre-keypress node.
+          const position=()=>Array.from(document.querySelectorAll('[data-reasoning-slider="true"]'))
+            .find(isElementVisible)?.querySelector('[role="slider"]')?.getAttribute('aria-valuenow') ?? null;
+          const beforePosition=position();
           slider.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,bubbles:true,cancelable:true}));
           await sleepUntilNextCheck();
-          current=await reasoningMode();
+          // React may replace the trigger while the selection settles. Do not
+          // restart the left/right search after a transient read: doing so can
+          // oscillate forever between two effort levels.
+          current=await waitHandoff(async()=>{
+            try {return await reasoningMode();}
+            catch(error) {if(error?.message==='Нативный режим модели изменился или недоступен')return null;throw error;}
+          },240000,'reasoning');
+          // Native slider and composer state may commit at different times.
+          // If the slider moved, do not interpret the still-old composer value
+          // as an endpoint and reverse direction while React is catching up.
+          if (selection()===before && beforePosition!==null && position()!==null && position()!==beforePosition) {
+            current=await waitHandoff(async()=>{
+              try {const next=await reasoningMode();return JSON.stringify([next.value,next.model])!==before?next:null;}
+              catch(error) {if(error?.message==='Нативный режим модели изменился или недоступен')return null;throw error;}
+            },240000,'reasoning');
+          }
           if (!runtimeAvailable() || location.href !== url || !current.value || !current.model) throw new Error('Режим рассуждения недоступен');
         };
-        for (let i = 0; i < 16 && !matches(); i += 1) {
-          const before = selection();
-          await step('ArrowLeft');
-          if (selection() === before) break;
-        }
-        for (let i = 0; i < 16 && !matches(); i += 1) {
-          const before = selection();
-          await step('ArrowRight');
-          if (selection() === before) break;
+        const rank={medium:0,high:1,max:2};
+        const direct=first.model===expectedModel&&Object.hasOwn(rank,first.value)&&Object.hasOwn(rank,expected)
+          ? (rank[expected]>rank[first.value]?'ArrowRight':'ArrowLeft') : 'ArrowLeft';
+        for (const direction of [direct,direct==='ArrowLeft'?'ArrowRight':'ArrowLeft']) {
+          for (let i = 0; i < 16 && !matches(); i += 1) {
+            const before = selection();
+            await step(direction);
+            if (selection() === before) break;
+          }
         }
       } finally {
         const menu = Array.from(document.querySelectorAll('[role="menu"]')).find(isElementVisible);
@@ -1057,7 +1095,18 @@
       }
       await updateHandoff('preparing', { targetUrl: location.href });
       verifyPreparation();
-      await ensureSavedReasoning(record.id, record.reasoningEffort, record.reasoningModel);
+      await waitHandoff(async () => {
+        verifyPreparation();
+        try {
+          await ensureSavedReasoning(record.id, record.reasoningEffort, record.reasoningModel);
+        } catch (error) {
+          verifyPreparation();
+          if (error?.message === 'Нативный режим модели изменился или недоступен') return false;
+          throw error;
+        }
+        verifyPreparation();
+        return true;
+      }, 300000, 'reasoning');
       verifyPreparation();
       if (record.asFile) {
         const input = Array.from(pageRoot().querySelectorAll('input[type="file"]')).find((node) => !node.accept || /text|\.txt/.test(node.accept));
@@ -1227,6 +1276,32 @@
       (latestPromptSnapshot()?.promptKey || location.pathname) === sourcePromptKey &&
       (globalThis.__chatgptNotifierAttemptId || '') === sourceAttempt &&
       (globalThis.__chatgptNotifierRequestId || null) === sourceRequest;
+    if (isGenerating()) {
+      // A transport error may precede the end of the native response. Keep the
+      // original Goal untouched and never navigate based on that error alone.
+      const unavailableGoal=record=>record&&(record.pauseRequested||record.stopRequested||record.manualPending||
+        ['paused','stopped','completed','moved'].includes(record.phase)||
+        record.phase==='blocked'&&record.reason!=='Восстановление запроса завершилось ошибкой');
+      const before=await runtimeMessage({type:'CHATGPT_GOAL_INLINE',action:'get',url:sourceUrl});
+      if(!before?.ok||!sameSource()||unavailableGoal(before.record))
+        throw Error('Цель или исходный чат изменились; переход отменён');
+      while(runtimeAvailable()&&sameSource()&&composerActivity()!=='idle') {
+        const waited=await runtimeMessage({type:'CHATGPT_WAIT',delayMs:5000});
+        if(!waited?.ok)throw Error('Ожидание расширения недоступно');
+      }
+      if(!runtimeAvailable()||!sameSource())throw Error('Исходный чат или запрос изменился во время ожидания');
+      const after=await runtimeMessage({type:'CHATGPT_GOAL_INLINE',action:'get',url:sourceUrl});
+      if(!after?.ok||!sameSource()||before.record?.id!==after.record?.id||
+          before.record?.phase!==after.record?.phase||unavailableGoal(after.record))
+        throw Error('Цель или исходный чат изменились; переход отменён');
+      // Re-read history and the original action after the native response ends.
+      const refreshed=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
+        alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),
+        captureHistory:true,captureRetryHistory:Boolean(error.escalated)});
+      if(!sameSource()||!refreshed?.ok||refreshed.action!==(error.escalated?'retry':'new-chat'))
+        throw Error('Ошибка или исходный чат изменились во время ожидания');
+      info={...refreshed,action:'new-chat'};
+    }
     // A terminal banner can render before the native history finishes loading.
     // Wait only in this unchanged source; never retry a click or invent answers.
     for (let checks = 0; info?.incomplete && checks < 80; checks += 1) {
@@ -1291,6 +1366,22 @@
         alertIndex: Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert), captureHistory: true });
     } catch {}
     if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId || (globalThis.__chatgptNotifierRequestId||null)!==requestId) return;
+    // Virtualized turns may mount while the native error is being inspected.
+    // Never reserve a retry against the old route-only key: rescan the same
+    // banner with the now-rendered prompt, without spending a retry or sending.
+    if ((latestPromptSnapshot()?.promptKey || sourcePath) !== promptKey) {
+      recoveryFirstSeen.delete(alert);
+      visibleErrors.delete(error.fingerprint);
+      scheduleErrorCheck(0);
+      return;
+    }
+    if (error.recovery && promptKey === sourcePath && !info?.recoveryBinding) {
+      // A bare route is not a user-message identity. Keep observing until a
+      // native user or assistant-only turn can be bound; do not guess idle.
+      visibleErrors.delete(error.fingerprint);
+      scheduleErrorCheck(5000);
+      return;
+    }
     // Re-observing the same failed request cannot renew its retry budget.
     // A native terminal action still uses the separately guarded handoff.
     if(info?.action!=='new-chat'&&!attemptId&&retryState().restoredPromptKey===promptKey){
@@ -1299,6 +1390,12 @@
     }
     await audit('error.detected',{error:error.response,action:info?.action || 'unknown',promptKey,durationMs:error.durationMs,attemptId,recoveryBinding:info?.recoveryBinding||null});
     if (location.pathname !== sourcePath || (globalThis.__chatgptNotifierAttemptId || '') !== attemptId || (globalThis.__chatgptNotifierRequestId||null)!==requestId) return;
+    if ((latestPromptSnapshot()?.promptKey || sourcePath) !== promptKey) {
+      recoveryFirstSeen.delete(alert);
+      visibleErrors.delete(error.fingerprint);
+      scheduleErrorCheck(0);
+      return;
+    }
     if(info?.ok&&info.action==='retry'&&retryState().repeatedError===normalize(error.response)&&retryState().sameErrorCount>=3&&
         (!retryState().blocked||retryState().reason==='Дополнительные автоповторы исчерпаны'||
           retryState().reason==='Автопродолжение остановлено: 4 автоповтора за 2 минуты')) {
@@ -1326,7 +1423,27 @@
     notifyError(error, info?.action === 'new-chat' ? 'Требуется новый чат' : 'Автоповтор отключён: неизвестный тип ошибки');
     if (info?.ok && info.action === 'new-chat') {
       try { await beginHandoff(error, info, alert); }
-      catch (cause) { notifyOperationWarning(error, String(cause.message || cause)); }
+      catch (cause) {
+        notifyOperationWarning(error, String(cause.message || cause));
+        if(cause?.message==='Не удалось получить полные последние сообщения; исходный чат сохранён'&&historyRetryTimer===null) {
+          const recheck=async()=>{
+            historyRetryTimer=null;
+            if(!runtimeAvailable()||location.pathname!==sourcePath||!alert.isConnected||
+                (globalThis.__chatgptNotifierAttemptId||'')!==attemptId||
+                (globalThis.__chatgptNotifierRequestId||null)!==requestId)return;
+            const next=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
+              alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
+            if(!runtimeAvailable()||location.pathname!==sourcePath||!alert.isConnected||next?.action!=='new-chat')return;
+            if(next.incomplete||!next.messages?.length) {
+              historyRetryTimer=setTimeout(()=>void recheck(),30000);
+              return;
+            }
+            try {await beginHandoff(error,next,alert);}
+            catch(failure) {notifyOperationWarning(error,String(failure.message||failure));}
+          };
+          historyRetryTimer=setTimeout(()=>void recheck(),30000);
+        }
+      }
     }
   }
 
@@ -1826,6 +1943,12 @@
     globalThis.__chatgptNotifierRequestStartedAt=record.startedAt;
     globalThis.__chatgptNotifierRequestId=record.requestId||null;
     globalThis.__chatgptNotifierRequestReceipt=record.receipt||null;
+    // The request may have started before this content script was restored.
+    // An unresolved checkpoint keeps the loading indicator until the exact
+    // request completes or fails; it does not authorize a send.
+    if(record.requestId&&record.httpCompleted!==true&&!record.requestFailedAt)
+      activeStatusRequest={path,startedAt:record.startedAt};
+    void statusIndicator?.refresh();
     armForCurrentPrompt({restored:record});
     void audit('completion.checkpoint_restored',{promptKey:record.promptKey,startedAt:record.startedAt,bound:Boolean(record.promptKey)});
     return true;
@@ -1905,7 +2028,7 @@
         !isGenerating()&&!currentErrors().length&&!replacingDraft&&
         !pendingDrafts.has(location.pathname)&&
         !handoffBusy&&!['navigating','preparing','sending','awaiting-confirmation'].includes(handoffRecord?.stage)&&
-        !!editor&&isElementVisible(editor)&&rawEditorText(editor)===''&&!composerHasAttachments(editor);
+        !!editor&&isElementVisible(editor)&&!composerHasAttachments(editor);
       sendResponse?.({ok:true,idle,reason:idle?'':'Чат занят, не завершён ручной ответ или имеется черновик/вложение'});
       return;
     }

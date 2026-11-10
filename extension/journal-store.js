@@ -45,10 +45,10 @@ function reduceRetryDraft(drafts,event,manualStartedAt) {
   if(event.kind==='draft.replaced')return {...drafts,[url]:{...current,replacementProven:true}};
   if(event.kind==='recovery.stop_result'&&event.stopped===true)return {...drafts,[url]:{...current,stopProven:true}};
   let phase=current.phase;
-  if(event.kind==='retry.send_intent')phase='intent';
+  if(event.kind==='retry.send_intent'||event.kind==='goal.send_intent')phase='intent';
   if(['send.authorized','send.dispatched','draft.restore_deferred'].includes(event.kind))phase='unknown';
-  if(event.kind==='retry.confirmed')phase='confirmed';
-  if(event.kind==='send.not_clicked'||event.kind==='retry.cancelled'||event.kind==='retry.failed'&&event.clicked===false)phase='not-clicked';
+  if(event.kind==='retry.confirmed'||event.kind==='goal.confirmed')phase='confirmed';
+  if(event.kind==='draft.not_clicked'||event.kind==='send.not_clicked'||event.kind==='retry.cancelled'||event.kind==='retry.failed'&&event.clicked===false)phase='not-clicked';
   if(event.kind==='retry.manual_reset')phase='superseded';
   if(event.kind==='retry.preparation_superseded'&&!retryAttemptAtOrAfter(current.attemptId,event.startedAt))phase='superseded';
   if(event.kind==='draft.restored')phase='restored';
@@ -398,7 +398,11 @@ function appendJournal(event, tab = {}) {
     const resetRetry=event.kind==='retry.manual_reset'&&currentSend?.kind==='retry.send_intent';
     // An unknown Goal click remains an active, consumed fence. Neither a
     // timeout nor clicking Stop gives another automatic sender a new grant.
-    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&event.kind==='goal.confirmed';
+    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&
+      (event.kind==='goal.confirmed'||event.kind==='goal.unsent_release'&&currentSend.consumed!==true&&
+        currentSend.goalId===event.goalId&&currentSend.chatUrl===retryDraftUrl(sourceUrl));
+    if(event.kind==='goal.unsent_release'&&!clearsGoal)
+      throw Object.assign(new Error('Unspent Goal grant changed'),{journalPolicy:true});
     const clearsRetry=(exactGrant||resetRetry)&&currentSend?.kind==='retry.send_intent'&&
       ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
     const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&

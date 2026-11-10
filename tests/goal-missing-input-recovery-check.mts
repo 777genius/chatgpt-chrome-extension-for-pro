@@ -106,6 +106,27 @@ for(const broken of ['foreign-source','wrong-operation','missing-request','manua
 }
 console.log('Goal restoration across handoff: exact operation lineage, explicit legacy/exact-body consent, original budgets, manual successor supersession and unknown-send fences passed.');
 {
+ const f=await fixture(),source='https://chatgpt.com/c/source-fixture',manual='https://chatgpt.com/c/manual-fixture';
+ f.events[1].changes.url=source;f.events[1].sourceUrl=source;
+ f.events.splice(2,0,
+  {kind:'handoff.navigating',tabId:7,sourceUrl:source,operationId:'failed-handoff',text:'Retained original context'},
+  {kind:'handoff.failed',tabId:7,sourceUrl:source,operationId:'failed-handoff',reason:'Не удалось дождаться готовности нового чата'},
+  {kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'manual-bridge',eventAt:2100},
+  {kind:'tab.updated',tabId:7,changes:{url:manual}},
+  {kind:'handoff.navigating',tabId:7,sourceUrl:manual,operationId:'handoff-id',text:'Retained manual successor context'},
+  {kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'handoff-request',eventAt:3000,operationId:'handoff-id'},
+  {kind:'tab.updated',tabId:7,changes:{url},operationId:'handoff-id'},
+  {kind:'handoff.sent',tabId:7,sourceUrl:manual,targetUrl:url,operationId:'handoff-id'});
+ f.events.forEach((e:V,i:number)=>{e.sequence=i+1;});
+ f.data['handoff:7']={id:'handoff-id',stage:'sent',sourceUrl:manual,targetUrl:url,
+  acceptance:{messageId:'accepted-handoff-user',targetUrl:url},text:'Retained manual successor context'};
+ assert.equal((await f.recover()).pending,true,'manual bridge cannot create automatic consent');
+ assert.equal((await f.recover(true)).ok,true,'explicit request restores through a proven failed handoff and manual bridge');
+ const g=f.data['chatgpt-goal:'+url];assert.equal(g.goal,'Exact original objective');assert.equal(g.originUrl,source);
+ assert.equal(g.sourceContexts.length,2);assert.equal(g.supplements.length,2);
+ assert.equal(f.dispatched.length,0,'an active response is not interrupted or resent');
+}
+{
  const f=await fixture(true);const origin=transfer(f,'sent');
  await f.store.composerObserveOrigin({tabId:7,armId:'root-arm',url:origin,requestId:'root-request',startedAt:1100,userId:'original-native-user',userText:'Exact original objective',userSentAtMs:1100,firstMessageVerified:true,nativeVerified:true});
  f.events.splice(5);f.events.push({kind:'send.dispatched',tabId:7,operationId:'handoff-id',sourceUrl:'https://chatgpt.com/',text:'Exact submitted handoff payload'});
