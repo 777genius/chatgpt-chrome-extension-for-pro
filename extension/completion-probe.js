@@ -210,7 +210,10 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
           const style=document.defaultView?.getComputedStyle?.(originals[index]);
           if(style?.display==='none'||['hidden','collapse'].includes(style?.visibility))clones[index].remove();
         }
-        copy.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],[hidden],.ProseMirror-widget,[data-composer-attachments],[data-testid*="attachment"],h4.sr-only[data-conversation-role="user"]').forEach(node=>node.remove());
+        // ChatGPT can mark actual message links aria-hidden while retaining
+        // their text visually. Keep those labels for the subsequent exact
+        // message comparison, which independently verifies every link target.
+        copy.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"]:not(a[href]),[hidden],.ProseMirror-widget,[data-composer-attachments],[data-testid*="attachment"],h4.sr-only[data-conversation-role="user"]').forEach(node=>node.remove());
         function text(node) {
           if(node.nodeType===3)return node.textContent||'';
           if(node.nodeType!==1)return '';
