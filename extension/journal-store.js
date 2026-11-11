@@ -84,7 +84,7 @@ function reduceRetrySummary(retryByChat, event) {
       failures:(previous.failures||[]).filter(at=>at>=manualStartedAt),
       recentErrors:(previous.recentErrors||[]).filter(item=>item.at>=manualStartedAt)};
     if(!keepBudget){delete state.remainingRetries;delete state.lastBudgetOperation;delete state.budgetGrantedAt;}
-    if(!keepBlock)delete state.blockedAttemptId;
+    if(!keepBlock){delete state.blockedAttemptId;delete state.reasonCode;}
     if(!keepTerminal)delete state.terminalAttemptId;
     return {...retryByChat,[chatId]:state};
   }
@@ -107,6 +107,13 @@ function reduceRetrySummary(retryByChat, event) {
     return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',
       preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1,
       preparationDraftOperationId:event.preparationDraftOperationId||null,preparationDraftSequence:event.preparationDraftSequence||null}};
+  }
+  if(event.kind==='retry.late_recovered') {
+    const state=retryByChat[chatId];
+    if(!state?.blocked||state.terminal||state.blockedAttemptId!==event.attemptId||
+        state.lastPromptKey!==event.promptKey||state.remainingRetries===0)return retryByChat;
+    return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',reasonCode:'',lastPromptKey:'',lastAttemptId:'',
+      preparationRecovered:true}};
   }
   if(event.kind==='retry.planned' && retryByChat[chatId]) {
     const state=retryByChat[chatId];
@@ -148,6 +155,7 @@ function reduceRetrySummary(retryByChat, event) {
     state.blocked = true;
     state.blockedAttemptId=String(event.attemptId||previous.lastAttemptId||'');
     state.reason = String(event.reason || event.error || previous.reason || 'Автопродолжение остановлено');
+    if(event.kind==='retry.failed')state.reasonCode=event.errorCode||'';
     state.terminal = Boolean(previous.terminal || event.terminal === true);
     if(event.terminal===true)state.terminalAttemptId=state.blockedAttemptId;
   }
@@ -273,11 +281,22 @@ function appendJournal(event, tab = {}) {
     // Recovery preflight and Goal writes have separate lifetimes. A user can
     // Pause/Stop after preparation or intent; consult the durable Goal again
     // at each grant boundary, before reserving or consuming a retry click.
-    if(retrySource&&(['retry.send_intent','retry.preparation_recovered'].includes(event.kind)||
+    if(retrySource&&(['retry.send_intent','retry.preparation_recovered','retry.late_recovered'].includes(event.kind)||
         event.kind==='send.authorized'&&active[tabId]?.kind==='retry.send_intent')) {
       const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
       if(goal&&(goal.stopRequested||goal.pauseRequested||['stopped','paused'].includes(goal.phase)))
         throw Object.assign(new Error('Цель остановлена или приостановлена; автоповтор отменён'),{journalPolicy:true});
+    }
+    if(event.kind==='retry.late_recovered') {
+      if(!Number.isInteger(event.expectedSequence)||meta.sequence!==event.expectedSequence)
+        throw Object.assign(new Error('Журнал изменился до восстановления'),{journalPolicy:true,code:'RETRY_LATE_RACE'});
+      const state=meta.retryByChat?.[journalChatId(retrySource)],goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
+      const prior=Object.values(retrySendClaims).filter(c=>c.operationId===operationId&&c.tabId===tabId&&c.sourceUrl===retrySource&&c.phase==='consumed');
+      if(!state?.blocked||state.terminal||state.remainingRetries===0||state.blockedAttemptId!==event.attemptId||
+          state.lastPromptKey!==event.promptKey||savedDraft||retryPreparingByChat[retrySource]||handoffSourceClaims[retrySource]||
+          Object.values(active).some(a=>a&&(a.chatUrl===retrySource||a.sourceUrl===retrySource))||prior.length!==1||
+          goal&&(goal.phase!=='waiting'||goal.expectedPromptKey!==event.promptKey||goal.operation||goal.manualPending||goal.stopRequested||goal.pauseRequested))
+        throw Object.assign(new Error('Проверенная отправка изменилась до восстановления'),{journalPolicy:true});
     }
     if(['retry.planned','retry.send_intent'].includes(event.kind)&&retrySource){
       // The Goal's persisted reservation wins over legacy retry planning.

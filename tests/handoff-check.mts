@@ -118,8 +118,11 @@ function probeCheck(){
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry');
  document.querySelector('aside')!.prepend(unknown);unknown.textContent='Unknown error';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry','Unknown with the native Retry action remains in the same chat');
+ unknown.textContent='Любая локализованная ошибка';
+ assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry','the native Retry action does not depend on banner wording');
+ unknown.textContent='Unknown error';
  fiber.memoizedProps.children.props.id='unknown';
- assert.equal(runInContext('inspectChatError(0,true).action',ctx),'retry','a native Unknown fallback without Start new chat retains its same-chat policy');unknown.remove();
+ assert.equal(runInContext('inspectChatError(0,true).action',ctx),'unknown','an unbound error without a native action is never classified by its wording');unknown.remove();
  fiber.memoizedProps.children.props.id='unknown';
  assert.equal(runInContext('inspectChatError(0,true).action',ctx),'unknown');
  const delivery=document.createElement('aside') as any;delivery.setAttribute('role','alert');delivery.className='text-danger';delivery.textContent='配信がタイムアウトしました';

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Goals, Notifications & Retries",
-  "version": "1.8.125",
+  "version": "1.8.126",
   "description": "ChatGPT completion alerts, guarded error retries, Goal continuations, and context handoffs when a chat reaches its limit.",
   "permissions": [
     "notifications",

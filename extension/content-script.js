@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.125';
+  const SCRIPT_VERSION = '1.8.126';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -829,13 +829,14 @@
         }
         await sleepUntilNextCheck();
       }
-      throw new Error('Не удалось подтвердить отправку');
+      throw Object.assign(new Error('Не удалось подтвердить отправку'),{code:'RETRY_CONFIRMATION_UNPROVEN'});
     } catch (cause) {
       if (cause.code==='RETRY_DUPLICATE') {
         await logRetry('retry.duplicate_suppressed',{operationId});
         return;
       }
-      await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:String(cause.message || cause)});
+      await logRetry('retry.failed',{operationId,clicked,confirmed,phase:readinessPhase,error:String(cause.message || cause),
+        ...(cause.code==='RETRY_CONFIRMATION_UNPROVEN'?{errorCode:cause.code}:{})});
       state.blocked = true;
       state.reason = `Автопродолжение остановлено: ${cause.message}`;
       notifyError(error, state.reason);

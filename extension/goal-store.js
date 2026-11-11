@@ -870,6 +870,7 @@
         const recoveredBlock=record?.phase==='blocked'&&!record.operation&&
           record.reason==='Восстановление запроса завершилось ошибкой'&&['retry.confirmed','retry.preparation_recovered'].includes(kind);
         if(!record||!['waiting','recovering','paused'].includes(record.phase)&&!recoveredBlock)return;
+        if(kind==='retry.confirmed'&&(record.stopRequested||record.pauseRequested||record.manualPending||record.operation||record.manualOverride||now()>=record.deadlineAt))return;
         // Journal delivery and Goal writes use different queues. Recheck the
         // request fence here, after serialization: an accepted old callback
         // may arrive after a manual send or a newly started Goal.

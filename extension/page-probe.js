@@ -1,5 +1,23 @@
 'use strict';
 
+// Read an endpoint already used by this page; never start or resume a stream.
+async function inspectObservedStreamStatus(expectedUrl) {
+  try {
+    if(location.origin+location.pathname!==expectedUrl)return {ok:false};
+    const id=location.pathname.match(/^\/c\/([a-z0-9-]+)$/)?.[1];
+    if(!id)return {ok:false};
+    const path='/backend-api/conversation/'+id+'/stream_status';
+    const observed=performance.getEntriesByType('resource').map(x=>x.name).findLast(value=>{
+      try {const u=new URL(value);return u.origin===location.origin&&u.pathname===path;}catch{return false;}
+    });
+    if(!observed)return {ok:false};
+    const response=await fetch(observed,{method:'GET',credentials:'same-origin',cache:'no-store',redirect:'error',signal:AbortSignal.timeout(10000)});
+    if(!response.ok)return {ok:false};
+    const value=await response.json();
+    return {ok:location.origin+location.pathname===expectedUrl&&value?.status==='COMPLETE'};
+  } catch {return {ok:false};}
+}
+
 // Serialized into ChatGPT's MAIN world by chrome.scripting. No closure state,
 // cookies, network requests, or translated-string matching.
 function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null, captureRetryHistory = false) {
@@ -60,13 +78,11 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         ['in_progress','complete'].includes(entry.turn?.status) && typeof entry.errorMessage==='string' &&
         entry.errorMessage.replace(/\s+/g,' ').trim()===visibleError && visibleError) inputDeliveryError=true;
   }
-  // The owner's recovery policy follows the rendered native action: an
-  // explicit Start new chat also transfers Unknown error through the existing
-  // history handoff. Without that action, its native fallback retries in place.
-  const unknownServerError=Boolean(fiberKey) && /^unknown error[.!]?$/i.test(visibleError);
+  // Follow the native action identity or a bound input-delivery state, not
+  // translated error wording. An ambiguous action stays unclassified.
   const recoverySurface = alert.matches('[role="status"]:has(.text-chatgpt-recovery)');
   const action = messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
-    : unknownServerError || messageIds.has('chatgptConversations.responseError.retry') ||
+    : messageIds.has('chatgptConversations.responseError.retry') ||
       recoverySurface || inputDeliveryError ? 'retry' : 'unknown';
   const nativeUsers=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='user-message');
   const nativeAssistant=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='assistant-message'&&typeof item.messageId==='string'&&item.messageId).at(-1);
