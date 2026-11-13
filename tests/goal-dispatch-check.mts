@@ -16,7 +16,7 @@ const dispatchFunctions=section('  async function sleepUntilNextCheck() {','  fu
 const url='https://chatgpt.com/c/goal-dispatch-fixture';
 const text='First synthetic goal paragraph.\n\nSecond synthetic paragraph.';
 const ownerEdit='  Owner edit\n\nKeep exact spacing  ';
-async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed'|'saved-draft'|'draft-after-send') {
+async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed'|'saved-draft'|'draft-after-send'|'slow-confirm') {
   const {document,window}=parseHTML('<html><body><main><article data-turn="user" data-testid="user-1">Seed fixture</article></main><form><div id="prompt-textarea" contenteditable="true"><p><br class="ProseMirror-trailingBreak"></p></div></form></body></html>');
   const editor=document.querySelector<HTMLElement>('#prompt-textarea')!;
   if(mode==='saved-draft')editor.textContent=ownerEdit;
@@ -73,7 +73,7 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapse
       }
       if(message.type==='CHATGPT_GOAL_STATUS') {
         statuses.push(structuredClone(message));events.push('status-'+message.status);
-        if(message.status==='confirmed'){assert.equal(message.requestId,'goal-network-request');assert.equal(message.startedAt,now);phase='waiting';}
+        if(message.status==='confirmed'){assert.equal(message.requestId,'goal-network-request');assert.equal(message.startedAt,context.__chatgptNotifierRequestStartedAt);if(mode==='slow-confirm'&&now-message.startedAt<20000)return {ok:false,pending:true};phase='waiting';}
         if(message.status==='blocked')phase='blocked';
         return {ok:true};
       }
@@ -133,6 +133,8 @@ console.log('Goal dispatch: transient paragraph normalization, strict native ver
 {const env=await fixture('collapsed');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed'],'collapsed sent UI does not cause another send or an unknown result');}
 
 {const env=await fixture('draft-after-send');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.editor.textContent,ownerEdit,'a new draft remains untouched while the worker confirms the sent request');assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed']);}
+
+{const env=await fixture('slow-confirm');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.statuses.some(status=>status.status==='blocked'),false,'slow native confirmation must not prematurely block a sent Goal');assert.ok(env.statuses.filter(status=>status.status==='confirmed').length>1);}
 
 {
  const f=await fixture('saved-draft');
