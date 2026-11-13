@@ -270,6 +270,7 @@ console.log('Goal/retry fences: confirmed manual supersession, stale callbacks, 
  let handoffs=0,probes=0;
  const context=createContext({location:{pathname:'/c/source'},__chatgptNotifierAttemptId:'old',__chatgptNotifierRequestId:'old-request',
   document:{querySelectorAll:()=>[]},ERROR_SELECTOR:'error',normalize:(v:string)=>v,
+  latestPromptSnapshot:()=>({promptKey:'/c/source|old'}),
   retryState:()=>({repeatedError:'failure',sameErrorCount:3,blocked:false}),audit:async()=>{},
   beginHandoff:async()=>{handoffs++;},notifyOperationWarning:()=>{},
   runtimeMessage:async()=>{if(++probes===2){context.__chatgptNotifierAttemptId='new';context.__chatgptNotifierRequestId='new-request';}

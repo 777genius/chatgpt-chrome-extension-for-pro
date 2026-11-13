@@ -16,7 +16,7 @@ const other='https://chatgpt.com/c/inline-worker-other';
 const calls:{kind:string,value:any}[]=[];
 const tabReads:number[]=[];
 let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='';
-const context=createContext({URL,
+const context=createContext({URL,setTimeout,
   chrome:{runtime:{onMessage:{addListener:(value:Listener)=>{listener=value;}}},tabs:{
     get:async(id:number)=>{tabReads.push(id);return {id,url:currentUrl};},
     query:async()=>{activeQueries++;return [{id:99,url:other}];}
@@ -43,6 +43,8 @@ const call=(message:any,from=sender())=>new Promise<any>((resolve,reject)=>{
 });
 const request=(action:string,extra:Record<string,unknown>={})=>({type:'CHATGPT_GOAL_INLINE',action,url:source,...extra});
 
+// A stuck page inspection must not hold up the state shown by the switch.
+context.reconcileBlockedManualHandoff=()=>new Promise(()=>{});
 const read=await call(request('get',{tabId:99}));
 assert.equal(read.ok,true);
 assert.equal(read.tabId,7);
@@ -80,6 +82,14 @@ assert.equal((await call(request('intent',{url:composerUrlOverride,armId:'armed'
  'a root intent may arrive after the native page receives its canonical destination');
 assert.equal(calls.findLast(value=>value.kind==='intent')!.value.url,composerUrlOverride);
 composerUrlOverride='';
+
+const alias='https://chatgpt.com/c/local-chatgpt%3Aabc-123';
+currentUrl=alias;composerUrlOverride='https://chatgpt.com/';
+const rootIntent=request('intent',{url:composerUrlOverride,armId:'armed',eventAt:100000,text:'Sent root goal',baselineKey:''});
+assert.equal((await call(rootIntent,{tab:{id:7,url:alias},frameId:0})).ok,true,'temporary allocation accepts only the already-armed root intent');
+assert.equal((await call({...rootIntent,armId:'another'},{tab:{id:7,url:alias},frameId:0})).ok,false,'another arm cannot use the temporary allocation');
+assert.equal((await call({...rootIntent,action:'arm'},{tab:{id:7,url:alias},frameId:0})).ok,false,'temporary route cannot start another Goal');
+currentUrl=source;composerUrlOverride='';
 
 const mutations=()=>calls.filter(value=>!['get','composerGet'].includes(value.kind));
 const accepted=mutations().length;

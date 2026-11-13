@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
+type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;reason?:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
 type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
@@ -293,6 +293,32 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(g.timers(),0);assert.equal(g.toggle().getAttribute('aria-checked'),'false','allocation evidence cannot follow a different chat');g.instance.dispose();
 }
 
+// A fresh conversation passes through ChatGPT's temporary local alias while
+// the trusted first-message intent is still being persisted.
+{
+  const root='https://chatgpt.com/',alias='https://chatgpt.com/c/local-chatgpt%3Aabc-123';
+  const f=fixture(root);await tick();f.click(f.toggle());await tick();
+  const pending=deferred<Result>();const armed=f.composerState()!;
+  f.respond(value=>value.action==='intent'?pending.promise:{ok:true,url:value.url,record:null,composer:f.composerState()});
+  const intent=f.instance.manualIntent({text:'Original first goal',baselineKey:'',eventAt:f.now()});
+  f.setUrl(alias);await f.instance.refresh();
+  const saved:Composer={...armed,phase:'intent',intent:{text:'Original first goal',baselineKey:'',eventAt:f.now()}};
+  f.setComposer(saved);pending.resolve({ok:true,url:root,record:null,composer:saved});
+  assert.equal((await intent).ok,true,'temporary alias cannot discard a persisted first-message intent');
+  assert.equal(f.toggle().getAttribute('aria-checked'),'true');
+  f.setUrl(chat);f.respond(null);f.bindable();await f.instance.refresh();await f.advance(5000);
+  assert.equal(f.composerState()?.phase,'bound','permanent chat receives the original intent');
+  assert.equal(f.state.nativeSends,0,'allocation recovery never resends the first message');f.instance.dispose();
+  const g=fixture(root);await tick();g.click(g.toggle());await tick();
+  const slow=deferred<Result>(),old=g.composerState()!;
+  g.respond(value=>value.action==='intent'?slow.promise:{ok:true,url:value.url,record:null,composer:null});
+  const pendingIntent=g.instance.manualIntent({text:'First goal',baselineKey:'',eventAt:g.now()});
+  g.setUrl(alias);await g.instance.refresh();
+  g.setUrl('https://chatgpt.com/c/local-chatgpt%3Adifferent');await g.instance.refresh();
+  slow.resolve({ok:true,url:root,record:null,composer:{...old,phase:'intent',intent:{text:'First goal',baselineKey:'',eventAt:g.now()}}});
+  assert.equal((await pendingIntent).ok,false,'another temporary allocation cannot adopt a stale intent');g.instance.dispose();
+}
+
 // Persistence failures never turn the switch on, failed disarm/Stop never
 // pretend it is off. Unknown native outcomes remain pending observations.
 {
@@ -532,3 +558,12 @@ console.log('Inline Goal native arming, explicit intent, bounded confirmation, d
  const calls=f.calls.length;await f.advance(30*60000);assert.equal(f.calls.length,calls);assert.equal(f.composerState()!.phase,'disabled');f.instance.dispose();
 }
 console.log('Lag-tolerant Goal confirmation: 30-minute original window, sparse single timer, pending-not-failure, late proof and explicit cancellation passed.');
+{
+ const f=fixture();await tick();
+ f.setRecord({...goal(chat,'blocked'),reason:'Модель ответила точным маркером GOAL_BLOCKED'});
+ await f.instance.refresh();f.details().click();
+ assert.equal(f.action('resume').hidden,false);
+ assert.equal(f.action('resume').disabled,false);
+ f.click(f.action('resume'));await tick();assert.equal(f.calls.at(-1)!.action,'resume');
+ f.instance.dispose();
+}

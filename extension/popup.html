@@ -1,8 +1,8 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>ChatGPT Prompt-Bound Alert</title>
+  <title>ChatGPT Goals, Notifications &amp; Retries</title>
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -12,6 +12,12 @@
       background: #151515;
       color: #f3f3f3;
     }
+    header { display:flex; align-items:center; gap:9px; margin-bottom:8px; }
+    header h1 { margin:0; }
+    #retry-form button { margin-top:4px; }
+    #retry-status { font-size:12px; margin-top:5px; }
+    #tools { margin-top:12px; }
+    #tools summary { cursor:pointer; font-size:13px; margin-bottom:8px; }
     h1 { font-size: 15px; margin: 0 0 8px; }
     p { font-size: 12px; line-height: 1.4; color: #cfcfcf; margin: 0 0 12px; }
     button {
@@ -39,36 +45,49 @@
   </style>
 </head>
 <body>
-  <h1>ChatGPT Prompt-Bound Alert</h1>
-  <p>Completion alerts emit both channels and use the session title + a response preview.</p>
-  <button id="test">Test sound + notification</button>
-  <button id="handoff" style="margin-top:8px">Скачать последнюю передачу</button>
-  <section id="title-recovery" hidden style="margin-top:8px">
-    <p>Установить сохранённое название: <strong id="desired-title"></strong></p>
-    <button id="recover-title">Восстановить название чата</button>
+  <header><img src="icons/icon48.png" width="30" height="30" alt=""><h1>ChatGPT Goals, Notifications &amp; Retries</h1></header>
+  <p>Get a sound and desktop notification when ChatGPT finishes.</p>
+  <section aria-labelledby="retry-heading">
+    <h2 id="retry-heading">Automatic retry</h2>
+    <form id="retry-form">
+      <label for="retry-message">Retry message</label>
+      <textarea id="retry-message" maxlength="500" rows="2" aria-describedby="retry-help" disabled></textarea>
+      <p id="retry-help">Sent when ChatGPT encounters an error and it’s safe to retry. Leave blank to use the default.</p>
+      <button id="retry-save" disabled>Save retry message</button>
+      <div id="retry-status" role="status"></div>
+    </form>
   </section>
-  <button id="journal" style="margin-top:8px">Журнал отправок и ошибок</button>
+  <details id="tools"><summary>Tools</summary>
+  <button id="test">Test sound + notification</button>
+  <button id="handoff" style="margin-top:8px">Download latest chat transfer</button>
+  <section id="title-recovery" hidden style="margin-top:8px">
+    <p>Saved title: <strong id="desired-title"></strong></p>
+    <button id="recover-title">Restore chat title</button>
+  </section>
+  <button id="journal" style="margin-top:8px">Activity log</button>
+  <div id="status" role="status"></div>
+  </details>
   <section id="goal-panel" aria-labelledby="goal-heading">
-    <h2 id="goal-heading">Автономная цель (Goal)</h2>
-    <p>Завершается после полностью готового ответа <code>GOAL_COMPLETE</code>, дедлайна или лимита продолжений. Неизвестный исход отправки блокирует Goal. Маркер — заявление модели, не независимая проверка результата.</p>
-    <label for="goal-text">Цель</label>
-    <textarea id="goal-text" maxlength="10000" placeholder="Опиши результат, который нужно довести до конца"></textarea>
-    <div id="goal-followups" role="note" aria-label="Подтверждённые дополнения к цели" hidden></div>
-    <label for="goal-rules">Условия завершения (необязательно)</label>
-    <textarea id="goal-rules" maxlength="5000" placeholder="Например: merge PR, зелёные CI и E2E"></textarea>
+    <h2 id="goal-heading">Goal for this chat</h2>
+    <p>Keep ChatGPT working toward an objective within the limits below.</p>
+    <label for="goal-text">Objective</label>
+    <textarea id="goal-text" maxlength="10000" placeholder="Describe the result you want"></textarea>
+    <div id="goal-followups" role="note" aria-label="Updates to the objective" hidden></div>
+    <label for="goal-rules">Completion criteria (optional)</label>
+    <textarea id="goal-rules" maxlength="5000" placeholder="For example, all checks pass and the PR is merged"></textarea>
     <div class="goal-limits">
-      <div><label for="goal-max">Максимум продолжений</label><input type="number" id="goal-max" min="1" max="100" step="1" value="30"></div>
-      <div><label for="goal-minutes">Максимум минут</label><input type="number" id="goal-minutes" min="1" max="1440" step="1" value="1440"></div>
+      <div><label for="goal-max">Max follow-ups</label><input type="number" id="goal-max" min="1" max="100" step="1" value="30"></div>
+      <div><label for="goal-minutes">Time limit (minutes)</label><input type="number" id="goal-minutes" min="1" max="1440" step="1" value="1440"></div>
     </div>
     <div class="goal-buttons">
-      <button id="goal-start">Начать Goal</button>
-      <button id="goal-pause" disabled>Пауза</button>
-      <button id="goal-resume" disabled>Продолжить</button>
-      <button id="goal-stop" disabled>Остановить</button>
+      <button id="goal-start">Start Goal</button>
+      <button id="goal-pause" disabled>Pause</button>
+      <button id="goal-resume" disabled>Resume</button>
+      <button id="goal-stop" disabled>Stop</button>
     </div>
     <div id="goal-status" role="status" aria-live="polite"></div>
   </section>
-  <div id="status"></div>
+  <script src="goal-policy.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

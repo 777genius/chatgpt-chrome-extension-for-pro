@@ -528,6 +528,21 @@ for(const response of ['Маркер `GOAL_COMPLETE` не выдаю.','Марк
 // survives coordinator recreation and cannot be replayed as a continuation.
 assert.deepEqual(policy.DEFAULTS,{maxContinuations:30,maxMinutes:1440});
 assert.match(policy.initialText({goal:'Test',rules:''}),/GOAL_BLOCKED/);
+// A historical no-navigation block may be restored only after the worker has
+// proven the same native turn completed; owner stop/pause always wins.
+for(const variant of ['ok','stopped','paused','new-goal','pending','expired'] as const) {
+ const env=fixture();await begin(env);await confirm(env);const g=state(env),goalId=g.id,oldPromptKey=g.expectedPromptKey;
+ Object.assign(g,{phase:'blocked',handoffId:'saved-handoff',handoffTabId:7,preHandoffPhase:'waiting',
+  reason:'Передача Goal остановлена: В исходном чате идёт генерация; переход отменён'});
+ if(variant==='stopped')g.stopRequested=true;if(variant==='paused')g.pauseRequested=true;
+ if(variant==='new-goal')g.id='replacement';if(variant==='pending')g.manualPending={id:'manual'};
+ if(variant==='expired')env.time=g.deadlineAt;
+ const outcome=await env.store.handoffSourceCompleted({sourceUrl:URL_A,handoffId:'saved-handoff',tabId:7,goalId,
+  oldPromptKey,promptKey:'/c/goal-fixture-a|verified-user',userId:'verified-user'});
+ assert.equal(outcome.ok,variant==='ok',variant);
+ assert.equal(state(env).phase,variant==='ok'?'waiting':'blocked',variant);
+ assert.equal(env.messages.length,1,'restoration itself never sends a message');
+}
 assert.match(policy.continuationText({goal:'Test'}),/штатные способы/);
 assert.equal(policy.exactBlockedMarker('GOAL_BLOCKED',true,true),true);
 for(const value of [' GOAL_BLOCKED','GOAL_BLOCKED ','`GOAL_BLOCKED`','GOAL_BLOCKED\nReason','Не выдаю GOAL_BLOCKED','GOAL_BLOCKED is the marker'])
@@ -797,3 +812,13 @@ for(const scenario of ['success','duplicate','stopped','wrong-tab','expired','wr
  assert.equal(env.messages.length,1,'observation cannot send a message');
 }
 console.log('Blocked handoff submitted-message witness: durable, idempotent, no authority, stop/expiry fences passed.');
+{
+ const env=fixture();await begin(env);await confirm(env);
+ await answer(env,{response:'GOAL_BLOCKED',rawExact:true});
+ const before=state(env),deadline=before.deadlineAt,objective=before.goal;
+ env.busy=true;await assert.rejects(()=>env.store.control({url:URL_A,tabId:7,action:'resume'}));
+ assert.equal(state(env).phase,'blocked');
+ env.busy=false;await env.store.control({url:URL_A,tabId:7,action:'resume'});
+ assert.equal(state(env).phase,'preparing');assert.equal(state(env).goal,objective);
+ assert.equal(state(env).deadlineAt,deadline);assert.equal(env.messages.length,2);
+}

@@ -51,3 +51,15 @@ assert.equal((await store.get(url)).manualPending.requestId,'req-8','unsafe foll
 assert.equal((await store.manualBind({...bind,userText:'Follow [#8](https://repo.example/pull/8)'})).ok,true);
 assert.equal((await store.get(url)).supplements.length,1);
 console.log('Goal rich-link consent: captured href preserved through start and follow-up, changed targets refused.');
+{
+ const plain='Review https://example.com/pull/12 now';
+ assert.equal(policy.submittedTextMatches(plain,'Review [https://example.com/pull/12](https://example.com/pull/12) now',plain,[]),true);
+ assert.equal(policy.submittedTextMatches(plain,'Review [https://example.com/pull/12](https://evil.example) now',plain,[]),false);
+ assert.equal(policy.submittedTextMatches(plain,'Review [other](https://example.com/pull/12) now',plain,[]),false);
+}
+{
+ const visible='Review https://example.com/pull/12 and this issue';
+ const native='Review [https://example.com/pull/12](https://example.com/pull/12) and [this issue](https://example.com/issues/8)';
+ assert.equal(policy.submittedTextMatches(visible,native,visible,['https://example.com/issues/8']),true);
+ assert.equal(policy.submittedTextMatches(visible,native.replace('issues/8','issues/9'),visible,['https://example.com/issues/8']),false);
+}

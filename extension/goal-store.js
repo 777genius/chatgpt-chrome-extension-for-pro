@@ -261,6 +261,13 @@
             supplements.push({...item,tabId,text:item.userText,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
           }
         }
+        const anchor=recovery?.anchor;
+        if(anchor&&(!anchor.operationId||!anchor.userId||!anchor.requestId||
+            !Number.isFinite(anchor.startedAt)||!Number.isFinite(anchor.userSentAtMs)||
+            Math.abs(anchor.startedAt-anchor.userSentAtMs)>10000||
+            anchor.startedAt<=(supplements.at(-1)?.startedAt||startedAt)||
+            typeof anchor.promptKey!=='string'||!anchor.promptKey.startsWith(new URL(target).pathname+'|')))
+          throw Error('Автоматическое продолжение не подтверждено');
         if(current.url==='https://chatgpt.com/'?firstTurn!==true&&recovery?.firstUserId!==userId:current.url!==target)
           throw Error('Ручная отправка Goal относится к другому чату или не является первым сообщением');
         // Native Markdown may retain link targets absent from the visible
@@ -284,7 +291,7 @@
         const next={schema:1,id:armId,url:target,originUrl:target,goal:userText,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
           startedAt,manualStartedAt:supplements.at(-1)?.startedAt||startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
-          expectedPromptKey:supplements.at(-1)?.promptKey||promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
+          expectedPromptKey:anchor?.promptKey||supplements.at(-1)?.promptKey||promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
           ...(recovery?{supplements}:{}),
           handoffPending:false,handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
         await event('manual_started',next,tabId,{text:userText,intentText:intent.text,userVisibleText:binding.userVisibleText,rules:next.rules,
@@ -542,7 +549,7 @@
             return {record};
           }
           const recoveryBlocked=old.phase==='blocked'&&!old.operation&&
-            old.reason==='Восстановление запроса завершилось ошибкой';
+            ['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(old.reason);
           if((old.phase!=='paused'&&!recoveryBlocked)||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
@@ -592,8 +599,8 @@
         if(record?.id!==id||record.phase!=='blocked'||op?.id!==operationId||op.tabId!==tabId||
             !(op.status==='reserved'||op.status==='intent'&&noGrantVerified===true)||record.pauseRequested||record.stopRequested||record.manualOverride||
             record.manualPending||now()>=record.deadlineAt)return {ok:false};
-        const next={...record,phase:'preparing',reason:'',operation:{...op,status:'reserved',createdAt:now()}};
-        await event('preparation_retried',next,tabId);await save(next);
+        const next={...record,phase:'preparing',reason:'',operation:{...op,id:uuid(),status:'reserved',createdAt:now()}};
+        await event('preparation_retried',next,tabId,{previousOperationId:op.id});await save(next);
         return {ok:true,record:next};
       });
       if(outcome.ok)await deliver(outcome.record);
@@ -863,6 +870,7 @@
         const recoveredBlock=record?.phase==='blocked'&&!record.operation&&
           record.reason==='Восстановление запроса завершилось ошибкой'&&['retry.confirmed','retry.preparation_recovered'].includes(kind);
         if(!record||!['waiting','recovering','paused'].includes(record.phase)&&!recoveredBlock)return;
+        if(kind==='retry.confirmed'&&(record.stopRequested||record.pauseRequested||record.manualPending||record.operation||record.manualOverride||now()>=record.deadlineAt))return;
         // Journal delivery and Goal writes use different queues. Recheck the
         // request fence here, after serialization: an accepted old callback
         // may arrive after a manual send or a newly started Goal.
@@ -945,6 +953,26 @@
         return {ok:true};
       });
     }
+    // A prior version could block a Goal when the original response was still
+    // finishing before any navigation. Only the worker's independently
+    // verified native completion may restore that exact Goal to waiting.
+    async function handoffSourceCompleted({sourceUrl,handoffId,tabId,goalId,oldPromptKey,promptKey,userId}) {
+      const source=canonical(sourceUrl);
+      if(!source||!handoffId||!goalId||!userId||typeof promptKey!=='string'||
+          !promptKey.startsWith(new URL(source).pathname+'|'))return {ok:false};
+      return serialize(async()=>{
+        const record=await read(source);
+        if(!record||record.id!==goalId||record.phase!=='blocked'||record.handoffId!==handoffId||
+            record.handoffTabId!==tabId||record.preHandoffPhase!=='waiting'||
+            record.reason!=='Передача Goal остановлена: В исходном чате идёт генерация; переход отменён'||
+            record.expectedPromptKey!==oldPromptKey||record.operation||record.manualPending||record.manualOverride||
+            record.pauseRequested||record.stopRequested||now()>=record.deadlineAt)return {ok:false};
+        const next={...record,phase:'waiting',reason:'',expectedPromptKey:promptKey,
+          handoffId:null,handoffPending:false,preHandoffPhase:null,confirmedPromptBinding:null};
+        await event('handoff_source_completed',next,tabId,{handoffId,userId,promptKey});
+        await save(next);return {ok:true,record:view(next)};
+      });
+    }
     async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target||!handoffId||!userId||nativeVerified!==true||
@@ -1007,7 +1035,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

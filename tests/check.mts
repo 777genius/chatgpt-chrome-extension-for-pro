@@ -16,7 +16,7 @@ const alertHTML = (text: string) => `<aside role="alert" class="text-danger"><di
 const user = '<article data-testid="conversation-turn-0" data-turn="user">Question</article>';
 const domContexts:ReturnType<typeof createContext>[]=[];
 async function domCheck() {
-  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0, recoveryWait: 'none'|'transient'|'permanent'|'hard'|'lost' = 'none') {
+  function setup(draft = '', hasComposer = true, confirmSend = true, newTyping = '', savedRetry: any = null, keepRecovery = false, duplicatePlan = false, readinessClockDelay = 0, recoveryWait: 'none'|'transient'|'permanent'|'hard'|'lost' = 'none', nativeConfirm = true) {
     const { document, window } = parseHTML(`<html><body><main>${user}</main>${hasComposer ? `<form><div id="prompt-textarea" contenteditable="true">${draft}</div><button data-testid="send-button" type="button">Send</button></form>` : ''}</body></html>`);
     Object.defineProperty(window.Node, 'DOCUMENT_POSITION_FOLLOWING', { value: 4, configurable: true });
     Object.defineProperty(window.HTMLElement.prototype, 'getClientRects', { configurable: true, value() {
@@ -42,6 +42,7 @@ async function domCheck() {
       chrome: { storage:{local:{get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,draftStorage[key]]))),set:async(value:Record<string,unknown>)=>Object.assign(draftStorage,structuredClone(value))}},runtime: {id:'test-extension',getManifest:()=>({version:'fixture'}),sendMessage:async(message:any)=>{
         if(message.type==='CHATGPT_RETRY_STATE')return {ok:true,state:savedRetry};
         if(message.type==='CHATGPT_COMPLETION_CHECKPOINT')return {ok:false};
+        if(message.type==='CHATGPT_RETRY_CONFIRMATION')return {ok:nativeConfirm};
         if(message.type==='CHATGPT_RECONCILE_LEGACY_HANDOFF_STATUS')return {ok:true,changed:false};
         if(message.type==='CHATGPT_GOAL_RECOVER')return {ok:false};
         if(message.type==='CHATGPT_GOAL_CONTEXT')return {ok:true,text:''};
@@ -79,6 +80,7 @@ async function domCheck() {
       if(keepRecovery){const status=main.querySelector('[role=status]');if(status)main.append(status);}
       runInContext(`globalThis.__chatgptNotifierAttemptId = '${sequence}'; globalThis.__chatgptNotifierRequestStartedAt = ${now}`, context);
     });
+    runInContext(readFileSync('extension/goal-policy.js','utf8'),context);
     runInContext(readFileSync('extension/journal-store.js','utf8'),context);
     runInContext(content, context);
     return { messages, sends, document, context, logs, committedLogs, delayNextPlan(ms:number){delayedPlanMs=ms;}, getStopCalls(){return stopCalls;},getStopChecks(){return stopChecks;}, breakJournal(){failJournal=true;},
@@ -208,6 +210,12 @@ async function domCheck() {
   assert.equal(run.logs.filter(e=>e.kind==='retry.send_intent').length,4);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].operationId,run.logs.find(e=>e.kind==='retry.planned').operationId);
   assert.equal(run.logs.filter(e=>e.kind==='retry.confirmed')[0].attemptId,run.logs.find(e=>e.kind==='retry.planned').attemptId,'retry lifecycle remains bound to its failed request after a newer request starts');
+  const oldTurn=setup('',true,true,'',null,false,false,0,'none',false);
+  await oldTurn.fail('Repeated old message');
+  await waitFor(()=>oldTurn.logs.some(e=>e.kind==='retry.failed'));
+  assert.equal(oldTurn.sends.length,1,'the original guarded send remains one-shot');
+  assert.equal(oldTurn.logs.filter(e=>e.kind==='retry.confirmed').length,0,'a changed DOM key alone cannot confirm an old identical message');
+  assert.equal(oldTurn.logs.find(e=>e.kind==='retry.failed').clicked,true,'unknown delivery remains fenced');
   const noLog=setup('Draft');noLog.breakJournal();await noLog.fail('error');
   assert.equal(noLog.sends.length,0,'journal failure must prevent automatic send');
   assert.equal(noLog.document.querySelector('#prompt-textarea')!.textContent,'Draft');
@@ -408,10 +416,14 @@ async function workerCheck() {
   const injectBefore=injections.length;
   assert.equal((await sendGuard({action:'send',text:'User draft',url:sender.tab.url})).ok,false);
   assert.equal(injections.length,injectBefore,'unlogged draft must not reach the page');
-  await runInContext("appendJournal({kind:'retry.send_intent',operationId:'only-once',promptKey:'/c/example|user-turn'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
+  storage['chatgpt-retry-message']='Finish the remaining checks.';
+  await runInContext("appendJournal({kind:'retry.send_intent',operationId:'only-once',text:'Finish the remaining checks.',promptKey:'/c/example|user-turn'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
   assert.equal((await sendGuard({action:'send',text:'User draft',operationId:'only-once',url:sender.tab.url})).ok,false);
   assert.equal(injections.length,injectBefore,'even a logged operation cannot substitute a user draft');
-  const options={action:'send',text:'доделай е2е',operationId:'only-once',url:sender.tab.url};
+  const options={action:'send',text:'Finish the remaining checks.',operationId:'only-once',url:sender.tab.url};
+  storage['chatgpt-retry-message']='New preference';
+  assert.equal((await sendGuard(options)).ok,false,'changing settings invalidates the old retry text');
+  storage['chatgpt-retry-message']=options.text;
   assert.equal((await sendGuard(options)).clicked,true);
   assert.equal((await sendGuard(options)).ok,false,'one operation may dispatch only once');
   assert.equal(injections.length,injectBefore+1);
@@ -519,7 +531,8 @@ async function popupRecoveryCheck() {
   const info={ok:true,available:true,operationId:'legacy-op',tabId:7,targetUrl:'https://chatgpt.com/c/target',desiredTitle:'Saved title (2)'};
   const goalUrl='https://chatgpt.com/c/popup-fixture';
   const goalPhases:Record<string,string>={start:'preparing',pause:'paused',resume:'preparing',stop:'stopped'};
-  const ctx=createContext({document,chrome:{runtime:{sendMessage:async(message:any)=>{
+  const preferences:Record<string,unknown>={};
+  const ctx=createContext({document,chrome:{storage:{local:{get:async()=>preferences,set:async(values:Record<string,unknown>)=>Object.assign(preferences,values)}},runtime:{sendMessage:async(message:any)=>{
     messages.push(message);
     if(message.type==='CHATGPT_HANDOFF_TITLE_INFO')return info;
     if(message.type==='CHATGPT_HANDOFF_RENAME_RECOVER')return new Promise(resolve=>{finishRecovery=resolve;});
@@ -531,7 +544,15 @@ async function popupRecoveryCheck() {
     }
     return {ok:true};
   }},tabs:{create(){}}}});
+  runInContext(readFileSync('extension/goal-policy.js','utf8'),ctx);
   runInContext(readFileSync('extension/popup.js','utf8'),ctx);
+  await waitFor(()=>(document.getElementById('retry-save') as HTMLButtonElement).disabled===false);
+  const retryInput=document.getElementById('retry-message') as HTMLTextAreaElement;
+  assert.equal(retryInput.value,'доделай е2е');
+  retryInput.value='  Finish the remaining checks.  ';
+  document.getElementById('retry-form')!.dispatchEvent(new window.Event('submit',{cancelable:true}));
+  await waitFor(()=>preferences['chatgpt-retry-message']==='Finish the remaining checks.');
+
   await Promise.resolve();await Promise.resolve();
   assert.equal(document.getElementById('title-recovery')!.hidden,false);
   assert.equal(document.getElementById('desired-title')!.textContent,'Saved title (2)');
@@ -558,9 +579,9 @@ async function popupRecoveryCheck() {
     if(nextId)await waitFor(()=>(document.getElementById(nextId) as HTMLButtonElement).disabled===false);
     // The worker receives the message before popup's async continuation paints
     // the saved result. Wait for the actual UI state, including terminal Stop.
-    if(action==='stop')await waitFor(()=>/Остановлено/.test(document.getElementById('goal-status')!.textContent||''));
+    if(action==='stop')await waitFor(()=>/Stopped/.test(document.getElementById('goal-status')!.textContent||''));
   }
-  assert.match(document.getElementById('goal-status')!.textContent||'',/Остановлено/);
+  assert.match(document.getElementById('goal-status')!.textContent||'',/Stopped/);
   const button=document.getElementById('recover-title')!;
   button.dispatchEvent(new window.Event('click'));
   button.dispatchEvent(new window.Event('click'));
@@ -570,7 +591,7 @@ async function popupRecoveryCheck() {
   assert.equal(recoverRequests[0].targetUrl,info.targetUrl);
   finishRecovery({ok:true});await pause();
   assert.equal(document.getElementById('title-recovery')!.hidden,true);
-  assert.equal(document.getElementById('status')!.textContent,'Название чата восстановлено.');
+  assert.equal(document.getElementById('status')!.textContent,'Chat title restored.');
   console.log('PASS: popup previews exact saved title and waits for an explicit one-use recovery click');
 }
 async function notificationStatusCheck() {

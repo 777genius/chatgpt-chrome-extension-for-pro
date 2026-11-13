@@ -3,7 +3,7 @@
 // Presentation only: the worker and existing guarded sender own authorization.
 (function(root) {
   let instance=0;
-  function create({document,getUrl,request,subscribe=()=>()=>{},alive=()=>true}) {
+  function create({document,getUrl,request,subscribe=()=>()=>{},alive=()=>true,composerActivity=()=>'unknown'}) {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
@@ -60,7 +60,13 @@
         elapsedId=id;elapsedBase=0;
         try{if(id)elapsedBase=Math.max(0,Number(win.localStorage.getItem('cggi-elapsed:'+id))||0);}catch{}
       }
-      elapsedSince=pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
+      const activity=record?.phase==='waiting'?composerActivity():null;
+      if(activity!==null) {
+        const label='◎ '+(activity==='generating'?'Active':record.manualPending?'Confirming message':
+          activity==='idle'?'Waiting to continue':'Checking chat');
+        if(bannerStatus.textContent!==label)bannerStatus.textContent=label;
+      }
+      elapsedSince=(activity===null||activity==='generating')&&pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
       const seconds=Math.floor(elapsedBase/1000),minutes=Math.floor(seconds/60);
       bannerTime.textContent=id?(minutes>=60?Math.floor(minutes/60)+'h '+minutes%60+'m':minutes?minutes+'m':seconds+'s'):'';
     }
@@ -113,7 +119,9 @@
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
     style.textContent=`
-.cggi-banner{box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:rgba(127,127,127,.12);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.cggi-banner{position:relative;z-index:1;box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:#ececec;color:inherit;text-align:left;font:inherit;cursor:pointer}
+html.dark .cggi-banner,[data-theme=dark] .cggi-banner{background:#242424}
+@media(prefers-color-scheme:dark){html:not(.light):not([data-theme=light]) .cggi-banner{background:#242424}}
 .cggi-banner[hidden],.cggi-banner button[hidden]{display:none}
 .cggi-banner button{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:none;color:inherit;opacity:.65;cursor:pointer}
 .cggi-banner button:hover{background:rgba(127,127,127,.17);opacity:1}.cggi-banner button:disabled{opacity:.3;cursor:default}
@@ -155,7 +163,8 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
       const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused'||
-        record?.phase==='blocked'&&!record.operation&&record.reason==='Восстановление запроса завершилось ошибкой';
+        record?.phase==='blocked'&&!record.operation&&
+        ['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(record.reason);
       for(const input of Object.values(fields))input.disabled=!editable;
       const restorable=!record&&composer?.phase==='intent'&&Boolean(policy.canonical(route));
       buttons.restore.hidden=!restorable;
@@ -180,7 +189,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record.operation&&['blocked','stopped'].includes(record.phase))message+=record.operation.status==='reserved'
           ?' · Message was not sent. Stop Goal before starting again.'
           :' · Previous send is unconfirmed. Review the activity log before a new Goal.';
-        if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
+        if(record.phase==='blocked'&&!paused)message+=' · Review the activity log before continuing.';
       }
       if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
       if(composer?.phase==='intent')message='Confirmation pending. Your objective is saved. Background verification continues without resending your message.';
@@ -226,9 +235,17 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(bindTimer!==null)win.clearTimeout(bindTimer);
       bindTimer=null;binding=null;
     }
+    function temporaryAllocation() {
+      const temporary=policy.temporaryPageUrl(getUrl());
+      if(!temporary||!binding||binding.origin!==ROOT_URL||route!==ROOT_URL||
+          binding.temporary&&binding.temporary!==temporary)return false;
+      binding.temporary=temporary;
+      return true;
+    }
     function syncRoute() {
       const next=current();
       if(next===route)return false;
+      if(temporaryAllocation())return false;
       const allocation=binding&&binding.origin===ROOT_URL&&route===ROOT_URL&&!!policy.canonical(next)&&
         (!binding.allocated||binding.allocated===next);
       route=next;epoch++;sequence++;
@@ -303,7 +320,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function contextMatches(token) {
       if(!valid()||!binding||binding.token!==token)return false;
       syncRoute();
-      return !!binding&&binding.token===token&&current()===route&&
+      return !!binding&&binding.token===token&&(current()===route||temporaryAllocation())&&
         (route===binding.origin||route===binding.allocated);
     }
     function validateResult(result,url) {
@@ -356,6 +373,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     }
     async function pollBind(token) {
       if(!contextMatches(token))return;
+      if(temporaryAllocation()){scheduleBind();return;}
       if(Date.now()>=binding.deadline){scheduleBind();return;}
       binding.inFlight=true;
       const url=route,id=binding.id;
@@ -386,6 +404,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     async function refresh() {
       if(!valid()||!mount())return;
       syncRoute();attach();
+      if(temporaryAllocation()){render();return;}
       if(!route){loaded=true;render();return;}
       if(busy){pendingRefresh=true;return;}
       const url=route,revision=epoch,serial=++sequence;

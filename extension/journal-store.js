@@ -45,10 +45,10 @@ function reduceRetryDraft(drafts,event,manualStartedAt) {
   if(event.kind==='draft.replaced')return {...drafts,[url]:{...current,replacementProven:true}};
   if(event.kind==='recovery.stop_result'&&event.stopped===true)return {...drafts,[url]:{...current,stopProven:true}};
   let phase=current.phase;
-  if(event.kind==='retry.send_intent')phase='intent';
+  if(event.kind==='retry.send_intent'||event.kind==='goal.send_intent')phase='intent';
   if(['send.authorized','send.dispatched','draft.restore_deferred'].includes(event.kind))phase='unknown';
-  if(event.kind==='retry.confirmed')phase='confirmed';
-  if(event.kind==='send.not_clicked'||event.kind==='retry.cancelled'||event.kind==='retry.failed'&&event.clicked===false)phase='not-clicked';
+  if(event.kind==='retry.confirmed'||event.kind==='goal.confirmed')phase='confirmed';
+  if(event.kind==='draft.not_clicked'||event.kind==='send.not_clicked'||event.kind==='retry.cancelled'||event.kind==='retry.failed'&&event.clicked===false)phase='not-clicked';
   if(event.kind==='retry.manual_reset')phase='superseded';
   if(event.kind==='retry.preparation_superseded'&&!retryAttemptAtOrAfter(current.attemptId,event.startedAt))phase='superseded';
   if(event.kind==='draft.restored')phase='restored';
@@ -64,7 +64,7 @@ async function indexedRetryDraft(meta,url) {
   const key=`${JOURNAL_PREFIX}${String(record.savedSequence).padStart(12,'0')}`;
   const entry=(await chrome.storage.local.get(key))[key];
   return entry?.kind==='draft.saved'&&entry.operationId===record.operationId&&retryDraftUrl(entry.sourceUrl)===record.sourceUrl&&
-    typeof entry.draft==='string'&&entry.draft?{...record,draft:entry.draft}:null;
+    typeof entry.draft==='string'&&entry.draft?{...record,draft:entry.draft,retryText:entry.text}:null;
 }
 function reduceRetrySummary(retryByChat, event) {
   const chatId = journalChatId(event.sourceUrl || event.observedTabUrl || event.url);
@@ -84,7 +84,7 @@ function reduceRetrySummary(retryByChat, event) {
       failures:(previous.failures||[]).filter(at=>at>=manualStartedAt),
       recentErrors:(previous.recentErrors||[]).filter(item=>item.at>=manualStartedAt)};
     if(!keepBudget){delete state.remainingRetries;delete state.lastBudgetOperation;delete state.budgetGrantedAt;}
-    if(!keepBlock)delete state.blockedAttemptId;
+    if(!keepBlock){delete state.blockedAttemptId;delete state.reasonCode;}
     if(!keepTerminal)delete state.terminalAttemptId;
     return {...retryByChat,[chatId]:state};
   }
@@ -107,6 +107,13 @@ function reduceRetrySummary(retryByChat, event) {
     return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',
       preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1,
       preparationDraftOperationId:event.preparationDraftOperationId||null,preparationDraftSequence:event.preparationDraftSequence||null}};
+  }
+  if(event.kind==='retry.late_recovered') {
+    const state=retryByChat[chatId];
+    if(!state?.blocked||state.terminal||state.blockedAttemptId!==event.attemptId||
+        state.lastPromptKey!==event.promptKey||state.remainingRetries===0)return retryByChat;
+    return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',reasonCode:'',lastPromptKey:'',lastAttemptId:'',
+      preparationRecovered:true}};
   }
   if(event.kind==='retry.planned' && retryByChat[chatId]) {
     const state=retryByChat[chatId];
@@ -148,6 +155,7 @@ function reduceRetrySummary(retryByChat, event) {
     state.blocked = true;
     state.blockedAttemptId=String(event.attemptId||previous.lastAttemptId||'');
     state.reason = String(event.reason || event.error || previous.reason || 'Автопродолжение остановлено');
+    if(event.kind==='retry.failed')state.reasonCode=event.errorCode||'';
     state.terminal = Boolean(previous.terminal || event.terminal === true);
     if(event.terminal===true)state.terminalAttemptId=state.blockedAttemptId;
   }
@@ -239,6 +247,11 @@ function appendJournal(event, tab = {}) {
       // send. Real retry.planned carries this binding before any editor effect.
       if(!retrySource||!operationId||typeof event.promptKey!=='string'||!event.promptKey)return;
       if(retryAttemptBefore(event.attemptId,meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt))throw duplicate();
+      // A source handoff and a same-chat retry must not both advance the
+      // failed turn, including after the handoff stopped before navigation.
+      // Only a newer positively observed manual request supersedes that fence.
+      const handoff=handoffSourceClaims[retrySource],manualAt=meta.retryByChat?.[journalChatId(retrySource)]?.manualStartedAt;
+      if(handoff&&!(Number.isFinite(manualAt)&&manualAt>handoff.at&&retryAttemptAtOrAfter(event.attemptId,manualAt)))throw duplicate();
       if(Object.hasOwn(retryConsumedOperations,operationId)||Object.hasOwn(retryReleasedOperations,operationId))throw duplicate();
       if(meta.retryDraftClaims?.[operationId])return;
       const preparing=retryPreparingByChat[retrySource];
@@ -268,11 +281,22 @@ function appendJournal(event, tab = {}) {
     // Recovery preflight and Goal writes have separate lifetimes. A user can
     // Pause/Stop after preparation or intent; consult the durable Goal again
     // at each grant boundary, before reserving or consuming a retry click.
-    if(retrySource&&(['retry.send_intent','retry.preparation_recovered'].includes(event.kind)||
+    if(retrySource&&(['retry.send_intent','retry.preparation_recovered','retry.late_recovered'].includes(event.kind)||
         event.kind==='send.authorized'&&active[tabId]?.kind==='retry.send_intent')) {
       const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
       if(goal&&(goal.stopRequested||goal.pauseRequested||['stopped','paused'].includes(goal.phase)))
         throw Object.assign(new Error('Цель остановлена или приостановлена; автоповтор отменён'),{journalPolicy:true});
+    }
+    if(event.kind==='retry.late_recovered') {
+      if(!Number.isInteger(event.expectedSequence)||meta.sequence!==event.expectedSequence)
+        throw Object.assign(new Error('Журнал изменился до восстановления'),{journalPolicy:true,code:'RETRY_LATE_RACE'});
+      const state=meta.retryByChat?.[journalChatId(retrySource)],goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
+      const prior=Object.values(retrySendClaims).filter(c=>c.operationId===operationId&&c.tabId===tabId&&c.sourceUrl===retrySource&&c.phase==='consumed');
+      if(!state?.blocked||state.terminal||state.remainingRetries===0||state.blockedAttemptId!==event.attemptId||
+          state.lastPromptKey!==event.promptKey||savedDraft||retryPreparingByChat[retrySource]||handoffSourceClaims[retrySource]||
+          Object.values(active).some(a=>a&&(a.chatUrl===retrySource||a.sourceUrl===retrySource))||prior.length!==1||
+          goal&&(goal.phase!=='waiting'||goal.expectedPromptKey!==event.promptKey||goal.operation||goal.manualPending||goal.stopRequested||goal.pauseRequested))
+        throw Object.assign(new Error('Проверенная отправка изменилась до восстановления'),{journalPolicy:true});
     }
     if(['retry.planned','retry.send_intent'].includes(event.kind)&&retrySource){
       // The Goal's persisted reservation wins over legacy retry planning.
@@ -313,7 +337,7 @@ function appendJournal(event, tab = {}) {
           (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl))
         throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
-        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,attemptId:event.attemptId||''}:{})};
+        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,retryText:event.text,attemptId:event.attemptId||''}:{})};
     }
     if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
       const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
@@ -398,7 +422,11 @@ function appendJournal(event, tab = {}) {
     const resetRetry=event.kind==='retry.manual_reset'&&currentSend?.kind==='retry.send_intent';
     // An unknown Goal click remains an active, consumed fence. Neither a
     // timeout nor clicking Stop gives another automatic sender a new grant.
-    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&event.kind==='goal.confirmed';
+    const clearsGoal=exactGrant&&currentSend.kind==='goal.send_intent'&&
+      (event.kind==='goal.confirmed'||event.kind==='goal.unsent_release'&&currentSend.consumed!==true&&
+        currentSend.goalId===event.goalId&&currentSend.chatUrl===retryDraftUrl(sourceUrl));
+    if(event.kind==='goal.unsent_release'&&!clearsGoal)
+      throw Object.assign(new Error('Unspent Goal grant changed'),{journalPolicy:true});
     const clearsRetry=(exactGrant||resetRetry)&&currentSend?.kind==='retry.send_intent'&&
       ['retry.confirmed','retry.failed','retry.cancelled','retry.manual_reset'].includes(event.kind);
     const clearsHandoff=exactGrant&&currentSend.kind==='handoff.sending'&&

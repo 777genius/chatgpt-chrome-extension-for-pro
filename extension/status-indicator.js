@@ -1,7 +1,7 @@
 'use strict';
 
 globalThis.ChatGPTStatusIndicator=Object.freeze({
-  create({document,getUrl,load,alive=()=>true}) {
+  create({document,getUrl,load,alive=()=>true,composerActivity=()=>'unknown',hasActiveRequest=()=>false}) {
     let disposed=false,url='',revision=-1,status=null,icon=null,request=0,frame=0;
     const window=document.defaultView;
     const ownedAttribute='data-chatgpt-notifier-status',retiredAttribute='data-chatgpt-notifier-status-retired';
@@ -63,7 +63,7 @@ globalThis.ChatGPTStatusIndicator=Object.freeze({
       frame=value.frame;render();return true;
     }
     function render() {
-      if(!active()||!status) {icon?.remove();icon=null;restoreNativeIcons();return;}
+      if(!active()||!status||status.kind==='loading'&&composerActivity()==='idle'&&!hasActiveRequest(url,status.eventAt)) {icon?.remove();icon=null;restoreNativeIcons();return;}
       if(!document.head)return;
       maskNativeIcons();
       if(!icon){icon=document.createElement('link');icon.rel='icon';icon.type='image/svg+xml';icon.sizes='any';icon.setAttribute(ownedAttribute,'');}

@@ -1,5 +1,23 @@
 'use strict';
 
+// Read an endpoint already used by this page; never start or resume a stream.
+async function inspectObservedStreamStatus(expectedUrl) {
+  try {
+    if(location.origin+location.pathname!==expectedUrl)return {ok:false};
+    const id=location.pathname.match(/^\/c\/([a-z0-9-]+)$/)?.[1];
+    if(!id)return {ok:false};
+    const path='/backend-api/conversation/'+id+'/stream_status';
+    const observed=performance.getEntriesByType('resource').map(x=>x.name).findLast(value=>{
+      try {const u=new URL(value);return u.origin===location.origin&&u.pathname===path;}catch{return false;}
+    });
+    if(!observed)return {ok:false};
+    const response=await fetch(observed,{method:'GET',credentials:'same-origin',cache:'no-store',redirect:'error',signal:AbortSignal.timeout(10000)});
+    if(!response.ok)return {ok:false};
+    const value=await response.json();
+    return {ok:location.origin+location.pathname===expectedUrl&&value?.status==='COMPLETE'};
+  } catch {return {ok:false};}
+}
+
 // Serialized into ChatGPT's MAIN world by chrome.scripting. No closure state,
 // cookies, network requests, or translated-string matching.
 function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction = null, expectedUrl = '', expectedPromptKey = '', expectedRecoveryBinding = null, captureRetryHistory = false) {
@@ -33,7 +51,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   const visibleError=String(errorCopy.textContent||'').replace(/\s+/g,' ').trim();
   // Inspect the rendered button subtree only: scanning the component source
   // would match all possible error actions, including inactive branches.
-  for (let i = 0; fiber && i < 45; i += 1, fiber = fiber.return) {
+  for (let i = 0; fiber && i < 80; i += 1, fiber = fiber.return) {
     const props = fiber.memoizedProps || {};
     if (i < 9) inspectElement(props.children);
     if (captureHistory && Array.isArray(props.entries)) {
@@ -60,13 +78,11 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
         ['in_progress','complete'].includes(entry.turn?.status) && typeof entry.errorMessage==='string' &&
         entry.errorMessage.replace(/\s+/g,' ').trim()===visibleError && visibleError) inputDeliveryError=true;
   }
-  // The owner's recovery policy follows the rendered native action: an
-  // explicit Start new chat also transfers Unknown error through the existing
-  // history handoff. Without that action, its native fallback retries in place.
-  const unknownServerError=Boolean(fiberKey) && /^unknown error[.!]?$/i.test(visibleError);
+  // Follow the native action identity or a bound input-delivery state, not
+  // translated error wording. An ambiguous action stays unclassified.
   const recoverySurface = alert.matches('[role="status"]:has(.text-chatgpt-recovery)');
   const action = messageIds.has('chatgptConversations.responseError.startNewChat') ? 'new-chat'
-    : unknownServerError || messageIds.has('chatgptConversations.responseError.retry') ||
+    : messageIds.has('chatgptConversations.responseError.retry') ||
       recoverySurface || inputDeliveryError ? 'retry' : 'unknown';
   const nativeUsers=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='user-message');
   const nativeAssistant=(recoveryEntry?.turn?.items||[]).filter(item=>item.type==='assistant-message'&&typeof item.messageId==='string'&&item.messageId).at(-1);
@@ -87,7 +103,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     const latestUser = Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-message-author-role="user"], [data-turn="user"]')).filter(visibleRecoveryNode).at(-1);
     const latestUserKey=latestUser?.getAttribute('data-testid')||latestUser?.getAttribute('data-chatgpt-search-unit-key');
     const sameRecovery=Boolean(recoveryBinding&&expectedRecoveryBinding&&
-      ['kind','url','entryId','userId'].every(key=>recoveryBinding[key]===expectedRecoveryBinding[key])&&
+      ['kind','url','entryId','userId'].every(key=>(recoveryBinding[key]??null)===(expectedRecoveryBinding[key]??null))&&
       (recoveryBinding.kind==='user'&&Boolean(recoveryBinding.userId)||
         recoveryBinding.assistantId===expectedRecoveryBinding.assistantId));
     const assistantOnly=sameRecovery&&recoveryBinding.kind==='assistant-only'&&!latestUser&&expectedPromptKey===location.pathname;
@@ -277,8 +293,12 @@ function controlChatComposer(options) {
     const effort=reasoning?.getAttribute('data-selected-reasoning-effort')||null;
     const key=reasoning&&Object.keys(reasoning).find(name=>name.startsWith('__reactFiber$')),models=new Set();
     for(let fiber=key&&reasoning[key],i=0;fiber&&i<24;i++,fiber=fiber.return){
-      const candidate=fiber.memoizedProps?.selectedLabelCandidate;
-      if(candidate?.reasoningEffort===effort&&typeof candidate.model==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(candidate.model))models.add(candidate.model);
+      // React alternates the current and work-in-progress fibers. The DOM node
+      // can retain the prior fiber even after the rendered effort has changed.
+      // Match both snapshots against the visible DOM and reject disagreement
+      // about the model for the same effort rather than guessing a model.
+      for(const candidate of [fiber.memoizedProps?.selectedLabelCandidate,fiber.alternate?.memoizedProps?.selectedLabelCandidate])
+        if(candidate?.reasoningEffort===effort&&typeof candidate.model==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(candidate.model))models.add(candidate.model);
     }
     return {effort,model:models.size===1?Array.from(models)[0]:null};
   }
@@ -353,11 +373,23 @@ function controlChatComposer(options) {
     const attachments=composer.querySelector('[data-composer-attachments]');
     return {...inspection,ok:matches&&prompt===''&&!attachments?.children.length};
   }
-  const inspectingEmptyHandoff=options.action==='inspect-empty-handoff';
+  const inspectingEmptyHandoff=options.action==='inspect-empty-handoff'||options.action==='inspect-resumable-handoff';
   if(inspectingEmptyHandoff) {
     const emptyRoot=location.pathname==='/'&&!root.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"], [data-chatgpt-search-unit-key]');
     const attachments=composer.querySelector('[data-composer-attachments]');
-    if(!emptyRoot||!matches||!ready||prompt!==''||controller.pendingBrowserAutocompleteSubmission!=null)return {...inspection,ok:false};
+    const expected=options.action==='inspect-empty-handoff'?'':options.text;
+    const idleEmpty=expected===''&&controller.pendingSubmit==null&&
+      !Array.from(composer.querySelectorAll('[data-testid="stop-button"],button[aria-label="Stop streaming"]')).some(visible);
+    if(!emptyRoot||typeof expected!=='string'||!matches||(!ready&&!idleEmpty)||prompt!==expected||controller.pendingBrowserAutocompleteSubmission!=null)return {...inspection,ok:false};
+    if(options.action==='inspect-resumable-handoff') {
+      // Restoring plain text must never discard rich formatting, links or
+      // inline nodes from an owner's draft, even when its visible text matches.
+      const doc=controller.view.state?.doc?.toJSON?.();
+      if(doc?.type!=='doc'||doc.marks?.length||!Array.isArray(doc.content)||!doc.content.every(p=>
+          p.type==='paragraph'&&!p.marks?.length&&(p.content||[]).every(n=>n.type==='text'&&typeof n.text==='string'&&
+            (!n.marks?.length||n.marks.every(m=>m.type==='literalPaste'&&Object.keys(m).length===1)&&/^[\p{L}\p{N}\s]+$/u.test(n.text))))||
+          doc.content.map(p=>(p.content||[]).map(n=>n.text).join('')).join('\n')!==expected)return {...inspection,ok:false};
+    }
     if(!attachments?.children.length)return inspection;
     // Reuse the exact one-ready-file proof below; never accept user files.
     if(!options.fileName)return {...inspection,ok:false};
