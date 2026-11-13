@@ -1817,6 +1817,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         if(typeof reconcileBlockedManualHandoff==='function')await reconcileBlockedManualHandoff(tabId,url);
         if(typeof reconcileCompletedSourceHandoff==='function')await reconcileCompletedSourceHandoff(tabId,url);
+        if(typeof reconcileNativeGoalAcknowledgement==='function')await reconcileNativeGoalAcknowledgement(tabId,url);
         const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;
         const answer=await reconcileWaitingGoalAnswer(tabId,url);if(answer?.ok||answer?.pendingMarker)return answer;
         const goal=await goalController.get(url);

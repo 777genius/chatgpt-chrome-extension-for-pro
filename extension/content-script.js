@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.126';
+  const SCRIPT_VERSION = '1.8.127';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -542,8 +542,7 @@
         // Long sent bubbles may collapse, add speaker labels or rich widgets.
         // Only the worker's durable operation + native request/message proof
         // can acknowledge this click; visible bubble text is not authority.
-        if((globalThis.__chatgptNotifierAttemptId||'')!==baselineAttempt&&
-            composer()===editor&&rawEditorText(editor)==='') {
+        if((globalThis.__chatgptNotifierAttemptId||'')!==baselineAttempt) {
           const result=await status('confirmed',{requestId:globalThis.__chatgptNotifierRequestId||null,
             startedAt:globalThis.__chatgptNotifierRequestStartedAt});
           if(result?.ok){confirmed=true;return;}

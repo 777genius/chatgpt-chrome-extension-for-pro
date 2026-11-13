@@ -16,7 +16,7 @@ const dispatchFunctions=section('  async function sleepUntilNextCheck() {','  fu
 const url='https://chatgpt.com/c/goal-dispatch-fixture';
 const text='First synthetic goal paragraph.\n\nSecond synthetic paragraph.';
 const ownerEdit='  Owner edit\n\nKeep exact spacing  ';
-async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed'|'saved-draft') {
+async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed'|'saved-draft'|'draft-after-send') {
   const {document,window}=parseHTML('<html><body><main><article data-turn="user" data-testid="user-1">Seed fixture</article></main><form><div id="prompt-textarea" contenteditable="true"><p><br class="ProseMirror-trailingBreak"></p></div></form></body></html>');
   const editor=document.querySelector<HTMLElement>('#prompt-textarea')!;
   if(mode==='saved-draft')editor.textContent=ownerEdit;
@@ -65,6 +65,7 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapse
         assert.equal(context.manualSendIntent,null,'Goal does not inherit a manual request intent');
         assert.equal(message.options.operationId,'dispatch-operation');clicks++;
         editor.textContent='';
+        if(mode==='draft-after-send')editor.textContent=ownerEdit;
         const user=document.createElement('article');user.setAttribute('data-turn','user');
         user.setAttribute('data-testid','user-2');user.textContent=mode==='collapsed'?'You said: First synthetic… Show more':text;document.querySelector('main')!.append(user);
         context.__chatgptNotifierAttemptId='goal-attempt';context.__chatgptNotifierRequestId='goal-network-request';context.__chatgptNotifierRequestStartedAt=now;
@@ -130,6 +131,8 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapse
 console.log('Goal dispatch: transient paragraph normalization, strict native verification and concurrent draft priority passed.');
 
 {const env=await fixture('collapsed');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed'],'collapsed sent UI does not cause another send or an unknown result');}
+
+{const env=await fixture('draft-after-send');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.editor.textContent,ownerEdit,'a new draft remains untouched while the worker confirms the sent request');assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed']);}
 
 {
  const f=await fixture('saved-draft');

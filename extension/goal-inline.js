@@ -119,7 +119,9 @@
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
     style.textContent=`
-.cggi-banner{box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:rgba(127,127,127,.12);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.cggi-banner{position:relative;z-index:1;box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:#ececec;color:inherit;text-align:left;font:inherit;cursor:pointer}
+html.dark .cggi-banner,[data-theme=dark] .cggi-banner{background:#242424}
+@media(prefers-color-scheme:dark){html:not(.light):not([data-theme=light]) .cggi-banner{background:#242424}}
 .cggi-banner[hidden],.cggi-banner button[hidden]{display:none}
 .cggi-banner button{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:none;color:inherit;opacity:.65;cursor:pointer}
 .cggi-banner button:hover{background:rgba(127,127,127,.17);opacity:1}.cggi-banner button:disabled{opacity:.3;cursor:default}
