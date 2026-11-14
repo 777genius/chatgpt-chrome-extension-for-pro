@@ -148,7 +148,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     }
     resetFields();
     const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Active',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
-    const phaseLabel=value=>value?.phase!=='blocked'?(phases[value?.phase]||value?.phase):
+    const phaseLabel=value=>value?.resumeRequested?'Resume queued':value?.phase!=='blocked'?(phases[value?.phase]||value?.phase):
       value.reason==='Модель ответила точным маркером GOAL_BLOCKED'?'Blocked':
       value.reason==='Восстановление запроса завершилось ошибкой'?'Recovery paused':
       value.operation?.status==='reserved'?'Send paused':'Needs review';
@@ -160,7 +160,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       bannerText.textContent=goalText||'';
       banner.title=goalText||'';
       updateElapsed();
-      const on=(active()&&!record.stopRequested)||armed();
+      const on=(active()&&!record.stopRequested)||record?.resumeRequested===true||armed();
       toggle.setAttribute('aria-checked',String(on));
       toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&(!!record?.operation||record?.phase==='blocked'));
       toggle.title=!route?'Goal is available on ChatGPT chat pages':!loaded&&error?'Retry loading Goal':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
@@ -177,7 +177,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
       buttons.pause.disabled=busy||loading||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
-      buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
+      buttons.resume.disabled=busy||loading||!loaded||!!record?.operation||!!record?.resumeRequested;
       buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
       for(const action of ['stop','pause','resume']) {
         bannerActions[action].hidden=buttons[action].hidden;
@@ -511,7 +511,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       // A click after a failed read retries that read only. Unknown state is
       // never permission to arm, disarm or stop an existing Goal.
       if(!loaded){void refresh();return;}
-      void act(active()&&!record.stopRequested?'stop':armed()?'disarm':'arm');
+      void act((active()&&!record.stopRequested)||record?.resumeRequested?'stop':armed()?'disarm':'arm');
     });
     listen(details,'click',()=>{if(syncRoute()||!loaded)void refresh();show(!open);});
     listen(close,'click',()=>show(false));

@@ -416,7 +416,7 @@
     }
     function stopTransition(old) {
       const inFlight=['sending','clicked'].includes(old.phase);
-      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
+      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,resumeRequested:false,
         ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
         reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
           'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
@@ -553,13 +553,24 @@
           if((old.phase!=='paused'&&!recoveryBlocked)||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
+          if(recoveryBlocked&&old.reason==='Восстановление запроса завершилось ошибкой') {
+            const record={...old,resumeRequested:true};
+            await event('resume_queued',record,tabId);await save(record);
+            return {record,queued:true};
+          }
           if(old.manualOverride||recoveryBlocked) {
             // An explicit Resume after a real manual intervention is a fresh
             // user authorization, but the current chat must be idle first.
             const ready=await tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url:target});
-            if(!ready?.ok||ready.idle!==true)throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
+            if(!ready?.ok)throw Error(ready?.reason||'Не удалось проверить состояние чата');
+            if(ready.idle!==true) {
+              if(!recoveryBlocked)throw Error(ready.reason||'Дождитесь завершения ручного ответа');
+              const record={...old,resumeRequested:true,reason:old.reason};
+              await event('resume_queued',record,tabId);await save(record);
+              return {record,queued:true};
+            }
           }
-          let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
+          let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,resumeRequested:false,reason:''};
           const pendingKind=old.manualPending?null:old.pendingSendKind||
             (old.pendingCompletion||old.manualOverride||recoveryBlocked?'continuation':null);
           if(pendingKind) {
@@ -796,7 +807,8 @@
         if(record&&Number.isFinite(startedAt)&&Math.max(record.startedAt||0,record.manualStartedAt||0)>startedAt)return {ok:false};
         if(record&&Number.isFinite(startedAt)&&record.manualStart?.startedAt===startedAt)return {ok:false};
         const retryBlocked=record?.phase==='blocked'&&!record.operation&&!record.stopRequested&&!record.pauseRequested&&
-          !record.manualOverride&&record.reason==='Восстановление запроса завершилось ошибкой';
+          !record.manualOverride&&(record.reason==='Восстановление запроса завершилось ошибкой'||
+            record.resumeRequested===true&&record.reason==='Модель ответила точным маркером GOAL_BLOCKED');
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase)&&!retryBlocked)return {ok:false};
         const supplement=typeof requestId==='string'&&requestId&&Number.isFinite(startedAt)&&Number.isFinite(eventAt)&&
           startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
@@ -815,7 +827,7 @@
           const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
           const pending=[...pendingManuals(record),{tabId,requestId,startedAt,eventAt,text,baselineKey,
             ...(linkTargets!==undefined?{linkTargets}: {})}];
-          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,
+          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,resumeRequested:false,
             manualPending:pending[0],manualPendingQueue:pending,manualOverride:false,markerPending:null,
             pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
             ...(!inFlight?{operation:null}:{}),reason:'Подтверждается отправленное дополнение к цели'};
@@ -865,6 +877,26 @@
       if(result.replay)await completion(result.replay);
       return {ok:result.ok,record:result.replay?await get(target):result.record};
     }
+    async function resumeObserved({url,tabId,expectedRecord,promptKey,nativeVerified}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{
+        const old=await read(target);
+        if(nativeVerified!==true||JSON.stringify(view(old))!==JSON.stringify(expectedRecord)||
+            old?.phase!=='blocked'||!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(old.reason)||
+            old.resumeRequested!==true||old.operation||old.manualPending||old.stopRequested||old.pauseRequested||
+            old.manualOverride||now()>=old.deadlineAt||old.expectedPromptKey!==promptKey)return {ok:false};
+        const next={...old,phase:'waiting',reason:'',resumeRequested:false};
+        await event('resumed',next,tabId);await save(next);return {ok:true,record:view(next)};
+      });
+    }
+    async function expireQueuedResume({url,tabId}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{const old=await read(target);
+        if(old?.phase!=='blocked'||old.resumeRequested!==true||now()<old.deadlineAt)return {ok:false};
+        const next={...old,phase:'stopped',reason:'Время Goal истекло',resumeRequested:false};
+        await event('stopped',next,tabId);await save(next);return {ok:true,record:view(next)};
+      });
+    }
     async function retry({url,tabId,kind,promptKey,attemptId,goalHandoff=false}) {
       const target=canonical(url);
       if(!target)return;
@@ -887,7 +919,7 @@
         if(kind==='retry.preparation_recovered')next={...record,phase:'recovering',reason:''};
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
-          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,reason:''};
+          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,resumeRequested:false,reason:''};
         if(['retry.failed','retry.blocked','draft.restore_failed'].includes(kind))
           next={...record,phase:record.phase==='paused'||record.pauseRequested?'paused':'blocked',reason:'Восстановление запроса завершилось ошибкой'};
         if(next===record)return;
@@ -1038,7 +1070,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

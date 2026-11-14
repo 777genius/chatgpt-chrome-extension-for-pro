@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
-type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;reason?:string;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
+type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;reason?:string;resumeRequested?:boolean;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
 type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
@@ -572,4 +572,10 @@ console.log('Lag-tolerant Goal confirmation: 30-minute original window, sparse s
  const banner=f.element<HTMLElement>('[data-chatgpt-goal-inline=banner]');assert.match(banner.textContent!,/Recovery paused/);
  let bubbled=0;banner.addEventListener('click',()=>bubbled++);f.click(f.element<HTMLElement>('[aria-label="Resume Goal"]'));await tick();
  assert.equal(bubbled,0,'action clicks must not reach a parent handler');assert.equal(f.calls.at(-1)!.action,'resume');f.instance.dispose();
+}
+{
+ const f=fixture();await tick();f.setRecord({...goal(chat,'blocked'),reason:'Восстановление запроса завершилось ошибкой',resumeRequested:true});await f.instance.refresh();
+ assert.match(f.element<HTMLElement>('[data-chatgpt-goal-inline=banner]').textContent!,/Resume queued/);
+ assert.equal(f.toggle().getAttribute('aria-checked'),'true');assert.equal(f.element<HTMLButtonElement>('[aria-label="Resume Goal"]').disabled,true);
+ f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'stop','the user can cancel a queued resume');f.instance.dispose();
 }

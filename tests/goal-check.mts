@@ -716,6 +716,24 @@ for(const reason of ['Модель ответила точным маркеро�
  const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason});const before=structuredClone(state(env));
  await env.store.manual({url:URL_A,tabId:7,requestId:'manual',startedAt:env.time+1,eventAt:env.time+1,text:'Continue',baselineKey:state(env).expectedPromptKey});assert.deepEqual(state(env),before);
 }
+{
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});assert.equal(state(env).resumeRequested,true);assert.equal(env.messages.length,1,'one click queues observation, even when the editor looks idle');
+ const original=await env.store.get(URL_A);assert.equal((await env.store.resumeObserved({url:URL_A,tabId:7,expectedRecord:original,promptKey:original.expectedPromptKey,nativeVerified:false})).ok,false);
+ assert.equal((await env.store.resumeObserved({url:URL_A,tabId:7,expectedRecord:original,promptKey:original.expectedPromptKey,nativeVerified:true})).ok,true);assert.equal(state(env).phase,'waiting');assert.equal(env.messages.length,1,'observation never sends');
+}
+{
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});env.time=state(env).deadlineAt;
+ await env.store.expireQueuedResume({url:URL_A,tabId:7});assert.equal(state(env).phase,'stopped');assert.equal(state(env).resumeRequested,false);assert.equal(env.messages.length,1);
+}
+{
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});const observed=await env.store.get(URL_A);
+ await env.store.control({url:URL_A,tabId:7,action:'stop'});
+ assert.equal((await env.store.resumeObserved({url:URL_A,tabId:7,expectedRecord:observed,promptKey:observed.expectedPromptKey,nativeVerified:true})).ok,false);
+ assert.equal(state(env).phase,'stopped');assert.equal(state(env).resumeRequested,false);assert.equal(env.messages.length,1,'Stop wins the observation race');
+}
 
 // Retry failure after an actual user Pause cannot silently resume the Goal
 // when a conversation-length error later moves it to a new chat.
@@ -832,8 +850,8 @@ console.log('Blocked handoff submitted-message witness: durable, idempotent, no 
  const env=fixture();await begin(env);await confirm(env);
  await answer(env,{response:'GOAL_BLOCKED',rawExact:true});
  const before=state(env),deadline=before.deadlineAt,objective=before.goal;
- env.busy=true;await assert.rejects(()=>env.store.control({url:URL_A,tabId:7,action:'resume'}));
- assert.equal(state(env).phase,'blocked');
+ env.busy=true;await env.store.control({url:URL_A,tabId:7,action:'resume'});
+ assert.equal(state(env).phase,'blocked');assert.equal(state(env).resumeRequested,true);assert.equal(env.messages.length,1,'busy chat queues without sending');
  env.busy=false;await env.store.control({url:URL_A,tabId:7,action:'resume'});
  assert.equal(state(env).phase,'preparing');assert.equal(state(env).goal,objective);
  assert.equal(state(env).deadlineAt,deadline);assert.equal(env.messages.length,2);

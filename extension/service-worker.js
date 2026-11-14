@@ -1506,6 +1506,60 @@ async function reconcileNativeGoalAcknowledgement(tabId,url) {
       userId:fresh.userId,response:fresh.goalResponse||'',rawExact:fresh.goalRawExact===true,nativeMarkerPending:fresh.goalMarkerPending===true,nativeVerified:true});
   return result;
 }
+
+// Resume requested during an answer is an observation request, not a send
+// grant. Only the latest completed native turn and its durable request may
+// release it; unknown or still-running turns remain queued.
+async function reconcileQueuedGoalResume(tabId,url) {
+  const pending=()=>({ok:true,pending:true,canRetry:true});
+  let goal=await goalController.get(url);
+  if(!goal?.resumeRequested||goal.phase!=='blocked'||goal.operation||goal.stopRequested||goal.pauseRequested||goal.manualOverride)return null;
+  if(goal.manualPending) {
+    await bindNativeManualSupplement(tabId,url).catch(()=>({ok:false,pending:true}));
+    goal=await goalController.get(url);
+    if(goal?.manualPending)return pending();
+    if(!goal?.resumeRequested||goal.phase!=='blocked'||goal.operation||goal.stopRequested||goal.pauseRequested)return null;
+  }
+  if(Date.now()>=goal.deadlineAt){await goalController.expireQueuedResume({url,tabId});return {ok:true,pending:false};}
+  const ready=await chrome.tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url}).catch(()=>null);
+  if(!ready?.ok||ready.idle!==true)return pending();
+  const receipt=await latestRequestReceipt(tabId),journal=await readJournal();
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const n=checked?.result,requests=journal?.events?.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===url&&e.requestId===receipt?.requestId&&e.eventAt===receipt?.startedAt)||[];
+  if(typeof receipt?.requestId!=='string'||!receipt.requestId||!Number.isFinite(receipt.startedAt)||
+      !journal?.ok||journal.storageError||journal.events.length!==journal.meta?.sequence||journal.events.some((e,i)=>e.sequence!==i+1)||
+      requests.length!==1||journal.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence)||
+      !n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.turnStatus!=='complete'||n.generating!==false||n.hasError||
+      n.assistantCompleted!==true||n.assistantPhase!=='final_answer'||!n.assistantKey||!n.userId||!n.promptKey||
+      !Number.isFinite(n.userSentAtMs)||Math.abs(n.userSentAtMs-receipt.startedAt)>10000||
+      receipt.submittedUserId&&receipt.submittedUserId!==n.userId)return pending();
+  const [fresh]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  if(JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
+      fresh?.result?.userId!==n.userId||fresh.result.userText!==n.userText||fresh.result.userSentAtMs!==n.userSentAtMs||fresh.result.promptKey!==n.promptKey||fresh.result.assistantKey!==n.assistantKey||
+      fresh.result.goalResponse!==n.goalResponse||fresh.result.goalRawExact!==n.goalRawExact||fresh.result.goalMarkerPending!==n.goalMarkerPending||
+      fresh.result.turnStatus!=='complete'||fresh.result.generating!==false||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
+  if(goal.reason==='Модель ответила точным маркером GOAL_BLOCKED'&&n.promptKey===goal.expectedPromptKey&&
+      goal.lastCompletionKey===n.promptKey+'|'+n.assistantKey) {
+    return goalController.control({action:'resume',url,tabId});
+  }
+  if(!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(goal.reason))return pending();
+  if(n.promptKey!==goal.expectedPromptKey) {
+    const superseded=journal.events.filter(e=>e.kind==='retry.preparation_superseded'&&e.tabId===tabId&&e.sourceUrl===url&&e.requestId===receipt.requestId&&e.startedAt===receipt.startedAt);
+    if(requests[0].operationId||superseded.length!==1||typeof n.userText!=='string'||!n.userText.trim()||n.userText.length>10000)return pending();
+    const staged=await goalController.manual({url,tabId,requestId:receipt.requestId,startedAt:receipt.startedAt,eventAt:receipt.startedAt,text:n.userText,baselineKey:goal.expectedPromptKey});
+    if(!staged?.ok)return pending();
+    const bound=await goalController.manualBind({url,tabId,id:goal.id,requestId:receipt.requestId,startedAt:receipt.startedAt,promptKey:n.promptKey,userId:n.userId,userText:n.userText,userVisibleText:n.userVisibleText,userSentAtMs:n.userSentAtMs,nativeVerified:true});
+    if(!bound?.ok)return pending();
+  } else if(!(await goalController.resumeObserved({url,tabId,expectedRecord:goal,promptKey:n.promptKey,nativeVerified:true}))?.ok)return pending();
+  const [last]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  if(last?.result?.userId!==n.userId||last.result.userText!==n.userText||last.result.userSentAtMs!==n.userSentAtMs||last.result.promptKey!==n.promptKey||last.result.assistantKey!==n.assistantKey||
+      last.result.goalResponse!==n.goalResponse||last.result.goalRawExact!==n.goalRawExact||last.result.goalMarkerPending!==n.goalMarkerPending||
+      last.result.turnStatus!=='complete'||last.result.generating!==false||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
+      ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
+  const completed=await goalController.completion({url,tabId,completionKey:n.promptKey+'|'+n.assistantKey,promptKey:n.promptKey,userId:n.userId,
+    response:n.goalResponse||'',rawExact:n.goalRawExact===true,nativeMarkerPending:n.goalMarkerPending===true,nativeVerified:true});
+  return completed.pendingMarker?pending():completed;
+}
 async function reconcileAcceptedHandoffGoal(tabId,url) {
   const key='chatgpt-goal:'+url,values=await chrome.storage.local.get([key,handoffKey(tabId)]);
   const goal=values[key],handoff=values[handoffKey(tabId)];
@@ -1754,7 +1808,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes}),tabId,url:live};
       } else if(message.action!=='get') {
         if(!ChatGPTGoalPolicy.canonical(live))throw Error('Goal ещё ожидает первое сообщение');
-        return {...await goalController.control({action:message.action,url:live,tabId}),tabId,url:live};
+        const controlled=await goalController.control({action:message.action,url:live,tabId});
+        if(controlled.record?.resumeRequested)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_ROUTE_CHANGED'}).catch(()=>{});
+        return {...controlled,tabId,url:live};
       }
       if(result?.ok===false)return result;
       const url=ChatGPTGoalPolicy.canonical(live);
@@ -1818,6 +1874,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         if(typeof reconcileBlockedManualHandoff==='function')await reconcileBlockedManualHandoff(tabId,url);
         if(typeof reconcileCompletedSourceHandoff==='function')await reconcileCompletedSourceHandoff(tabId,url);
+        const queued=typeof reconcileQueuedGoalResume==='function'?await reconcileQueuedGoalResume(tabId,url).catch(()=>({ok:true,pending:true,canRetry:true})):null;if(queued)return queued;
         if(typeof reconcileNativeGoalAcknowledgement==='function')await reconcileNativeGoalAcknowledgement(tabId,url);
         const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;
         const answer=await reconcileWaitingGoalAnswer(tabId,url);if(answer?.ok||answer?.pendingMarker)return answer;
@@ -1835,6 +1892,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // coordinator still enforces pending and unknown-send fences.
         await bindNativeManualSupplement(tabId,url).catch(()=>({ok:false,pending:true}));
         await reconcileGoalPromptBinding(tabId,url).catch(()=>({ok:false}));
+        const boundAnswer=await reconcileWaitingGoalAnswer(tabId,url);if(boundAnswer?.ok||boundAnswer?.pendingMarker)return boundAnswer;
         return goalController.recoverTab({id:tabId,url});
       }
       if(message.type==='CHATGPT_GOAL_CONTEXT'){await bindNativeManualSupplement(tabId,url);return {ok:true,text:await goalController.context(url)};}

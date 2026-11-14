@@ -281,6 +281,7 @@ async function domCheck() {
   const uncertain = setup('Черновик до неясной отправки', true, false);
   await uncertain.fail('error');
   await waitFor(()=>uncertain.sends.length===1);
+  await waitFor(()=>uncertain.messages.length>0);
   assert.equal(uncertain.logs.filter(e=>e.kind==='retry.confirmed').length,0,'uncertain send must never be logged as confirmed');
   assert.equal(uncertain.sends.length, 1, 'uncertain send is clicked exactly once');
   assert.match(uncertain.messages[0].retryReason, /подтвердить отправку/);
