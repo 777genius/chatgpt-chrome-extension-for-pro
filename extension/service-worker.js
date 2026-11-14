@@ -639,8 +639,10 @@ async function recoverNativeComposerGoal(tabId,url,pending) {
     const item={...user,requestId:found.requestId,startedAt:found.eventAt};
     if(found.operationId) {
       const sent=journal.events.filter(e=>e.tabId===tabId&&e.operationId===found.operationId&&e.kind==='send.dispatched');
-      if(index!==following.length-1||sent.length!==1||sent[0].text!==user.userText)return waiting();
-      anchor={...item,operationId:found.operationId};
+      if(sent.length!==1||sent[0].text!==user.userText)return waiting();
+      // A later real user message supersedes the automatic turn as the
+      // completion anchor; keep that message as a supplement, not the retry.
+      if(index===following.length-1)anchor={...item,operationId:found.operationId};
     } else supplements.push(item);
   }
   const [currentNative]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:scheduledRecovery?[url,true,null,null,null,null,true]:[url,true]});
@@ -700,8 +702,23 @@ async function restoreMissingComposerGoal(tabId,url,armId,userConfirmed=false) {
   const later=requests.filter(e=>e.sourceUrl===url&&e.eventAt>initial[0].eventAt),supplements=[];
   let anchor=null;const consumed=new Set();
   for(const u of timeline) {
-    if(Math.abs(u.userSentAtMs-initial[0].eventAt)<=10000&&
-        ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,u.userText,null))continue;
+    if(Math.abs(u.userSentAtMs-initial[0].eventAt)<=10000) {
+      if(ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,u.userText,null))continue;
+      // With an explicit restore request, a virtualized rich first message can
+      // still be tied to the saved intent by its unique allocation receipt,
+      // native first-user ID and the exact ordered links captured at send.
+      // This is not proof for an automatic restore or an unknown handoff.
+      const allocations=j.events.filter(e=>e.kind==='completion.url_allocated'&&e.tabId===tabId&&
+        e.requestId===initial[0].requestId&&e.attemptId===String(initial[0].eventAt)&&e.promptKey===u.promptKey);
+      const targets=pending.intent.linkTargets;
+      const pattern=/\[([^\]\n]{1,500})\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
+      const nativeTargets=typeof u.userText==='string'?[...u.userText.matchAll(pattern)].map(m=>m[2].replace(/\\([()\\])/g,'$1')):[];
+      if(userConfirmed&&!lineage.handoffs.length&&timeline[0]===u&&allocations.length===1&&
+          Array.isArray(latest.firstTurnMessageIds)&&latest.firstTurnMessageIds[0]===u.userId&&
+          Array.isArray(targets)&&targets.length>0&&targets.length<=32&&
+          targets.every(x=>typeof x==='string'&&/^https?:\/\//.test(x))&&
+          JSON.stringify(nativeTargets)===JSON.stringify(targets))continue;
+    }
     const matches=requests.filter(e=>(e.sourceUrl===url||lineage.handoffs.some(h=>h.requestId===e.requestId&&h.targetUrl===url))&&
       Math.abs(e.eventAt-u.userSentAtMs)<=10000);
     if(matches.length!==1)return wait();

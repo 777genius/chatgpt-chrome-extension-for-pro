@@ -41,6 +41,25 @@ async function fixture(witness=false){
 {
  const f=await fixture(true);assert.equal((await f.recover()).ok,true);assert.equal(f.data['chatgpt-goal:'+url].restoredIntent.confirmation,'request-body');
 }
+for(const scenario of ['valid','no-consent','wrong-link','wrong-allocation','wrong-first-id','duplicate-allocation']) {
+ const f=await fixture(),intent=f.data['chatgpt-goal-composer:7'].intent;
+ intent.linkTargets=['https://example.test/source'];
+ const initial={userId:'original-native-user',userText:'Formatted [label](https://example.test/source)',userSentAtMs:1100,promptKey:prefix+'initial'};
+ f.history.recoveryTimeline.unshift(initial);
+ f.events.push({kind:'completion.url_allocated',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'root-request',attemptId:'1100',promptKey:initial.promptKey});
+ if(scenario==='wrong-link')initial.userText='Formatted [label](https://example.test/other)';
+ if(scenario==='wrong-allocation')f.events.at(-1)!.promptKey=prefix+'other';
+ if(scenario==='wrong-first-id')f.native.firstTurnMessageIds=['other'];
+ if(scenario==='duplicate-allocation')f.events.push({...f.events.at(-1)});
+ f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ const r=await f.recover(scenario!=='no-consent');
+ if(scenario==='valid'){
+  assert.equal(r.ok,true,'explicit restore accepts uniquely bound virtualized rich original');
+  assert.equal(f.data['chatgpt-goal:'+url].goal,'Exact original objective');
+  assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+ }else{assert.equal(r.pending,true,scenario);assert.equal(f.data['chatgpt-goal:'+url],undefined,scenario);}
+ assert.equal(f.dispatched.length,0,'original message is never resent');
+}
 for(const marker of [false,true]){
  const f=await fixture();Object.assign(f.native,{turnStatus:'complete',generating:false,assistantCompleted:true,assistantPhase:'final_answer',
   assistantKey:'final-answer',goalResponse:marker?'GOAL_COMPLETE':'Work remains',goalRawExact:marker});

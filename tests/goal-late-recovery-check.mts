@@ -137,3 +137,17 @@ console.log('Late Goal recovery: atomic original+all supplements, original limit
  assert.equal((await f.recover()).pending,true);
  assert.equal(f.data['chatgpt-goal:'+url],undefined);
 }
+{
+ const f=await fixture();f.requests[1].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:f.users[1].userText});
+ const r=await f.recover(),g=f.data['chatgpt-goal:'+url];
+ assert.equal(r.ok,true,'a verified retry followed by a manual message must not strand the original Goal');
+ assert.deepEqual(g.supplements.map((item:V)=>item.text),['Second clarification']);
+ assert.equal(g.expectedPromptKey,f.users[2].promptKey);assert.equal(f.messages.length,0);
+}
+{
+ const f=await fixture();f.requests[1].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:'different'});
+ assert.equal((await f.recover()).pending,true,'an unproven intermediate retry never binds');
+ assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.messages.length,0);
+}
