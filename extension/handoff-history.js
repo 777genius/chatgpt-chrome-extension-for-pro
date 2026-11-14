@@ -22,7 +22,9 @@ globalThis.ChatGPTHandoffHistory = (() => {
       automatic.filter(a=>a.text===message.text&&(a.userId&&message.id===a.userId||
         a.promptKey&&message.promptKey===a.promptKey||Number.isFinite(message.sentAtMs)&&Math.abs(a.at-message.sentAtMs)<=10000)):[]);
     const clean=messages.filter((message,index)=>{
-      if(message.role==='assistant'&&/^(?:GOAL_COMPLETE|GOAL_BLOCKED)$/.test(message.text.trim()))return false;
+      // Native fallbackMarkdown escapes the underscore in an otherwise exact
+      // marker. Preserve explanations and all other assistant content.
+      if(message.role==='assistant'&&/^GOAL\\?_(?:COMPLETE|BLOCKED)$/.test(message.text.trim()))return false;
       const matches=candidates[index];
       if(matches.length!==1)return true;
       return candidates.filter(x=>x.includes(matches[0])).length!==1;

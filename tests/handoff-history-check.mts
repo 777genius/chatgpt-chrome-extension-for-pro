@@ -3,6 +3,10 @@ const ctx=createContext({});runInContext(readFileSync('extension/handoff-history
 const sourceUrl='https://chatgpt.com/c/source',op='automatic',tabId=1,events=[{kind:'retry.send_intent',operationId:op,sourceUrl,tabId},{kind:'send.authorized',operationId:op,sourceUrl,tabId},{kind:'send.dispatched',operationId:op,sourceUrl,tabId,text:'доделай е2е'},{kind:'request.started',operationId:op,sourceUrl,tabId,eventAt:100000}];
 const messages=[{role:'user',id:'manual',text:'доделай е2е',sentAtMs:50000},{role:'assistant',id:'a',text:'Detailed progress'}, {role:'user',id:'auto',text:'доделай е2е',sentAtMs:100050},{role:'assistant',id:'blocked',text:'GOAL_BLOCKED'}, {role:'assistant',id:'quoted',text:'The marker GOAL_BLOCKED appears in this explanation.'},{role:'user',id:'new',text:'Why?',sentAtMs:150000}];
 assert.deepEqual(select(messages,events).map((x:any)=>x.id),['manual','a','quoted','new'],'exclude only positively matched automatic send and exact marker');
+const markdownMarkers=[{role:'assistant',id:'complete',text:'GOAL\\_COMPLETE'},
+ {role:'assistant',id:'blocked',text:'GOAL\\_BLOCKED'},
+ {role:'assistant',id:'explanation',text:'Explanation: GOAL\\_BLOCKED'}];
+assert.deepEqual(select(markdownMarkers,[]).map((x:any)=>x.id),['explanation'],'escaped standalone Markdown markers are excluded without removing explanations');
 assert.ok(select(messages,[]).some((x:any)=>x.id==='auto'),'missing journal evidence preserves matching text');
 assert.ok(select(messages,events.filter(e=>e.kind!=='retry.send_intent')).some((x:any)=>x.id==='auto'),'a handoff payload without a retry or Goal intent is retained');
 assert.ok(select(messages,[...events,{kind:'request.started',operationId:null,sourceUrl,tabId,eventAt:100001}]).some((x:any)=>x.id==='auto'),'ambiguous nearby manual send preserves text');
