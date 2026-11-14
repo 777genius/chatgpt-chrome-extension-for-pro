@@ -1704,6 +1704,11 @@ async function reconcileGoalPreparation(tabId,url) {
 }
 async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,startedAt}) {
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
+  // Another observer may already have committed this exact ACK while the
+  // sender was waiting. Acknowledge it idempotently without another report,
+  // click or completion; the sender can safely restore its saved draft.
+  if(record?.id===id&&record.url===url&&record.lastConfirmedOperation?.id===operationId&&
+      record.lastConfirmedOperation.tabId===tabId)return {ok:true,alreadyConfirmed:true};
   const sameOperation=value=>value?.id===id&&value.url===url&&value.operation?.id===operationId&&value.operation.tabId===tabId&&
     ['sending','clicked','blocked'].includes(value.phase)&&['intent','clicked'].includes(value.operation.status)&&
     value.operation.text===op?.text&&value.operation.baselineKey===op?.baselineKey&&!value.manualPending&&

@@ -55,6 +55,10 @@ async function confirm(env:Env,promptKey='/c/goal-fixture-a|user-1',url=URL_A) {
   await assert.rejects(()=>env.store.intent({url,tabId:op.tabId,id:record.id,operationId:op.id,text:op.text}),/разрешённой/);
   await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'clicked'});
   await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'confirmed',newPromptKey:promptKey});
+  assert.deepEqual(state(env,url).lastConfirmedOperation,{id:op.id,tabId:op.tabId});
+  assert.equal((await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'clicked'})).alreadyConfirmed,true,
+    'a delayed click report recognises the exact already-confirmed operation');
+  assert.equal((await env.store.report({url,tabId:op.tabId,id:record.id,operationId:'other',status:'clicked'})).ok,false);
   assert.equal(state(env,url).expectedPromptKey,promptKey);
   assert.equal(state(env,url).phase,'waiting');
 }

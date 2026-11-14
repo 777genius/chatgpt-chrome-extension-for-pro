@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.134';
+  const SCRIPT_VERSION = '1.8.135';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -535,7 +535,9 @@
       const sent=await inspectComposer(text,'send',{operationId});
       if(sent?.ok===false&&!sent.unknown)clicked=false;
       if(!sent?.ok||!sent.clicked)throw Error(sent?.reason||'Нет подтверждения единственного клика');
-      if(!(await status('clicked'))?.ok)throw Error('Не удалось зафиксировать результат клика');
+      const clickStatus=await status('clicked');
+      if(!clickStatus?.ok)throw Error('Не удалось зафиксировать результат клика');
+      if(clickStatus.alreadyConfirmed===true){confirmed=true;return;}
       const deadline=Date.now()+120000;
       while(Date.now()<deadline) {
         if(!sameChat())throw Error('Чат изменился при подтверждении отправки');

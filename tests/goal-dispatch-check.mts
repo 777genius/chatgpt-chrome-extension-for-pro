@@ -16,10 +16,10 @@ const dispatchFunctions=section('  async function sleepUntilNextCheck() {','  fu
 const url='https://chatgpt.com/c/goal-dispatch-fixture';
 const text='First synthetic goal paragraph.\n\nSecond synthetic paragraph.';
 const ownerEdit='  Owner edit\n\nKeep exact spacing  ';
-async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed'|'saved-draft'|'draft-after-send'|'slow-confirm') {
+async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapsed'|'saved-draft'|'draft-after-send'|'slow-confirm'|'background-confirm'|'background-click') {
   const {document,window}=parseHTML('<html><body><main><article data-turn="user" data-testid="user-1">Seed fixture</article></main><form><div id="prompt-textarea" contenteditable="true"><p><br class="ProseMirror-trailingBreak"></p></div></form></body></html>');
   const editor=document.querySelector<HTMLElement>('#prompt-textarea')!;
-  if(mode==='saved-draft')editor.textContent=ownerEdit;
+  if(mode==='saved-draft'||mode==='background-confirm'||mode==='background-click')editor.textContent=ownerEdit;
   let now=1000000,normalizePending=false,clicks=0,phase='reserved';
   const events:string[]=[],statuses:any[]=[],nativeChecks:any[]=[];
   let insertedBeforeTick='';
@@ -73,7 +73,8 @@ async function fixture(mode:'normalize'|'owner-edit'|'native-mismatch'|'collapse
       }
       if(message.type==='CHATGPT_GOAL_STATUS') {
         statuses.push(structuredClone(message));events.push('status-'+message.status);
-        if(message.status==='confirmed'){assert.equal(message.requestId,'goal-network-request');assert.equal(message.startedAt,context.__chatgptNotifierRequestStartedAt);if(mode==='slow-confirm'&&now-message.startedAt<20000)return {ok:false,pending:true};phase='waiting';}
+        if(message.status==='clicked'&&mode==='background-click'){phase='waiting';return {ok:true,alreadyConfirmed:true};}
+        if(message.status==='confirmed'){assert.equal(message.requestId,'goal-network-request');assert.equal(message.startedAt,context.__chatgptNotifierRequestStartedAt);if(mode==='slow-confirm'&&now-message.startedAt<20000)return {ok:false,pending:true};phase='waiting';if(mode==='background-confirm')return {ok:true,alreadyConfirmed:true};}
         if(message.status==='blocked')phase='blocked';
         return {ok:true};
       }
@@ -135,6 +136,9 @@ console.log('Goal dispatch: transient paragraph normalization, strict native ver
 {const env=await fixture('draft-after-send');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.editor.textContent,ownerEdit,'a new draft remains untouched while the worker confirms the sent request');assert.deepEqual(env.statuses.map(status=>status.status),['clicked','confirmed']);}
 
 {const env=await fixture('slow-confirm');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.statuses.some(status=>status.status==='blocked'),false,'slow native confirmation must not prematurely block a sent Goal');assert.ok(env.statuses.filter(status=>status.status==='confirmed').length>1);}
+
+{const env=await fixture('background-confirm');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.editor.textContent,ownerEdit);assert.equal(env.events.includes('goal.dispatch_failed'),false,'an ACK already committed by another observer is not an error');assert.ok(env.events.includes('restore-draft'));}
+{const env=await fixture('background-click');assert.equal(env.clicks,1);assert.equal(env.phase,'waiting');assert.equal(env.editor.textContent,ownerEdit);assert.equal(env.events.includes('goal.dispatch_failed'),false,'a late click report does not undo a committed ACK');assert.ok(env.events.includes('restore-draft'));}
 
 {
  const f=await fixture('saved-draft');

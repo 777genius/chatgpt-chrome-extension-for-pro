@@ -649,6 +649,8 @@
     async function report({url,tabId,id,operationId,status,reason='',newPromptKey='',nativeConfirmed=false}) {
       const result=await serialize(async()=>{
         const record=await read(url);
+        if(status==='clicked'&&record?.id===id&&record.lastConfirmedOperation?.id===operationId&&
+            record.lastConfirmedOperation.tabId===tabId)return {ok:true,alreadyConfirmed:true};
         if(!record||record.id!==id||record.operation?.id!==operationId||
             record.operation.tabId!==tabId)return {ok:false,reason:'Операция Goal изменена'};
         if(status==='clicked') {
@@ -674,6 +676,7 @@
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
             expectedPromptKey:expected,confirmedPromptBinding:null,handoffPending:false,operation:null,
+            lastConfirmedOperation:{id:operationId,tabId},
             earlyCompletion:stop?null:early,earlyCompletions:[],
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
@@ -693,7 +696,8 @@
       // the response durably bound to the operation, then process after the
       // confirmed new user turn. Recovery can replay the same record safely.
       if(result.replay)await completion(result.replay);
-      return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason};
+      return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason,
+        ...(result.alreadyConfirmed?{alreadyConfirmed:true}:{})};
     }
     // Observation-only recovery: consume an already accepted click, including
     // sent manual follow-ups. This method never dispatches or changes limits.
@@ -720,6 +724,7 @@
         }
         const last=supplements.at(-1),expired=now()>=old.deadlineAt;
         const next={...old,phase:expired?'stopped':'waiting',reason:expired?'Время Goal истекло':'',operation:null,
+          lastConfirmedOperation:{id:operationId,tabId:op.tabId},
           expectedPromptKey:last?.promptKey||promptKey,confirmedPromptBinding:last?null:{operationId,userId},
           continuations:old.continuations+(op.kind==='continuation'?1:0),
           supplements:[...(old.supplements||[]),...supplements],
