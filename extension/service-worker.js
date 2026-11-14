@@ -2288,8 +2288,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     (async()=>{
       const receipt=await latestRequestReceipt(tabId);
-      if(!receipt||receipt.operationId!==message.operationId||receipt.url!==url||
+      if(!receipt||receipt.operationId!==message.operationId||receipt.url&&receipt.url!==url||
           !receipt.requestId||!Number.isFinite(receipt.startedAt))return {ok:false};
+      let journalSequence=null;
+      if(!receipt.url) {
+        // Some native request receipts lack documentUrl. Accept only an exact
+        // durable request-start binding in this tab and chat; an empty URL is
+        // not itself evidence and may never bypass a later request or a gap.
+        const journal=await readJournal(),events=journal?.events;
+        if(!journal?.ok||journal.storageError||!Array.isArray(events)||events.length!==journal.meta?.sequence||
+            events.some((e,i)=>e.sequence!==i+1))return {ok:false};
+        const started=events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&
+          e.operationId===message.operationId&&e.requestId===receipt.requestId&&e.eventAt===receipt.startedAt&&e.sourceUrl===url);
+        if(started.length!==1||events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
+            e.sequence>started[0].sequence))return {ok:false};
+        journalSequence=journal.meta.sequence;
+      }
       const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
       const claims=Object.values(meta?.retrySendClaims||{}).filter(claim=>
         claim.operationId===message.operationId&&claim.tabId===tabId&&claim.sourceUrl===url&&claim.phase==='consumed');
@@ -2304,8 +2318,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           receipt.submittedUserId&&receipt.submittedUserId!==native.userId||
           native.userText!==message.text&&native.userVisibleText!==message.text)return {ok:false};
       const fresh=await latestRequestReceipt(tabId),tab=await chrome.tabs.get(tabId);
+      if(journalSequence!==null&&((await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META])?.sequence!==journalSequence)
+        return {ok:false};
       return {ok:ChatGPTHandoffTitle.chatUrl(tab.url)===url&&fresh?.operationId===receipt.operationId&&
-        fresh.requestId===receipt.requestId&&fresh.startedAt===receipt.startedAt};
+        fresh.requestId===receipt.requestId&&fresh.startedAt===receipt.startedAt&&fresh.url===receipt.url};
     })().then(sendResponse).catch(()=>sendResponse?.({ok:false}));return true;
   }
   if(message?.type==='CHATGPT_COMPLETION_PROBE') {
