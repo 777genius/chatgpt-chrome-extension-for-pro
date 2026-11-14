@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.136';
+  const SCRIPT_VERSION = '1.8.137';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -984,7 +984,7 @@
     const history = messages.map((item, index) =>
       `--- Сообщение ${index + 1}. ${item.role === 'user' ? 'Пользователь' : 'ChatGPT'} ---\n${item.text}`
     ).join('\n\n');
-    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние доступные сообщения: до двадцати сообщений пользователя и двадцати ответов ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
+    return `Передача задачи из предыдущего чата: ${sourceUrl}\n\nНиже последние доступные сообщения: до пятидесяти сообщений пользователя и пятидесяти ответов ChatGPT в исходном хронологическом порядке. Это история предыдущей работы, а не подтверждение её выполнения.\n\n${history}\n\n--- Причина передачи ---\nВот такая ошибка у другого агента: ${errorText}\nПоэтому задачу передаём тебе. Продолжи с учётом этой истории, проверь актуальное состояние и доделай задачу end-to-end.`;
   }
 
   async function updateHandoff(stage, extra = {}) {
@@ -1336,7 +1336,7 @@
     const text=handoffText(info.messages,error.response,sourceUrl)+(goalContext.text?'\n\n'+goalContext.text:'');
     const asFile = text.length > 12000;
     const fileName = `chat-handoff-${Date.now()}.txt`;
-    const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там до двадцати последних сообщений пользователя и двадцати ответов ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
+    const prompt = asFile ? `Прочитай приложенный файл ${fileName}: там до пятидесяти последних сообщений пользователя и пятидесяти ответов ChatGPT в исходном порядке.\n\nВот такая ошибка у другого агента: ${error.response}\nПоэтому задачу передаём тебе. Проверь актуальное состояние и доделай её end-to-end.` : text;
     const sourceReasoning = await reasoningMode(),sourceEffort=sourceReasoning.value,sourceModel=sourceReasoning.model;
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(sourceEffort) || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(sourceModel)) throw new Error('Не удалось сохранить исходный режим рассуждения');
     const sourceEditor = composer();

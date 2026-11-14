@@ -170,6 +170,17 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
     const userTimes=(entry.timestampTurns||[]).filter(t=>t.role==='user');
     let userIndex=0;
     for (const [itemIndex,item] of (entry.turn?.items || []).entries()) {
+      // Agent turns can expose user-facing progress as completed preambles
+      // inside a reasoning group, with no final assistant-message at all.
+      // Never export transient thoughts, tool calls, or internal reasoning.
+      if (item.type === 'chatgpt-reasoning-group' && Array.isArray(item.items)) {
+        for (const [groupIndex,part] of item.items.entries()) {
+          if (part.type==='reasoning' && part.presentation==='preamble' && part.completed===true &&
+              part.isTransient!==true && typeof part.content==='string' && part.content.trim()) {
+            all.push({role:'assistant',text:part.content,id:`${entry.id}:${itemIndex}:preamble:${groupIndex}`});
+          }
+        }
+      }
       const role = item.type === 'user-message' ? 'user'
         : item.type === 'assistant-message' && (!item.phase || item.phase === 'final_answer') ? 'assistant' : null;
       if (role) {
@@ -186,8 +197,8 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
       .forEach(({ index }) => selected.add(index));
   }
   const messages = all.filter((_, index) => selected.has(index));
-  const shortHistory = messages.filter((item) => item.role === 'user').length < 20 ||
-    messages.filter((item) => item.role === 'assistant').length < 20;
+  const shortHistory = messages.filter((item) => item.role === 'user').length < 50 ||
+    messages.filter((item) => item.role === 'assistant').length < 50;
   return { action, messages, historyLoaded:historyReady===true, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
     messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
 

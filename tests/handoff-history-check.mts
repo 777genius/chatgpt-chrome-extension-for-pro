@@ -16,7 +16,7 @@ assert.ok(select(messages,[...events,{kind:'request.started',operationId:null,so
 const noTime=messages.map(x=>x.id==='auto'?{...x,sentAtMs:undefined,promptKey:'/c/source|native:0:user'}:x);
 assert.ok(!select(noTime,[...events,{kind:'retry.confirmed',operationId:op,sourceUrl,tabId,promptKey:'/c/source|native:0:user'}]).some((x:any)=>x.id==='auto'),'exact confirmed native prompt identity works without a timestamp');
 assert.ok(select(noTime,[...events,{kind:'retry.confirmed',operationId:op,sourceUrl,tabId,promptKey:'/c/source|other:0:user'}]).some((x:any)=>x.id==='auto'),'a different prompt identity never suppresses a user message');
-const many=Array.from({length:30},(_,i)=>[{role:'user',id:'u'+i,text:'User '+i},{role:'assistant',id:'a'+i,text:'Answer '+i}]).flat();const result=select(many,[]);assert.equal(result.length,40);assert.equal(result[0].id,'u10');assert.equal(result.at(-1).id,'a29');
+const many=Array.from({length:70},(_,i)=>[{role:'user',id:'u'+i,text:'User '+i},{role:'assistant',id:'a'+i,text:'Answer '+i}]).flat();const result=select(many,[]);assert.equal(result.length,100);assert.equal(result[0].id,'u20');assert.equal(result.at(-1).id,'a69');
 // Exercise the boundary from the native error's React history to the worker
 // filter, including a user-authored Goal sent by the extension itself.
 const dom=parseHTML('<aside role="alert" class="text-danger"><button>New chat</button></aside>');
@@ -38,7 +38,27 @@ const initialOp='initial-goal',initialEvents2=[{kind:'goal.started',operationId:
  {kind:'request.started',operationId:initialOp,sourceUrl,tabId,eventAt:300000},
  {kind:'goal.confirmed',operationId:initialOp,sourceUrl,tabId,userId:'native-u10'}];
 const filtered=select(captured.messages,[...autoEvents,...initialEvents2]);
-assert.equal(filtered.length,40);assert.ok(filtered.some((x:any)=>x.id==='native-u10'),'initial Goal survives native capture');
+assert.equal(filtered.length,50);assert.ok(filtered.some((x:any)=>x.id==='native-u10'),'initial Goal survives native capture');
 assert.ok(!filtered.some((x:any)=>['native-auto','native-marker'].includes(x.id)),'automatic retry and escaped marker are removed');
-assert.equal(filtered[0].id,'native-u5');assert.equal(filtered.at(-1).id,'native-a24');
-console.log('Handoff history: 20 chronological messages per role; automatic retries need exact durable provenance; standalone terminal markers omitted.');
+assert.equal(filtered[0].id,'native-u0');assert.equal(filtered.at(-1).id,'native-a24');
+console.log('Handoff history: 50 chronological messages per role; automatic retries need exact durable provenance; standalone terminal markers omitted.');
+
+// A delayed native timestamp from the reported chat must still bind the retry,
+// but a later independently sent request keeps the same user text.
+const delayed=messages.map(x=>x.id==='auto'?{...x,sentAtMs:117350}:x);
+assert.ok(!select(delayed,events).some((x:any)=>x.id==='auto'),'a uniquely bound delayed retry is omitted');
+assert.ok(select(delayed,[...events,{kind:'request.started',operationId:null,sourceUrl,tabId:9,eventAt:110000}]).some((x:any)=>x.id==='auto'),'a newer cross-tab request prevents attribution');
+const agentDom=parseHTML('<aside role="alert" class="text-danger"><button>New chat</button></aside>');
+const agentButton=agentDom.document.querySelector('button')! as any;
+const agentEntries=[{id:'agent-turn',timestampTurns:[{role:'user',sentAtMs:1}],turn:{items:[
+ {type:'user-message',messageId:'task',message:'Original task'},
+ {type:'chatgpt-reasoning-group',items:[
+  {type:'reasoning',presentation:'preamble',completed:true,content:'Visible progress 1'},
+  {type:'reasoning',presentation:'thought',completed:true,content:'Private thought'},
+  {type:'exec',output:{aggregatedOutput:'Tool output'}},
+  {type:'reasoning',presentation:'preamble',completed:true,isTransient:true,content:'Transient'},
+  {type:'reasoning',presentation:'preamble',completed:true,content:'Visible progress 2'}]}]}}];
+agentButton.__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries:agentEntries,isChatConversation:true,conversationId:'source',isConversationFetching:false,isConversationLoading:false,hasLoadError:false},return:null}};
+const agentCtx=createContext({document:agentDom.document,URL,location:{pathname:'/c/source'}});runInContext(readFileSync('extension/page-probe.js','utf8'),agentCtx);
+const agentHistory=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',agentCtx)));
+assert.deepEqual(agentHistory.messages.map((x:any)=>x.text),['Original task','Visible progress 1','Visible progress 2'],'include completed user-facing progress only, in original order');

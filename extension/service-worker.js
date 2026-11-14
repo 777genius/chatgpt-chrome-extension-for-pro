@@ -2169,7 +2169,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return {ok:false,action:'unknown'};
       const lastNativeUserText=result.messages.filter(item=>item.role==='user').at(-1)?.text||'';
       const messages=ChatGPTHandoffHistory.select(result.messages,journal.events,url);
-      const short=messages.filter(item=>item.role==='user').length<20||messages.filter(item=>item.role==='assistant').length<20;
+      const short=messages.filter(item=>item.role==='user').length<50||messages.filter(item=>item.role==='assistant').length<50;
       return {ok:true,...result,messages,lastNativeUserText,incomplete:result.incomplete||!messages.some(item=>item.role==='user')||short&&!result.historyLoaded};
     })().then(sendResponse)
       .catch(() => sendResponse({ ok: false, action: 'unknown' }));

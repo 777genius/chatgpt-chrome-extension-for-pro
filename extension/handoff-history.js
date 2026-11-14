@@ -3,7 +3,7 @@
 // solely when its exact payload and native timestamp match one durable send
 // and request; identical user-authored text is not enough to suppress it.
 globalThis.ChatGPTHandoffHistory = (() => {
-  function select(messages, events, sourceUrl, limit=20) {
+  function select(messages, events, sourceUrl, limit=50) {
     const eligible=events.filter(e=>e.sourceUrl===sourceUrl);
     const automatic=[];
     for(const send of eligible.filter(e=>e.kind==='send.dispatched'&&e.operationId&&typeof e.text==='string'&&e.text)) {
@@ -16,14 +16,18 @@ globalThis.ChatGPTHandoffHistory = (() => {
       const requests=same.filter(e=>e.kind==='request.started'&&Number.isFinite(e.eventAt));
       if(intents.length!==1||authorized.length!==1||requests.length!==1)continue;
       const request=requests[0];
-      const nearbyManual=eligible.some(e=>e.kind==='request.started'&&!e.operationId&&e.tabId===send.tabId&&Number.isFinite(e.eventAt)&&Math.abs(e.eventAt-request.eventAt)<=10000);
+      const nearbyManual=eligible.some(e=>e.kind==='request.started'&&!e.operationId&&Number.isFinite(e.eventAt)&&Math.abs(e.eventAt-request.eventAt)<=10000);
       const confirms=same.filter(e=>['goal.confirmed','retry.confirmed'].includes(e.kind));
       if(!nearbyManual)automatic.push({text:send.text,at:request.eventAt,
+        notBefore:Number.isFinite(authorized[0].recordedAt)?authorized[0].recordedAt:request.eventAt-10000,
+        nextRequest:Math.min(Infinity,...eligible.filter(e=>e.kind==='request.started'&&Number.isFinite(e.eventAt)&&
+          e.eventAt>request.eventAt&&e.operationId!==send.operationId).map(e=>e.eventAt)),
         userId:confirms.length===1?confirms[0].userId:null,promptKey:confirms.length===1?confirms[0].promptKey:null});
     }
     const candidates=messages.map(message=>message.role==='user'?
       automatic.filter(a=>a.text===message.text&&(a.userId&&message.id===a.userId||
-        a.promptKey&&message.promptKey===a.promptKey||Number.isFinite(message.sentAtMs)&&Math.abs(a.at-message.sentAtMs)<=10000)):[]);
+        a.promptKey&&message.promptKey===a.promptKey||Number.isFinite(message.sentAtMs)&&
+          message.sentAtMs>=a.notBefore-10000&&message.sentAtMs<=a.at+120000&&message.sentAtMs<a.nextRequest)):[]);
     const clean=messages.filter((message,index)=>{
       // Native fallbackMarkdown escapes the underscore in an otherwise exact
       // marker. Preserve explanations and all other assistant content.
