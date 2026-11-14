@@ -567,3 +567,9 @@ console.log('Lag-tolerant Goal confirmation: 30-minute original window, sparse s
  f.click(f.action('resume'));await tick();assert.equal(f.calls.at(-1)!.action,'resume');
  f.instance.dispose();
 }
+{
+ const f=fixture();await tick();f.setRecord({...goal(chat,'blocked'),reason:'Восстановление запроса завершилось ошибкой'});await f.instance.refresh();
+ const banner=f.element<HTMLElement>('[data-chatgpt-goal-inline=banner]');assert.match(banner.textContent!,/Recovery paused/);
+ let bubbled=0;banner.addEventListener('click',()=>bubbled++);f.click(f.element<HTMLElement>('[aria-label="Resume Goal"]'));await tick();
+ assert.equal(bubbled,0,'action clicks must not reach a parent handler');assert.equal(f.calls.at(-1)!.action,'resume');f.instance.dispose();
+}

@@ -701,6 +701,22 @@ for(const patch of [
 }
 console.log('Retry-blocked Goal handoff: shared exact eligibility, immutable objective/limits and model/unknown/manual stop fences passed');
 
+// A fresh manual request is a new explicit intervention, but it may only
+// supersede a retry failure after the normal exact native binding succeeds.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ const startedAt=env.time+100,promptKey='/c/goal-fixture-a|fresh-manual';
+ const result=await env.store.manual({url:URL_A,tabId:7,requestId:'fresh-manual-request',startedAt,eventAt:startedAt,text:'Continue after retry failure',baselineKey:state(env).expectedPromptKey});
+ assert.equal(result.ok,true);assert.equal(state(env).phase,'waiting');assert.ok(state(env).manualPending);assert.equal(env.messages.length,1);
+ const bound=await env.store.manualBind({url:URL_A,tabId:7,id:state(env).id,requestId:'fresh-manual-request',startedAt,promptKey,userId:'fresh-manual-user',userText:'Continue after retry failure',userSentAtMs:startedAt,nativeVerified:true});
+ assert.equal(bound.ok,true);assert.equal(state(env).manualPending,null);assert.equal(state(env).expectedPromptKey,promptKey);assert.equal(env.messages.length,1);
+}
+for(const reason of ['Модель ответила точным маркером GOAL_BLOCKED','Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён']) {
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason});const before=structuredClone(state(env));
+ await env.store.manual({url:URL_A,tabId:7,requestId:'manual',startedAt:env.time+1,eventAt:env.time+1,text:'Continue',baselineKey:state(env).expectedPromptKey});assert.deepEqual(state(env),before);
+}
+
 // Retry failure after an actual user Pause cannot silently resume the Goal
 // when a conversation-length error later moves it to a new chat.
 for(const kind of ['retry.failed','retry.blocked','draft.restore_failed']) {

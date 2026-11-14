@@ -1,5 +1,6 @@
 'use strict';
 importScripts('page-probe.js');
+importScripts('handoff-history.js');
 importScripts('completion-probe.js');
 importScripts('reply-probe.js');
 importScripts('completion-checkpoint.js');
@@ -2071,10 +2072,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'CHATGPT_INSPECT_ERROR') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
-    chrome.scripting.executeScript({
-      target: { tabId: sender.tab.id }, world: 'MAIN', func: inspectChatError,
-      args: [message.alertIndex, Boolean(message.captureHistory),null,'','',null,Boolean(message.captureRetryHistory)]
-    }).then((results) => sendResponse({ ok: true, ...results[0]?.result }))
+    (async()=>{
+      const results=await chrome.scripting.executeScript({
+        target: { tabId: sender.tab.id }, world: 'MAIN', func: inspectChatError,
+        args: [message.alertIndex, Boolean(message.captureHistory),null,'','',null,Boolean(message.captureRetryHistory)]
+      });
+      const result=results[0]?.result;
+      if(!message.captureHistory||!Array.isArray(result?.messages)||!result.messages.length)return {ok:true,...result};
+      const url=ChatGPTHandoffTitle.chatUrl(sender.tab.url),journal=await readJournal();
+      if(!url||!journal.ok||journal.storageError||journal.events.length!==journal.meta?.sequence||
+          journal.events.some((e,i)=>e.sequence!==i+1)||ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(sender.tab.id)).url)!==url)
+        return {ok:false,action:'unknown'};
+      const lastNativeUserText=result.messages.filter(item=>item.role==='user').at(-1)?.text||'';
+      const messages=ChatGPTHandoffHistory.select(result.messages,journal.events,url);
+      const short=messages.filter(item=>item.role==='user').length<20||messages.filter(item=>item.role==='assistant').length<20;
+      return {ok:true,...result,messages,lastNativeUserText,incomplete:result.incomplete||!messages.some(item=>item.role==='user')||short&&!result.historyLoaded};
+    })().then(sendResponse)
       .catch(() => sendResponse({ ok: false, action: 'unknown' }));
     return true;
   }

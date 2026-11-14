@@ -46,7 +46,7 @@
       button.innerHTML='<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+icons[action]+'</svg>';
       bannerActions[action]=button;
       banner.append(button);
-      listen(button,'click',event=>{if(consent(event,button))action==='expand'?show(!open):void act(action);});
+      listen(button,'click',event=>{event.stopPropagation();if(consent(event,button))action==='expand'?show(!open):void act(action);});
     }
     banner.hidden=true;
     let elapsedId=null,elapsedBase=0,elapsedSince=null,pageOpen=true;
@@ -148,11 +148,15 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     }
     resetFields();
     const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Active',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
+    const phaseLabel=value=>value?.phase!=='blocked'?(phases[value?.phase]||value?.phase):
+      value.reason==='Модель ответила точным маркером GOAL_BLOCKED'?'Blocked':
+      value.reason==='Восстановление запроса завершилось ошибкой'?'Recovery paused':
+      value.operation?.status==='reserved'?'Send paused':'Needs review';
     function render() {
       if(!valid())return;
       const goalText=record?.goal||(composer?.phase==='intent'?composer.intent?.text:'');
       banner.hidden=!goalText||record?.phase==='moved';
-      bannerStatus.textContent='◎ '+(record?.phase==='blocked'&&record.operation?.status==='reserved'?'Send paused':record?(phases[record.phase]||'Goal'):'Goal pending');
+      bannerStatus.textContent='◎ '+(record?phaseLabel(record):'Goal pending');
       bannerText.textContent=goalText||'';
       banner.title=goalText||'';
       updateElapsed();
@@ -183,7 +187,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       objective.textContent=restorable?'Saved objective: '+(composer.intent?.text||''):record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
       if(record) {
-        message=(phases[record.phase]||record.phase)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
+        message=phaseLabel(record)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
         if(record.deadlineAt)message+=' · deadline '+new Date(record.deadlineAt).toLocaleTimeString();
         if(record.reason)message+=' · '+record.reason;
         if(record.operation&&['blocked','stopped'].includes(record.phase))message+=record.operation.status==='reserved'

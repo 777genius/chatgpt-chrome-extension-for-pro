@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';import{readFileSync}from'node:fs';import{createContext,runInContext}from'node:vm';
+const ctx=createContext({});runInContext(readFileSync('extension/handoff-history.js','utf8'),ctx);const select=(m:any[],e:any[])=>JSON.parse(JSON.stringify(ctx.ChatGPTHandoffHistory.select(m,e,'https://chatgpt.com/c/source')));
+const sourceUrl='https://chatgpt.com/c/source',op='automatic',tabId=1,events=[{kind:'retry.send_intent',operationId:op,sourceUrl,tabId},{kind:'send.authorized',operationId:op,sourceUrl,tabId},{kind:'send.dispatched',operationId:op,sourceUrl,tabId,text:'доделай е2е'},{kind:'request.started',operationId:op,sourceUrl,tabId,eventAt:100000}];
+const messages=[{role:'user',id:'manual',text:'доделай е2е',sentAtMs:50000},{role:'assistant',id:'a',text:'Detailed progress'}, {role:'user',id:'auto',text:'доделай е2е',sentAtMs:100050},{role:'assistant',id:'blocked',text:'GOAL_BLOCKED'}, {role:'assistant',id:'quoted',text:'The marker GOAL_BLOCKED appears in this explanation.'},{role:'user',id:'new',text:'Why?',sentAtMs:150000}];
+assert.deepEqual(select(messages,events).map((x:any)=>x.id),['manual','a','quoted','new'],'exclude only positively matched automatic send and exact marker');
+assert.ok(select(messages,[]).some((x:any)=>x.id==='auto'),'missing journal evidence preserves matching text');
+assert.ok(select(messages,events.filter(e=>e.kind!=='retry.send_intent')).some((x:any)=>x.id==='auto'),'a handoff payload without a retry or Goal intent is retained');
+assert.ok(select(messages,[...events,{kind:'request.started',operationId:null,sourceUrl,tabId,eventAt:100001}]).some((x:any)=>x.id==='auto'),'ambiguous nearby manual send preserves text');
+const noTime=messages.map(x=>x.id==='auto'?{...x,sentAtMs:undefined,promptKey:'/c/source|native:0:user'}:x);
+assert.ok(!select(noTime,[...events,{kind:'retry.confirmed',operationId:op,sourceUrl,tabId,promptKey:'/c/source|native:0:user'}]).some((x:any)=>x.id==='auto'),'exact confirmed native prompt identity works without a timestamp');
+assert.ok(select(noTime,[...events,{kind:'retry.confirmed',operationId:op,sourceUrl,tabId,promptKey:'/c/source|other:0:user'}]).some((x:any)=>x.id==='auto'),'a different prompt identity never suppresses a user message');
+const many=Array.from({length:30},(_,i)=>[{role:'user',id:'u'+i,text:'User '+i},{role:'assistant',id:'a'+i,text:'Answer '+i}]).flat();const result=select(many,[]);assert.equal(result.length,40);assert.equal(result[0].id,'u10');assert.equal(result.at(-1).id,'a29');
+console.log('Handoff history: 20 chronological messages per role; automatic retries need exact durable provenance; standalone terminal markers omitted.');

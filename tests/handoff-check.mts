@@ -80,9 +80,9 @@ function probeCheck(){
   {type:'assistant-message',phase:'final_answer',messageId:'a'+i,content:'Assistant '+i}
  ]}})) as typeof entries;
  const threePairs=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',ctx)));
- assert.deepEqual(threePairs.messages.map((item:any)=>item.id),['u1','a1','u2','a2','u3','a3'],
-  'exactly the latest three messages per role retain their original order');
- assert.equal(threePairs.incomplete,false);
+ assert.deepEqual(threePairs.messages.map((item:any)=>item.id),['u0','a0','u1','a1','u2','a2','u3','a3'],
+  'history candidates retain chronological order beyond three pairs');
+ assert.equal(threePairs.incomplete,true,'short history requires native loaded proof');
  fiber.return.memoizedProps.conversationId='other';
  assert.equal(runInContext('inspectChatError(0,true).incomplete',ctx),true,'three complete pairs from another chat cannot authorize a handoff');
  fiber.return.memoizedProps.conversationId='source';

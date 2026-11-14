@@ -795,7 +795,9 @@
         const record=await read(target);
         if(record&&Number.isFinite(startedAt)&&Math.max(record.startedAt||0,record.manualStartedAt||0)>startedAt)return {ok:false};
         if(record&&Number.isFinite(startedAt)&&record.manualStart?.startedAt===startedAt)return {ok:false};
-        if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))return {ok:false};
+        const retryBlocked=record?.phase==='blocked'&&!record.operation&&!record.stopRequested&&!record.pauseRequested&&
+          !record.manualOverride&&record.reason==='Восстановление запроса завершилось ошибкой';
+        if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase)&&!retryBlocked)return {ok:false};
         const supplement=typeof requestId==='string'&&requestId&&Number.isFinite(startedAt)&&Number.isFinite(eventAt)&&
           startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
           typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'))&&
@@ -820,6 +822,7 @@
           await event('manual_supplement_pending',next,tabId,{requestId,startedAt,eventAt,text,baselineKey});
           await save(next);return {ok:true,record:view(next)};
         }
+        if(retryBlocked)return {ok:false};
         // Explicit manual Stop remains a pause. Missing/invalid sent-text proof
         // cannot silently change an objective or authorize another send.
         const inFlight=['sending','clicked'].includes(record.phase),reserved=record.phase==='preparing'&&record.operation?.status==='reserved';

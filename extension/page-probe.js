@@ -167,21 +167,28 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   const all = [];
   for (const entry of entries) {
-    for (const item of entry.turn?.items || []) {
+    const userTimes=(entry.timestampTurns||[]).filter(t=>t.role==='user');
+    let userIndex=0;
+    for (const [itemIndex,item] of (entry.turn?.items || []).entries()) {
       const role = item.type === 'user-message' ? 'user'
         : item.type === 'assistant-message' && (!item.phase || item.phase === 'final_answer') ? 'assistant' : null;
-      if (role) all.push({ role, text: messageText(item), id: item.messageId || `${entry.id}:${all.length}` });
+      if (role) {
+        const sentAtMs=role==='user'?userTimes[userIndex++]?.sentAtMs:undefined;
+        all.push({ role, text: messageText(item), id: item.messageId || `${entry.id}:${all.length}`,
+          ...(role==='user'?{promptKey:location.pathname+'|'+entry.id+':'+itemIndex+':user'}:{}),
+          ...(Number.isFinite(sentAtMs)?{sentAtMs}:{}) });
+      }
     }
   }
   const selected = new Set();
   for (const role of ['user', 'assistant']) {
-    all.map((item, index) => ({ item, index })).filter(({ item }) => item.role === role).slice(-3)
+    all.map((item, index) => ({ item, index })).filter(({ item }) => item.role === role).slice(-150)
       .forEach(({ index }) => selected.add(index));
   }
   const messages = all.filter((_, index) => selected.has(index));
-  const shortHistory = messages.filter((item) => item.role === 'user').length < 3 ||
-    messages.filter((item) => item.role === 'assistant').length < 3;
-  return { action, messages, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
+  const shortHistory = messages.filter((item) => item.role === 'user').length < 20 ||
+    messages.filter((item) => item.role === 'assistant').length < 20;
+  return { action, messages, historyLoaded:historyReady===true, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
     messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
 
 }
