@@ -9,6 +9,9 @@ const markdownMarkers=[{role:'assistant',id:'complete',text:'GOAL\\_COMPLETE'},
 assert.deepEqual(select(markdownMarkers,[]).map((x:any)=>x.id),['explanation'],'escaped standalone Markdown markers are excluded without removing explanations');
 assert.ok(select(messages,[]).some((x:any)=>x.id==='auto'),'missing journal evidence preserves matching text');
 assert.ok(select(messages,events.filter(e=>e.kind!=='retry.send_intent')).some((x:any)=>x.id==='auto'),'a handoff payload without a retry or Goal intent is retained');
+const initialEvents=events.map(e=>e.kind==='retry.send_intent'?{...e,kind:'goal.send_intent'}:e);
+assert.ok(select(messages,[...initialEvents,{kind:'goal.started',operationId:op,sourceUrl,tabId}]).some((x:any)=>x.id==='auto'),
+ 'a user-authored initial Goal is retained even when the extension sent it');
 assert.ok(select(messages,[...events,{kind:'request.started',operationId:null,sourceUrl,tabId,eventAt:100001}]).some((x:any)=>x.id==='auto'),'ambiguous nearby manual send preserves text');
 const noTime=messages.map(x=>x.id==='auto'?{...x,sentAtMs:undefined,promptKey:'/c/source|native:0:user'}:x);
 assert.ok(!select(noTime,[...events,{kind:'retry.confirmed',operationId:op,sourceUrl,tabId,promptKey:'/c/source|native:0:user'}]).some((x:any)=>x.id==='auto'),'exact confirmed native prompt identity works without a timestamp');

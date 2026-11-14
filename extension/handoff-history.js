@@ -8,6 +8,9 @@ globalThis.ChatGPTHandoffHistory = (() => {
     const automatic=[];
     for(const send of eligible.filter(e=>e.kind==='send.dispatched'&&e.operationId&&typeof e.text==='string'&&e.text)) {
       const same=eligible.filter(e=>e.operationId===send.operationId&&e.tabId===send.tabId);
+      // A Goal started from the extension may send its initial objective
+      // itself. That user-authored task is history, not an auto-continuation.
+      if(same.some(e=>e.kind==='goal.started'))continue;
       const intents=same.filter(e=>['goal.send_intent','retry.send_intent'].includes(e.kind));
       const authorized=same.filter(e=>e.kind==='send.authorized');
       const requests=same.filter(e=>e.kind==='request.started'&&Number.isFinite(e.eventAt));
