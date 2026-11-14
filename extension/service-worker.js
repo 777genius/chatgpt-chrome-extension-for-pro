@@ -1460,7 +1460,7 @@ async function readGoalAckProof(tabId,url,op) {
 }
 async function reconcileNativeGoalAcknowledgement(tabId,url) {
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
-  if(record?.phase!=='blocked'||!op||!['intent','clicked'].includes(op.status)||
+  if(!['sending','clicked','blocked'].includes(record?.phase)||!op||!['intent','clicked'].includes(op.status)||
       record.pauseRequested||record.stopRequested||record.manualOverride||record.manualPending)return;
   const proof=await readGoalAckProof(op.tabId,url,op);
   if(!proof)return;
@@ -1469,6 +1469,10 @@ async function reconcileNativeGoalAcknowledgement(tabId,url) {
       requestId:proof.request.requestId,startedAt:proof.request.startedAt});
     if(result?.ok)return result;
   }
+  // Historical recovery is only needed once an uncertain operation is parked.
+  // While a send is in flight, use the normal exact-request/native-turn ACK
+  // above as soon as it is observable instead of waiting for the timeout.
+  if(record.phase!=='blocked')return;
   if(!proof.sendWindow)return;
   // A later manual send or a reopened tab does not erase a server-accepted
   // operation. Prove the historical turn and every later sent message first.
