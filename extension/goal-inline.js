@@ -31,6 +31,9 @@
     const current=()=>policy.pageUrl(getUrl());
     const armed=()=>['armed','intent'].includes(composer?.phase);
     const active=()=>!!record&&!['completed','blocked','stopped','moved'].includes(record.phase);
+    const freshManualAllowed=()=>record?.phase==='stopped'&&
+      record.reason==='Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском'&&
+      ['intent','clicked'].includes(record.operation?.status);
     const banner=node('div',{class:'cggi-banner','data-chatgpt-goal-inline':'banner'});
     const bannerStatus=node('strong'),bannerText=node('span',{class:'cggi-summary'}),bannerTime=node('span');
     banner.append(bannerStatus,bannerText,bannerTime);
@@ -162,7 +165,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       updateElapsed();
       const on=(active()&&!record.stopRequested)||record?.resumeRequested===true||armed();
       toggle.setAttribute('aria-checked',String(on));
-      toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&(!!record?.operation||record?.phase==='blocked'));
+      toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&((!!record?.operation&&!freshManualAllowed())||record?.phase==='blocked'));
       toggle.title=!route?'Goal is available on ChatGPT chat pages':!loaded&&error?'Retry loading Goal':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
@@ -192,6 +195,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record.reason)message+=' · '+record.reason;
         if(record.operation&&['blocked','stopped'].includes(record.phase))message+=record.operation.status==='reserved'
           ?' · Message was not sent. Stop Goal before starting again.'
+          :freshManualAllowed()?' · Previous send is unconfirmed. You can turn Goal on for a new message; the old send stays protected.'
           :' · Previous send is unconfirmed. Review the activity log before a new Goal.';
         if(record.phase==='blocked'&&!paused)message+=' · Review the activity log before continuing.';
       }
@@ -442,7 +446,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(!buttons[action]&&!['arm','disarm'].includes(action))return;
       let input={};
       if(action==='arm') {
-        if(active()||armed()||record?.operation||record?.phase==='blocked')return;
+        if(active()||armed()||(record?.operation&&!freshManualAllowed())||record?.phase==='blocked')return;
         try {
           input=policy.composerSettings({rules:fields.rules.value,
             maxContinuations:Number(fields.maxContinuations.value),maxMinutes:Number(fields.maxMinutes.value)});

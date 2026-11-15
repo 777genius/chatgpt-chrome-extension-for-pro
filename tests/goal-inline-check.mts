@@ -398,6 +398,18 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
   assert.match(f.panel().textContent!,/Previous send is unconfirmed/);f.instance.dispose();
 }
 
+// Explicitly stopped uncertain sends can arm a fresh manual goal without
+// dispatching or clearing the older operation.
+for(const opStatus of ['intent','clicked']) {
+  const f=fixture();await tick();
+  f.setRecord({...goal(chat,'stopped'),reason:'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском',operation:{status:opStatus}});
+  await f.instance.refresh();assert.equal(f.toggle().disabled,false);
+  f.click(f.toggle());await tick();
+  assert.ok(f.calls.some(c=>c.action==='arm'));
+  assert.equal(f.state.nativeSends,0);
+  f.instance.dispose();
+}
+
 // The real effort button is display:flex inside an inline span and a block
 // wrapper. Controls join its existing row without restyling native wrappers.
 {

@@ -42,12 +42,12 @@ function fixture() {
 }
 
 // A later, explicitly submitted manual goal may replace a stopped goal with
-// an unresolved click, while retaining the complete old record and its fence.
-{
+// an unresolved intent or click, while retaining the old record and its fence.
+for (const status of ['intent','clicked']) {
   const env=fixture();
   const old={id:'old-goal',url:saved,phase:'stopped',
     reason:'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском',
-    operation:{id:'old-op',status:'clicked',createdAt:999000,tabId:7}};
+    operation:{id:'old-op',status,createdAt:999000,tabId:7}};
   env.data[goalKey(saved)]=structuredClone(old);
   env.data[composerKey(7)]={id:'old-goal',phase:'bound',binding:{url:saved}};
   const armId=await env.intent(7,saved);

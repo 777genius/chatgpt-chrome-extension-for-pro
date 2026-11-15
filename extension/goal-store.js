@@ -22,7 +22,7 @@
     // verified user submission. Its old consumed grant remains in the journal.
     const mayRetireForManual=record=>record?.phase==='stopped'&&
       record.reason==='Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском'&&
-      record.operation?.status==='clicked'&&typeof record.operation.id==='string'&&!!record.operation.id;
+      ['intent','clicked'].includes(record.operation?.status)&&typeof record.operation.id==='string'&&!!record.operation.id;
     const buffered=(record,plural,singular)=>[
       ...(Array.isArray(record?.[plural])?record[plural]:[]),
       ...(record?.[singular]?[record[singular]]:[])
