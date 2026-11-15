@@ -1778,11 +1778,14 @@ async function reconcileAcceptedHandoffGoal(tabId,url) {
     if(planned.length!==1)return;
     const p=planned[0],own=events.filter(e=>e.tabId===tabId&&e.sourceUrl===url&&e.operationId===p.operationId),
       sends=own.filter(e=>e.kind==='send.dispatched'),requests=own.filter(e=>e.kind==='request.started'),
+      grants=own.filter(e=>e.kind==='send.authorized'),clicks=own.filter(e=>e.kind==='retry.clicked'&&e.requestId===p.requestId),
       confirmed=own.filter(e=>e.kind==='retry.confirmed'&&e.requestId===p.requestId&&e.newPromptKey===native.promptKey);
-    if(sends.length!==1||requests.length!==1||confirmed.length!==1||!requests[0].requestId||
+    if(sends.length!==1||requests.length!==1||grants.length!==1||clicks.length!==1||confirmed.length!==1||!requests[0].requestId||
         sends[0].text!==native.userText||!Number.isFinite(native.userSentAtMs)||!Number.isFinite(requests[0].eventAt)||
         Math.abs(requests[0].eventAt-native.userSentAtMs)>10000||
-        !(p.sequence<requests[0].sequence&&requests[0].sequence<confirmed[0].sequence)||
+        !(p.sequence<grants[0].sequence&&grants[0].sequence<requests[0].sequence&&
+          grants[0].sequence<sends[0].sequence&&sends[0].sequence<clicks[0].sequence&&
+          requests[0].sequence<confirmed[0].sequence&&clicks[0].sequence<confirmed[0].sequence)||
         events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence))return;
     const again=await chrome.storage.local.get([key,handoffKey(tabId)]);
     const [last]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});

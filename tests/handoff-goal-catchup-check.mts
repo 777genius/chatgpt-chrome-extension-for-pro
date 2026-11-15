@@ -72,8 +72,10 @@ function retried() {
    promptKey:'/c/handoff-catchup-fixture|retry'});
  h.journal.push(...[
   {kind:'retry.planned',requestId:'old',retryUserId:'accepted-user'},
-  {kind:'send.dispatched',text:'Continue'},
+  {kind:'send.authorized'},
   {kind:'request.started',requestId:'new',eventAt:2000},
+  {kind:'send.dispatched',text:'Continue'},
+  {kind:'retry.clicked',requestId:'old'},
   {kind:'retry.confirmed',requestId:'old',newPromptKey:h.native.promptKey}
  ].map((e,i)=>({...e,operationId:'retry',tabId:7,sourceUrl:url,sequence:i+1})));
  return h;
@@ -83,12 +85,14 @@ function retried() {
  assert.equal(h.events.filter(e=>e.kind==='goal.handoff_retry_bound').length,1);
  await h.run();assert.equal(h.messages.length,1);
 }
-for(const change of ['different-user','different-text','unconfirmed','newer-request','gap','paused','manual','route-race']){
+for(const change of ['different-user','different-text','unconfirmed','ungranted','unclicked','newer-request','gap','paused','manual','route-race']){
  const h=retried();
  if(change==='different-user')h.journal[0].retryUserId='other';
  if(change==='different-text')h.native.userText='different';
  if(change==='unconfirmed')h.journal.pop();
- if(change==='newer-request')h.journal.push({kind:'request.started',tabId:7,sourceUrl:url,sequence:5});
+ if(change==='ungranted')h.journal[1].kind='other';
+ if(change==='unclicked')h.journal[4].kind='other';
+ if(change==='newer-request')h.journal.push({kind:'request.started',tabId:7,sourceUrl:url,sequence:7});
  if(change==='gap')h.journal[1].sequence=8;
  if(change==='paused')h.goal.pauseRequested=true;
  if(change==='manual')h.goal.manualPending={};
