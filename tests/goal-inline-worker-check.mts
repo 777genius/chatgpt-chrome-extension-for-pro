@@ -15,10 +15,10 @@ const source='https://chatgpt.com/c/inline-worker-source';
 const other='https://chatgpt.com/c/inline-worker-other';
 const calls:{kind:string,value:any}[]=[];
 const tabReads:number[]=[];
-let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='';
+let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='',tabClosed=false;
 const context=createContext({URL,setTimeout,
   chrome:{runtime:{onMessage:{addListener:(value:Listener)=>{listener=value;}}},tabs:{
-    get:async(id:number)=>{tabReads.push(id);return {id,url:currentUrl};},
+    get:async(id:number)=>{tabReads.push(id);if(tabClosed)throw Error('tab closed');return {id,url:currentUrl};},
     query:async()=>{activeQueries++;return [{id:99,url:other}];}
   }},
   bindNativeComposerGoal:async(tabId:number,url:string,armId:string)=>{calls.push({kind:'bind',value:{tabId,url,armId}});return {ok:true};},
@@ -42,6 +42,13 @@ const call=(message:any,from=sender())=>new Promise<any>((resolve,reject)=>{
   if(!keep&&!responded)reject(Error('Inline broker did not return a response'));
 });
 const request=(action:string,extra:Record<string,unknown>={})=>({type:'CHATGPT_GOAL_INLINE',action,url:source,...extra});
+
+tabClosed=true;
+assert.equal((await call(request('disarm',{armId:'armed'}))).ok,true,'an explicit switch-off already in flight survives tab closure');
+assert.deepEqual(structuredClone(calls.at(-1)),{kind:'disarm',value:{tabId:7,armId:'armed'}});
+assert.equal((await call(request('disarm'))).ok,false,'closed-tab Stop requires the exact arm ID');
+assert.equal((await call(request('resume',{armId:'armed'}))).ok,false,'a closed tab cannot resume or dispatch');
+tabClosed=false;calls.length=0;tabReads.length=0;
 
 // A stuck page inspection must not hold up the state shown by the switch.
 context.reconcileBlockedManualHandoff=()=>new Promise(()=>{});

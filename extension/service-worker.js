@@ -1900,7 +1900,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse?.({ok:false,error:'Goal chat binding mismatch'});return false;
     }
     (async()=>{
-      const liveUrl=(await chrome.tabs.get(tabId)).url,live=ChatGPTGoalPolicy.pageUrl(liveUrl);
+      const liveTab=await chrome.tabs.get(tabId).catch(()=>null);
+      // An explicit switch-off may already be in flight as its tab closes.
+      // Its exact arm ID can still stop that same saved Goal; all other
+      // actions require a live tab and route as before.
+      if(!liveTab) {
+        if(message.action==='disarm'&&typeof message.armId==='string'&&message.armId)
+          return goalController.composerDisarm({tabId,armId:message.armId});
+        throw Error('Вкладка Goal закрыта');
+      }
+      const liveUrl=liveTab.url,live=ChatGPTGoalPolicy.pageUrl(liveUrl);
       const pending=await goalController.composerGet({tabId});
       const temporaryLive=ChatGPTGoalPolicy.temporaryPageUrl(liveUrl);
       const temporaryIntent=message.action==='intent'&&requested==='https://chatgpt.com/'&&pending?.url===requested&&
@@ -2691,7 +2700,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  void goalController.composerDisarm({tabId}).catch(()=>{});
+  void goalController.composerDisarm({tabId,preserveBoundGoal:true}).catch(()=>{});
   journalInBackground({kind:'tab.closed',tabId});
   lastNotificationFingerprintByTab.delete(tabId);
   legacyHandoffStatusFences.delete(tabId);

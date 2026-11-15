@@ -15,6 +15,7 @@
     const key=url=>'chatgpt-goal:'+policy.canonical(url);
     const canonical=url=>policy.canonical(url);
     const composerKey=tabId=>'chatgpt-goal-composer:'+tabId;
+    const closedComposerKey=tabId=>'chatgpt-goal-closed-composer:'+tabId;
     const composerBindingKey=id=>'chatgpt-goal-composer-binding:'+id;
     const buffered=(record,plural,singular)=>[
       ...(Array.isArray(record?.[plural])?record[plural]:[]),
@@ -105,16 +106,28 @@
         return {ok:true,record};
       });
     }
-    async function composerDisarm({tabId,armId}) {
+    async function composerDisarm({tabId,armId,preserveBoundGoal=false}) {
       requireTab(tabId);
       return serialize(async()=>{
-        const current=await readComposer(tabId);
+        let current=await readComposer(tabId);
+        // A trusted switch-off already in flight may arrive just after the
+        // tab-close callback. Retain its exact binding so that explicit Stop
+        // still wins over merely detaching a closed tab.
+        if(!current&&!preserveBoundGoal&&typeof armId==='string'&&armId) {
+          const closed=(await storage.get(closedComposerKey(tabId)))[closedComposerKey(tabId)];
+          if(closed?.id===armId&&closed.phase==='bound')current=closed;
+        }
         if(armId!==undefined&&current?.id!==armId)throw Error('Разрешение Goal уже изменилось');
-        const changes={[composerKey(tabId)]:null};
+        const changes={[composerKey(tabId)]:null,...(!preserveBoundGoal?{[closedComposerKey(tabId)]:null}:{})};
         let stopped=null;
         if(current?.phase==='bound'&&current.binding?.url) {
           const goal=await read(current.binding.url);
-          if(goal?.id===current.id&&!['completed','stopped','moved'].includes(goal.phase)) {
+          if(goal?.id===current.id&&preserveBoundGoal) {
+            // Closing a tab removes its composer binding; it is not an
+            // explicit Stop or permission to change the durable Goal.
+            await event('composer_detached',goal,tabId,{reason:'Вкладка закрыта; цель сохранена'});
+            changes[closedComposerKey(tabId)]={id:current.id,phase:'bound',binding:{url:current.binding.url}};
+          } else if(goal?.id===current.id&&!['completed','stopped','moved'].includes(goal.phase)) {
             stopped=stopTransition(goal);
             await event(stopped.stopRequested||goal.operation?'stop_requested':'stopped',stopped,tabId);
             changes[key(goal.url)]=stopped;
@@ -499,12 +512,25 @@
       const record=await serialize(async()=>{
         const current=await read(url);
         if(!current||current.phase!=='preparing'||current.operation?.status!=='reserved'||
-            current.operation.tabId!==tab.id||current.stopRequested||current.pauseRequested)return null;
+            current.stopRequested||current.pauseRequested)return null;
         if(now()>=current.deadlineAt) {
           const expired={...current,phase:'stopped',operation:null,reason:'Время Goal истекло'};
           await event('stopped',expired,tab.id);
           await save(expired);
           return null;
+        }
+        if(current.operation.tabId!==tab.id) {
+          // Only an unclaimed reservation can move to a reopened tab, and
+          // only after Chrome positively reports that its old tab is gone.
+          // The same operation ID remains subject to the normal send grant.
+          if(typeof tabs.query!=='function')return null;
+          const open=await tabs.query({});
+          if(!Array.isArray(open)||open.some(item=>item.id===current.operation.tabId)||
+              !open.some(item=>item.id===tab.id&&canonical(item.url)===url))return null;
+          const rebound={...current,operation:{...current.operation,tabId:tab.id}};
+          await event('reservation_rebound',rebound,tab.id,{previousTabId:current.operation.tabId});
+          await save(rebound);
+          return rebound;
         }
         return current;
       });
