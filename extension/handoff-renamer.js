@@ -122,6 +122,21 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
     if(record.titleStatus==='failed'&&!recoverFailed)return {ok:true,skipped:true};
     if(record.titleStatus==='waiting') {
       if(!noSaveIntent||record.titlePreparationVersion!==1)return {ok:false,reason:'Нет подтверждения безопасного продолжения переименования'};
+      // A new, already reserved Goal continuation is a fresh opportunity to
+      // check native readiness, not a reason to retry a prior title save.
+      // Consume each operation once and retain the original title snapshot.
+      if(record.titlePrepareAttempts>=3&&goalOperationId&&goalPreparing&&
+          record.titleReason==='Новый чат ещё не готов к переименованию'&&
+          record.titleRecoveryGoalOperationId!==goalOperationId) {
+        const next={...record,titlePrepareAttempts:0,titleRetryAfter:0,titleRetryable:true,
+          titleRecoveryGoalOperationId:goalOperationId};
+        await appendJournal({kind:'handoff.title_preparation_recovered',operationId:id,
+          sourceUrl:record.sourceUrl,targetUrl:url,titleGoalOperationId:goalOperationId},{id:tabId});
+        const current=await chrome.storage.local.get([key,goalKey]);
+        if(JSON.stringify(current[key])!==JSON.stringify(record)||JSON.stringify(current[goalKey])!==JSON.stringify(goal))
+          return {ok:false,reason:'Передача или цель изменилась'};
+        await chrome.storage.local.set({[key]:next});record=next;
+      }
       if(record.titlePrepareAttempts>=3||Date.now()<record.titleRetryAfter)return {ok:true,waiting:true,retryable:record.titlePrepareAttempts<3};
     }
     if ((!url&&!targetAlias) || url===ChatGPTHandoffTitle.chatUrl(record.sourceUrl)) return {ok:false,reason:'Не сохранён адрес нового чата'};

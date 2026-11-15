@@ -113,7 +113,7 @@ function harness(mode: Mode = 'success') {
     appendJournal:async(event:Record<string,unknown>)=>events.push(structuredClone(event)),
     journalInBackground:(event:Record<string,unknown>)=>events.push(structuredClone(event)),
     chrome:{
-      storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>{storageWrites.push(structuredClone(value));Object.assign(storage,structuredClone(value));}}},
+      storage:{local:{get:async(key:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(key)?key:[key]).map(k=>[k,storage[k]]))),set:async(value:Record<string,unknown>)=>{storageWrites.push(structuredClone(value));Object.assign(storage,structuredClone(value));}}},
       tabs:{get:async()=>({id:7,url:location.href})},
       webRequest:{onBeforeRequest:{addListener:(fn:(r:Request)=>void)=>before.push(fn)},onCompleted:{addListener:(fn:(r:Completion)=>void)=>complete.push(fn)},onErrorOccurred:{addListener:(fn:(r:unknown)=>void)=>failure.push(fn)}},
       scripting:{executeScript:async({func,args}:{func:(o:ProbeOptions)=>Result;args:[ProbeOptions]})=>{
@@ -335,6 +335,14 @@ for(const mode of ['streaming','late-menu'] as const) {
   assert.equal(h.record.titlePrepareAttempts,3);assert.equal(h.record.titleRetryable,false);
   h.allowReady();const before=h.time;
   await h.rename();assert.equal(h.time,before);assert.equal(h.opened,0);assert.equal(h.saved,0,'exhausted preparation never starts an unbounded background job');
+}
+{
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  h.allowReady();h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'fresh-goal-operation'}};
+  await h.rename({goalOperationId:'fresh-goal-operation'});
+  assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1,'a fresh reserved continuation permits one safe readiness retry');
+  await h.rename({goalOperationId:'fresh-goal-operation'});assert.equal(h.saved,1);
 }
 {
   const h=harness('no-ack');await h.rename();
