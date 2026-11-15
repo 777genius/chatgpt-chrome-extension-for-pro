@@ -90,6 +90,29 @@
     }
     return captured.length===linkTargets.length&&captured.every((target,index)=>target===linkTargets[index]);
   }
+  // A virtualized first turn may retain only ChatGPT's Markdown serialization.
+  // Accept it for an explicit recovery only when all extra bytes consist of
+  // the captured link destinations and Markdown punctuation, in order.
+  function richGoalHistoryMatches(intent,nativeText,linkTargets) {
+    if(typeof intent!=='string'||!intent||intent.length>10000||typeof nativeText!=='string'||
+        nativeText.length<intent.length||nativeText.length>100000||!Array.isArray(linkTargets)||
+        !linkTargets.length||linkTargets.length>32||linkTargets.some(x=>typeof x!=='string'||
+          x.length>2048||!/^https?:\/\//.test(x)))return false;
+    let i=0,j=0,added='';
+    while(i<intent.length&&j<nativeText.length) {
+      if(intent[i]===nativeText[j]){i++;j++;}else added+=nativeText[j++];
+    }
+    if(i!==intent.length)return false;
+    added=(added+nativeText.slice(j)).replace(/\\([()\\])/g,'$1');
+    const markdownOnly=value=>/^[\[\]()*`\\]*$/.test(value);
+    let cursor=0;
+    for(const target of linkTargets) {
+      const at=added.indexOf(target,cursor);
+      if(at<cursor||!markdownOnly(added.slice(cursor,at)))return false;
+      cursor=at+target.length;
+    }
+    return markdownOnly(added.slice(cursor));
+  }
   function exactMarker(response,rawExact,nativeVerified) {
     return nativeVerified===true&&rawExact===true&&response===MARKER;
   }
@@ -107,7 +130,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,RETRY_MESSAGE_KEY,DEFAULT_RETRY_MESSAGE,retryMessage,DEFAULTS,canonical,pageUrl,temporaryPageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
+  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,RETRY_MESSAGE_KEY,DEFAULT_RETRY_MESSAGE,retryMessage,DEFAULTS,canonical,pageUrl,temporaryPageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,richGoalHistoryMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

@@ -705,19 +705,19 @@ async function restoreMissingComposerGoal(tabId,url,armId,userConfirmed=false) {
     if(Math.abs(u.userSentAtMs-initial[0].eventAt)<=10000) {
       if(ChatGPTGoalPolicy.submittedTextMatches(pending.intent.text,u.userText,null))continue;
       // With an explicit restore request, a virtualized rich first message can
-      // still be tied to the saved intent by its unique allocation receipt,
-      // native first-user ID and the exact ordered links captured at send.
+      // still be tied to the saved intent by consistent allocation receipts,
+      // native first-user ID, exact text and ordered links captured at send.
       // This is not proof for an automatic restore or an unknown handoff.
       const allocations=j.events.filter(e=>e.kind==='completion.url_allocated'&&e.tabId===tabId&&
-        e.requestId===initial[0].requestId&&e.attemptId===String(initial[0].eventAt)&&e.promptKey===u.promptKey);
+        e.requestId===initial[0].requestId&&e.attemptId===String(initial[0].eventAt));
+      const sameAllocation=allocations.length>0&&allocations.every(e=>e.promptKey===u.promptKey&&
+        e.sourceUrl===allocations[0].sourceUrl&&e.targetUrl===allocations[0].targetUrl);
       const targets=pending.intent.linkTargets;
-      const pattern=/\[([^\]\n]{1,500})\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
-      const nativeTargets=typeof u.userText==='string'?[...u.userText.matchAll(pattern)].map(m=>m[2].replace(/\\([()\\])/g,'$1')):[];
-      if(userConfirmed&&!lineage.handoffs.length&&timeline[0]===u&&allocations.length===1&&
+      if(userConfirmed&&!lineage.handoffs.length&&timeline[0]===u&&sameAllocation&&
           Array.isArray(latest.firstTurnMessageIds)&&latest.firstTurnMessageIds[0]===u.userId&&
           Array.isArray(targets)&&targets.length>0&&targets.length<=32&&
           targets.every(x=>typeof x==='string'&&/^https?:\/\//.test(x))&&
-          JSON.stringify(nativeTargets)===JSON.stringify(targets))continue;
+          ChatGPTGoalPolicy.richGoalHistoryMatches(pending.intent.text,u.userText,targets))continue;
     }
     const matches=requests.filter(e=>(e.sourceUrl===url||lineage.handoffs.some(h=>h.requestId===e.requestId&&h.targetUrl===url))&&
       Math.abs(e.eventAt-u.userSentAtMs)<=10000);
@@ -1325,6 +1325,56 @@ async function recoverLateRetry(tabId,url) {
 }
 
 const retryReadinessRecoveries=new Map();
+// Re-arm only a positively unclicked retry against the same failed native
+// reasoning turn. This records permission to observe again; the ordinary
+// retry coordinator still owns the next draft backup and the only send.
+async function recoverCancelledReasoningRetry(tabId,url,recheck=0) {
+  const state=await readRetryState(url);
+  if(!state||state.blocked||state.terminal||state.remainingRetries===0||
+      state.preparationRecovered||(state.cancelledRecoveries||0)>=2||!state.lastAttemptId||!state.lastPromptKey)return state;
+  const journal=await readJournal();
+  if(!journal.ok||journal.storageError||!journal.meta||journal.events.length!==journal.meta.sequence||
+      journal.events.some((e,i)=>e.sequence!==i+1))return state;
+  const relevant=journal.events.filter(e=>e.sourceUrl===url),planned=relevant.filter(e=>e.kind==='retry.planned'&&
+    e.tabId===tabId&&e.attemptId===state.lastAttemptId&&e.promptKey===state.lastPromptKey).at(-1);
+  if(!planned?.operationId||!planned.requestId||!planned.retryUserId)return state;
+  const own=relevant.filter(e=>e.operationId===planned.operationId&&e.tabId===tabId),one=kind=>{
+    const matches=own.filter(e=>e.kind===kind);return matches.length===1?matches[0]:null;
+  };
+  const cancelled=one('retry.cancelled'),finished=one('retry.finished'),saved=one('draft.saved'),restored=one('draft.restored');
+  if(!cancelled||!finished||finished.clicked!==false||finished.confirmed!==false||
+      cancelled.sequence>=finished.sequence||own.some(e=>['send.authorized','send.dispatched','retry.clicked','retry.confirmed'].includes(e.kind))||
+      Boolean(saved)!==Boolean(restored)||saved&&(!(saved.sequence<restored.sequence&&restored.sequence<finished.sequence)||typeof saved.draft!=='string')||
+      relevant.some(e=>e.kind==='request.started'&&e.sequence>planned.sequence))return state;
+  const request=relevant.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.requestId===planned.requestId&&String(e.eventAt)===planned.attemptId);
+  const failed=relevant.filter(e=>e.kind==='request.failed'&&e.tabId===tabId&&e.requestId===planned.requestId);
+  if(request.length!==1||failed.length!==1||request[0].sequence>=failed[0].sequence||failed[0].sequence>=planned.sequence)return state;
+  const tab=await chrome.tabs.get(tabId),checkpoint=await completionCheckpointRead(tabId),goal=await goalController.get(url),native=await inspectBoundNativeTurn(tabId,url);
+  if(tab.url!==url||tab.status!=='complete'||checkpoint?.state!=='active'||checkpoint.url!==url||
+      checkpoint.promptKey!==planned.promptKey||checkpoint.requestId!==planned.requestId||
+      String(checkpoint.startedAt)!==planned.attemptId||checkpoint.requestFailedAt!==failed[0].eventAt||
+      goal&&(goal.stopRequested||goal.pauseRequested||goal.manualPending||goal.manualOverride||goal.operation||
+        !['waiting','recovering'].includes(goal.phase)||Date.now()>=goal.deadlineAt)||
+      !native?.ok||native.isLatest!==true||native.isReadOnly!==false||native.reasoningFailed!==true||native.generating!==false||
+      native.promptKey!==planned.promptKey||native.userId!==planned.retryUserId||
+      !Number.isFinite(native.lastUserSentAtMs)||Math.abs(native.lastUserSentAtMs-checkpoint.startedAt)>10000)return state;
+  const [editor]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+    args:[{action:'inspect-plain-retry-draft',text:saved?.draft||'',url}]});
+  // The restored draft may have been edited since the cancellation. The
+  // normal retry coordinator snapshots its current plain text again before
+  // touching the composer; do not replace it with an older backup here.
+  if(!editor?.result?.ok)return state;
+  if(JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+      JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||(await chrome.tabs.get(tabId)).url!==url)return state;
+  try {
+    await appendJournal({kind:'retry.cancelled_recovered',operationId:planned.operationId,sourceUrl:url,
+      attemptId:planned.attemptId,promptKey:planned.promptKey,requestId:planned.requestId,expectedSequence:journal.meta.sequence},tab);
+  } catch(error) {
+    if(error?.code==='RETRY_CANCELLED_RACE'&&recheck<2)return recoverCancelledReasoningRetry(tabId,url,recheck+1);
+    throw error;
+  }
+  return readRetryState(url);
+}
 async function recoverNoClickRetry(tabId,url) {
   if(retryReadinessRecoveries.has(url))return retryReadinessRecoveries.get(url);
   const work=(async()=>{
@@ -1973,7 +2023,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId>0 || !message.url?.startsWith('https://chatgpt.com/')) return;
     const url=retryDraftUrl(message.url);
     if(!url||retryDraftUrl(sender.tab.url)!==url)return;
-    recoverNoClickRetry(sender.tab.id,url).then(state=>state?.blocked?recoverLateRetry(sender.tab.id,url):state).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:String(error.message||error)}));
+    recoverNoClickRetry(sender.tab.id,url).then(state=>state?.blocked?recoverLateRetry(sender.tab.id,url):recoverCancelledReasoningRetry(sender.tab.id,url)).then(state=>sendResponse({ok:true,state})).catch(error=>sendResponse({ok:false,error:String(error.message||error)}));
     return true;
   }
   if(['CHATGPT_RETRY_DRAFT_GET','CHATGPT_RETRY_DRAFT_CLAIM'].includes(message?.type)) {
@@ -2097,7 +2147,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
-    if(['retry.manual_reset','retry.preparation_superseded','retry.preparation_recovered','retry.late_recovered','handoff.superseded','goal.unsent_release'].includes(event.kind)) {
+    if(['retry.manual_reset','retry.preparation_superseded','retry.preparation_recovered','retry.cancelled_recovered','retry.late_recovered','handoff.superseded','goal.unsent_release'].includes(event.kind)) {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
     const prepareEvent=async()=>{

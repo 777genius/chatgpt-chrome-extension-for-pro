@@ -41,8 +41,9 @@ async function fixture(witness=false){
 {
  const f=await fixture(true);assert.equal((await f.recover()).ok,true);assert.equal(f.data['chatgpt-goal:'+url].restoredIntent.confirmation,'request-body');
 }
-for(const scenario of ['valid','no-consent','wrong-link','wrong-allocation','wrong-first-id','duplicate-allocation']) {
+for(const scenario of ['valid','no-consent','wrong-link','wrong-allocation','wrong-first-id','duplicate-allocation','conflicting-allocation']) {
  const f=await fixture(),intent=f.data['chatgpt-goal-composer:7'].intent;
+ intent.text='Formatted label';
  intent.linkTargets=['https://example.test/source'];
  const initial={userId:'original-native-user',userText:'Formatted [label](https://example.test/source)',userSentAtMs:1100,promptKey:prefix+'initial'};
  f.history.recoveryTimeline.unshift(initial);
@@ -51,14 +52,37 @@ for(const scenario of ['valid','no-consent','wrong-link','wrong-allocation','wro
  if(scenario==='wrong-allocation')f.events.at(-1)!.promptKey=prefix+'other';
  if(scenario==='wrong-first-id')f.native.firstTurnMessageIds=['other'];
  if(scenario==='duplicate-allocation')f.events.push({...f.events.at(-1)});
+ if(scenario==='conflicting-allocation')f.events.push({...f.events.at(-1),promptKey:prefix+'different'});
  f.events.forEach((e:V,i:number)=>e.sequence=i+1);
  const r=await f.recover(scenario!=='no-consent');
- if(scenario==='valid'){
+ if(scenario==='valid'||scenario==='duplicate-allocation'){
   assert.equal(r.ok,true,'explicit restore accepts uniquely bound virtualized rich original');
-  assert.equal(f.data['chatgpt-goal:'+url].goal,'Exact original objective');
+  assert.equal(f.data['chatgpt-goal:'+url].goal,'Formatted label');
   assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
  }else{assert.equal(r.pending,true,scenario);assert.equal(f.data['chatgpt-goal:'+url],undefined,scenario);}
  assert.equal(f.dispatched.length,0,'original message is never resent');
+}
+for(const scenario of ['valid','no-consent','changed-text','added-text','changed-link','reordered-links','duplicate-idempotent','duplicate-conflict','duplicate-source','duplicate-target']) {
+ const f=await fixture(),intent=f.data['chatgpt-goal-composer:7'].intent;
+ intent.text='Read label and details';intent.linkTargets=['https://example.test/one','https://example.test/two'];
+ const initial={userId:'original-native-user',userText:'Read [label](https://example.test/one) and [details](https://example.test/two)',userSentAtMs:1100,promptKey:prefix+'initial'};
+ f.history.recoveryTimeline.unshift(initial);
+ f.events.push({kind:'completion.url_allocated',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'root-request',attemptId:'1100',promptKey:initial.promptKey});
+ if(scenario==='changed-text')initial.userText=initial.userText.replace('details','different');
+ if(scenario==='added-text')initial.userText+=' extra instruction';
+ if(scenario==='changed-link')initial.userText=initial.userText.replace('/one','/other');
+ if(scenario==='reordered-links')intent.linkTargets.reverse();
+ if(scenario==='duplicate-idempotent')f.events.push({...f.events.at(-1)});
+ if(scenario==='duplicate-conflict')f.events.push({...f.events.at(-1),promptKey:prefix+'other'});
+ if(scenario==='duplicate-source')f.events.push({...f.events.at(-1),sourceUrl:'https://chatgpt.com/c/other'});
+ if(scenario==='duplicate-target')f.events.push({...f.events.at(-1),targetUrl:'https://chatgpt.com/c/other'});
+ f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ const r=await f.recover(scenario!=='no-consent');
+ if(scenario==='valid'||scenario==='duplicate-idempotent') {
+  assert.equal(r.ok,true,scenario);assert.equal(f.data['chatgpt-goal:'+url].goal,intent.text);
+  assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+ } else {assert.equal(r.pending,true,scenario);assert.equal(f.data['chatgpt-goal:'+url],undefined,scenario);}
+ assert.equal(f.dispatched.length,0,'original rich message is never replayed');
 }
 for(const marker of [false,true]){
  const f=await fixture();Object.assign(f.native,{turnStatus:'complete',generating:false,assistantCompleted:true,assistantPhase:'final_answer',

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.137';
+  const SCRIPT_VERSION = '1.8.138';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -843,7 +843,12 @@
       notifyError(error, state.reason);
     } finally {
       if (!clicked) {
-        void logRetry('retry.cancelled',{operationId,reason:'Отправка не выполнялась'});
+        void logRetry('retry.cancelled',{operationId,reason:'Отправка не выполнялась',guard:{
+          tokenChanged:watchToken!==expectedToken,routeChanged:location.pathname!==path,
+          attemptChanged:(globalThis.__chatgptNotifierAttemptId||'')!==attempt||
+            (globalThis.__chatgptNotifierRequestId||null)!==requestId,
+          stateChanged:retryStates.get(path)!==state,promptChanged:(latestPromptSnapshot()?.promptKey||path)!==promptKey,
+          editorChanged:Boolean(insertedEditor&&composer()!==insertedEditor),generating:isGenerating()}});
         if(recoveryStopped&&!isGenerating())void runtimeMessage({type:'CHATGPT_GENERATION_STOPPED',url:sourceUrl,startedAt:Number(attempt),requestId});
       }
       else if (!confirmed && !state.blocked) void logRetry('retry.failed',{operationId,clicked:true,confirmed:false,reason:'Контекст чата изменился; результат отправки неизвестен'});
@@ -869,6 +874,20 @@
         }
       }
       if(runtimeAvailable())await logRetry('retry.finished',{operationId,clicked,confirmed});
+      if(runtimeAvailable()&&!clicked&&!state.blocked&&retryReadinessTimer===null) {
+        // A pre-click cancellation can be a transient UI race. Re-arm only
+        // after the worker proves the exact failed request, durable no-click
+        // history and restored draft; never replay an uncertain click.
+        retryReadinessTimer=setTimeout(async()=>{
+          retryReadinessTimer=null;
+          if(!runtimeAvailable()||location.pathname!==path||retryState()!==state)return;
+          const result=await runtimeMessage({type:'CHATGPT_RETRY_STATE',url:sourceUrl});
+          if(!runtimeAvailable()||location.pathname!==path||retryState()!==state||!result?.ok||
+              !result.state?.preparationRecovered)return;
+          retryStates.delete(path);retryRestoredPath='';retryStateReady();
+          scheduleActiveCompletionRecovery();
+        },5000);
+      }
       if(runtimeAvailable()&&!clicked&&state.blocked&&retryReadinessTimer===null) {
         retryReadinessTimer=setTimeout(()=>{
           retryReadinessTimer=null;

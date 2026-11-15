@@ -108,6 +108,14 @@ function reduceRetrySummary(retryByChat, event) {
       preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1,
       preparationDraftOperationId:event.preparationDraftOperationId||null,preparationDraftSequence:event.preparationDraftSequence||null}};
   }
+  if(event.kind==='retry.cancelled_recovered') {
+    const state=retryByChat[chatId];
+    if(!state||state.blocked||state.terminal||state.remainingRetries===0||
+        state.lastAttemptId!==event.attemptId||state.lastPromptKey!==event.promptKey||
+        (state.cancelledRecoveries||0)>=2)return retryByChat;
+    return {...retryByChat,[chatId]:{...state,preparationRecovered:true,
+      cancelledRecoveries:(state.cancelledRecoveries||0)+1}};
+  }
   if(event.kind==='retry.late_recovered') {
     const state=retryByChat[chatId];
     if(!state?.blocked||state.terminal||state.blockedAttemptId!==event.attemptId||
@@ -281,11 +289,34 @@ function appendJournal(event, tab = {}) {
     // Recovery preflight and Goal writes have separate lifetimes. A user can
     // Pause/Stop after preparation or intent; consult the durable Goal again
     // at each grant boundary, before reserving or consuming a retry click.
-    if(retrySource&&(['retry.send_intent','retry.preparation_recovered','retry.late_recovered'].includes(event.kind)||
+    if(retrySource&&(['retry.send_intent','retry.preparation_recovered','retry.cancelled_recovered','retry.late_recovered'].includes(event.kind)||
         event.kind==='send.authorized'&&active[tabId]?.kind==='retry.send_intent')) {
       const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
       if(goal&&(goal.stopRequested||goal.pauseRequested||['stopped','paused'].includes(goal.phase)))
         throw Object.assign(new Error('Цель остановлена или приостановлена; автоповтор отменён'),{journalPolicy:true});
+    }
+    if(event.kind==='retry.cancelled_recovered') {
+      const state=meta.retryByChat?.[journalChatId(retrySource)];
+      let changed=!Number.isInteger(event.expectedSequence)||event.expectedSequence<0||event.expectedSequence>meta.sequence;
+      if(!changed&&event.expectedSequence<meta.sequence) {
+        const count=meta.sequence-event.expectedSequence;
+        if(count>1000)changed=true;
+        else {
+          const keys=Array.from({length:count},(_,i)=>`${JOURNAL_PREFIX}${String(event.expectedSequence+i+1).padStart(12,'0')}`);
+          const delta=await chrome.storage.local.get(keys);
+          changed=keys.some((key,i)=>{
+            const entry=delta[key];
+            return !entry||entry.sequence!==event.expectedSequence+i+1||entry.tabId===tabId||
+              retryDraftUrl(entry.sourceUrl)===retrySource||retryDraftUrl(entry.observedTabUrl)===retrySource;
+          });
+        }
+      }
+      if(changed||
+          !state||state.blocked||state.terminal||state.preparationRecovered||state.remainingRetries===0||
+          state.lastAttemptId!==event.attemptId||state.lastPromptKey!==event.promptKey||
+          (state.cancelledRecoveries||0)>=2||retryPreparingByChat[retrySource]||handoffSourceClaims[retrySource]||
+          Object.values(active).some(a=>a&&(a.sourceUrl===retrySource||a.chatUrl===retrySource)))
+        throw Object.assign(new Error('Отменённый повтор изменился до восстановления'),{journalPolicy:true,code:'RETRY_CANCELLED_RACE'});
     }
     if(event.kind==='retry.late_recovered') {
       if(!Number.isInteger(event.expectedSequence)||meta.sequence!==event.expectedSequence)
