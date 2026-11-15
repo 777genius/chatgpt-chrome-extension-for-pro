@@ -17,6 +17,12 @@
     const composerKey=tabId=>'chatgpt-goal-composer:'+tabId;
     const closedComposerKey=tabId=>'chatgpt-goal-closed-composer:'+tabId;
     const composerBindingKey=id=>'chatgpt-goal-composer-binding:'+id;
+    const retiredGoalKey=id=>'chatgpt-goal-retired:'+id;
+    // An explicitly stopped goal can be retired only by a later, independently
+    // verified user submission. Its old consumed grant remains in the journal.
+    const mayRetireForManual=record=>record?.phase==='stopped'&&
+      record.reason==='Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском'&&
+      record.operation?.status==='clicked'&&typeof record.operation.id==='string'&&!!record.operation.id;
     const buffered=(record,plural,singular)=>[
       ...(Array.isArray(record?.[plural])?record[plural]:[]),
       ...(record?.[singular]?[record[singular]]:[])
@@ -88,7 +94,7 @@
           const bound=boundUrl?await read(boundUrl):null;
           const expiredElsewhere=bound?.url!==target&&bound?.phase==='blocked'&&
             Number.isFinite(bound.deadlineAt)&&now()>=bound.deadlineAt;
-          if(bound?.id!==previous.id||bound.operation||
+          if(bound?.id!==previous.id||(bound.operation&&!mayRetireForManual(bound))||
               (!expiredElsewhere&&!['completed','stopped','moved'].includes(bound.phase)))
             throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
         } else if(previous?.phase==='intent') {
@@ -299,7 +305,11 @@
           return {ok:true,record:current,goal:view(previous)};
         }
         if(prior)throw Error('Разрешение Goal уже связано с другим чатом');
-        requireAvailable(previous);
+        const retire=mayRetireForManual(previous)&&current.request?.requestId===requestId&&
+          current.request.startedAt===startedAt&&startedAt>previous.operation.createdAt&&
+          current.request.submission?.userId===userId&&current.request.submission?.userText===userText&&
+          requestId!==previous.operation.requestId;
+        if(!retire)requireAvailable(previous);
         const record={...current,phase:'bound',binding};
         const next={schema:1,id:armId,url:target,originUrl:target,goal:userText,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
@@ -310,8 +320,10 @@
         await event('manual_started',next,tabId,{text:userText,intentText:intent.text,userVisibleText:binding.userVisibleText,rules:next.rules,
           maxContinuations:next.maxContinuations,maxMinutes:next.maxMinutes,deadlineAt:next.deadlineAt,
           requestId,startedAt,promptKey,userId,userSentAtMs,composerSourceUrl:current.url,
+          ...(retire?{retiredGoalId:previous.id,retiredOperationId:previous.operation.id}:{}),
           ...(recovery?{recoveredSupplements:supplements}: {})});
-        await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId}});
+        await storage.set({[key(target)]:next,[composerKey(tabId)]:record,[name]:{...binding,tabId},
+          ...(retire?{[retiredGoalKey(previous.id)]:previous}:{})});
         return {ok:true,record,goal:view(next)};
       });
     }

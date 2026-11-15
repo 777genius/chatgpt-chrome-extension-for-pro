@@ -41,6 +41,30 @@ function fixture() {
     failJournal:(next:boolean)=>{failJournal=next;},closeOldTab:()=>{oldTabOpen=false;},newTab:(open:boolean)=>{newTabOpen=open;}};
 }
 
+// A later, explicitly submitted manual goal may replace a stopped goal with
+// an unresolved click, while retaining the complete old record and its fence.
+{
+  const env=fixture();
+  const old={id:'old-goal',url:saved,phase:'stopped',
+    reason:'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском',
+    operation:{id:'old-op',status:'clicked',createdAt:999000,tabId:7}};
+  env.data[goalKey(saved)]=structuredClone(old);
+  env.data[composerKey(7)]={id:'old-goal',phase:'bound',binding:{url:saved}};
+  const armId=await env.intent(7,saved);
+  const proof=env.proof(armId);
+  env.clock(1000300);
+  await assert.rejects(()=>env.store.composerBind(proof),/не подтверждена/);
+  assert.deepEqual(env.data[goalKey(saved)],old);
+  await env.store.composerRequest({tabId:7,armId,requestId:proof.requestId,startedAt:proof.startedAt,url:saved,
+    submission:{userId:proof.userId,userText:objective}});
+  const bound=await env.store.composerBind(proof);
+  assert.equal(bound.goal.id,armId);
+  assert.equal(bound.goal.phase,'waiting');
+  assert.deepEqual(env.data['chatgpt-goal-retired:old-goal'],old);
+  assert.equal(env.messages.length,0,'manual adoption never dispatches the old operation');
+  assert.equal((await env.store.check({url:saved,tabId:7,id:'old-goal',operationId:'old-op'})).ok,false);
+}
+
 // Arming and exact send intent are durable authorization only, with no draft
 // reads, page calls or automated initial send. Defaults are finite and shared.
 {
