@@ -1024,7 +1024,8 @@
             record.pauseRequested||record.stopRequested||record.manualPending||
             record.preHandoffPhase==='paused'||now()>=record.deadlineAt)return {ok:false};
         if(record.phase==='handoff')return {ok:true};
-        if(!['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна'].includes(reason)||
+        if(!['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна',
+            'Исходный чат или запрос изменился; переход отменён'].includes(reason)||
             record.phase!=='blocked'||record.reason!=='Передача Goal остановлена: '+reason)return {ok:false};
         const next={...record,phase:'handoff',reason:''};
         await event('handoff_preparation_ready',next,tabId,{handoffId,preparationReason:reason});

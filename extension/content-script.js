@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.145';
+  const SCRIPT_VERSION = '1.8.146';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -1269,6 +1269,7 @@
       // A refused pre-click preparation is durable. A persisted navigation
       // intent remains a fence even if a later observer cannot prove a click.
       await updateHandoff('failed',{reason:String(cause.message||cause)});
+      scheduleHandoffReadiness();
       throw cause;
     }
     if(!runtimeAvailable())return;
@@ -1484,12 +1485,16 @@
 
   function scheduleHandoffReadiness() {
     if(!runtimeAvailable()||handoffReadinessTimer!==null||handoffRecord?.stage!=='failed'||
-        handoffRecord.reason!=='Не удалось дождаться готовности нового чата'||
-        (handoffRecord.preparationRecoveries||0)>=3)return;
+        !['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна',
+          'Исходный чат или запрос изменился; переход отменён'].includes(handoffRecord.reason)||
+        (handoffRecord.preparationRecoveries||0)>=3||
+        (handoffRecord.reason!=='Не удалось дождаться готовности нового чата'&&
+          (handoffRecord.navigationRecoveries||0)>=1))return;
     handoffReadinessTimer=setTimeout(()=>{
       handoffReadinessTimer=null;
       if(runtimeAvailable())void resumeSavedHandoff();
-    },handoffRecord.preparationPhase==='upload'?5000:300000);
+    },handoffRecord.reason!=='Не удалось дождаться готовности нового чата'?30000:
+      handoffRecord.preparationPhase==='upload'?5000:300000);
   }
 
   async function resumeSavedHandoff() {

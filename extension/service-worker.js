@@ -416,7 +416,8 @@ async function recoverHandoffNavigation(tabId,expected) {
   const previous=handoffWrites.get(tabId)||Promise.resolve();
   const work=previous.catch(()=>{}).then(async()=>{
     const key=handoffKey(tabId),h=(await chrome.storage.local.get(key))[key];
-    if(h?.id!==expected.id||h.stage!=='failed'||h.reason!=='Кнопка нового чата недоступна'||
+    if(h?.id!==expected.id||h.stage!=='failed'||!['Кнопка нового чата недоступна',
+        'Исходный чат или запрос изменился; переход отменён'].includes(h.reason)||
         h.sendReceipt||(h.navigationRecoveries||0)>=1)return {ok:false,record:h};
     const t=await chrome.tabs.get(tabId),u=ChatGPTGoalPolicy.canonical(t.url);
     if(u!==h.sourceUrl||t.status!=='complete')return {ok:false,record:h};
@@ -429,7 +430,8 @@ async function recoverHandoffNavigation(tabId,expected) {
         !own.some(e=>e.kind==='handoff.failed'&&e.reason===h.reason)||
         own.some(e=>e.kind==='handoff.sending'||e.kind==='handoff.sent'||e.kind==='handoff.awaiting-confirmation'||
           e.kind==='handoff.navigation_intent'||e.kind==='handoff.navigation_clicked'||e.kind==='handoff.clicked'||e.kind.startsWith('send.')||e.kind==='request.started')||
-        j.events.some(e=>e.tabId===tabId&&e.kind==='request.started'&&e.recordedAt>=h.createdAt))return {ok:false,record:h};
+        j.events.some(e=>e.kind==='request.started'&&e.recordedAt>=h.createdAt&&
+          (e.tabId===tabId||e.sourceUrl===u)))return {ok:false,record:h};
     const [a]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[u,true]});
     const n=a?.result;
     const [b]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,true]});
@@ -472,6 +474,11 @@ async function handleHandoffMessage(message, tabId) {
     let saved=(await chrome.storage.local.get(key))[key]||null;
     if(saved?.stage==='failed'&&saved.reason==='Не удалось дождаться готовности нового чата')
       saved=await recoverHandoffReadiness(tabId,saved);
+    if(saved?.stage==='failed'&&['Кнопка нового чата недоступна',
+        'Исходный чат или запрос изменился; переход отменён'].includes(saved.reason)) {
+      const recovered=await recoverHandoffNavigation(tabId,saved);
+      if(recovered?.record)saved=recovered.record;
+    }
 
     if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation'].includes(saved.stage))
       await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
