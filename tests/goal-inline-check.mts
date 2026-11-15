@@ -6,7 +6,7 @@ import {parseHTML} from 'linkedom';
 type GoalRecord={id:string;url:string;goal:string;rules:string;phase:string;reason?:string;resumeRequested?:boolean;continuations:number;maxContinuations:number;maxMinutes:number;deadlineAt:number;operation?:unknown;preHandoffPhase?:string;supplements?:{userText:string}[]};
 type Config={rules:string;maxContinuations:number;maxMinutes:number};
 type Composer={id:string;phase:'armed'|'intent'|'bound'|'disabled';url:string;config:Config;eventAt?:number;intent?:{text:string;baselineKey:string;eventAt:number};binding?:{url:string}};
-type Request={type:string;action:string;url:string;armId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
+type Request={type:string;action:string;url:string;armId?:string;goalId?:string;text?:string;baselineKey?:string;eventAt?:number;rules?:string;maxContinuations?:number;maxMinutes?:number};
 type Result={ok:boolean;record?:GoalRecord|null;composer?:Composer|null;url?:string;error?:string;pending?:boolean;refused?:boolean};
 type Instance={refresh:()=>Promise<void>;dispose:()=>void;manualIntent:(value:{text:string;baselineKey:string;eventAt:number})=>Promise<{ok:boolean}>};
 const chat='https://chatgpt.com/c/synthetic-goal-a',other='https://chatgpt.com/c/synthetic-goal-b';
@@ -209,7 +209,7 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   assert.equal(f.calls.length,paused,'untrusted Resume and hidden Pause cannot dispatch');
   assert.equal(f.action('resume').hidden,false);f.click(f.action('resume'));await tick();
   assert.equal(f.calls.at(-1)!.action,'resume');f.click(f.action('stop'));await tick();
-  assert.equal(f.calls.at(-1)!.action,'stop');f.instance.dispose();
+  assert.equal(f.calls.at(-1)!.action,'stop');assert.equal(f.calls.at(-1)!.goalId,goal().id);f.instance.dispose();
 }
 
 // Handoff retains its own phase; Pause/Resume changes the policy carried to

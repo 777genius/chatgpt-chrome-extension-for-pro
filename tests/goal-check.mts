@@ -226,6 +226,7 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
 {
   const env=fixture();await begin(env);
   const current=state(env),op=current.operation;
+  await assert.rejects(()=>env.store.control({action:'stop',url:URL_A,tabId:7,id:'other-goal'}),'a stale stop cannot affect a replacement Goal');
   await env.store.intent({url:URL_A,tabId:7,id:current.id,operationId:op.id,text:op.text,
     baselineKey:'/c/goal-fixture-a|old'});
   const stage=(promptKey:string,userId:string,completionKey:string)=>

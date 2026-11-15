@@ -47,6 +47,9 @@ tabClosed=true;
 assert.equal((await call(request('disarm',{armId:'armed'}))).ok,true,'an explicit switch-off already in flight survives tab closure');
 assert.deepEqual(structuredClone(calls.at(-1)),{kind:'disarm',value:{tabId:7,armId:'armed'}});
 assert.equal((await call(request('disarm'))).ok,false,'closed-tab Stop requires the exact arm ID');
+assert.equal((await call(request('stop',{goalId:'saved-goal'}))).ok,true,'an in-flight Stop retains its exact Goal binding');
+assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action:'stop',url:source,tabId:7,id:'saved-goal'}});
+assert.equal((await call(request('stop'))).ok,false,'closed-tab Stop requires a Goal ID');
 assert.equal((await call(request('resume',{armId:'armed'}))).ok,false,'a closed tab cannot resume or dispatch');
 tabClosed=false;calls.length=0;tabReads.length=0;
 
@@ -70,6 +73,8 @@ for(const action of ['pause','resume','stop']) {
   assert.equal((await call(request(action))).ok,true);
   assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action,url:source,tabId:7}});
 }
+assert.equal((await call(request('stop',{goalId:'saved-goal'}))).ok,true);
+assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action:'stop',url:source,tabId:7,id:'saved-goal'}});
 assert.equal(activeQueries,0,'inline actions use the sending tab even when a different tab is active');
 assert.ok(tabReads.every(id=>id===7));
 for(const action of ['arm','disarm','intent','bind']) {

@@ -449,6 +449,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         } catch(cause){error=String(cause?.message||cause);render();return;}
       }
       if(action==='restore'){if(record||composer?.phase!=='intent')return;input={armId:composer.id};stopBinding();}
+      if(action==='stop'&&record?.id)input={goalId:record.id};
       if(action==='disarm') {
         if(!composer?.id)return;
         input={armId:composer.id};

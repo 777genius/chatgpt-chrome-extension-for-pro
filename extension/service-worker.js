@@ -1907,6 +1907,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(!liveTab) {
         if(message.action==='disarm'&&typeof message.armId==='string'&&message.armId)
           return goalController.composerDisarm({tabId,armId:message.armId});
+        if(message.action==='stop'&&source===requested&&ChatGPTGoalPolicy.canonical(requested)&&
+            typeof message.goalId==='string'&&message.goalId)
+          return goalController.control({action:'stop',url:requested,tabId,id:message.goalId});
         throw Error('Вкладка Goal закрыта');
       }
       const liveUrl=liveTab.url,live=ChatGPTGoalPolicy.pageUrl(liveUrl);
@@ -1932,7 +1935,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes}),tabId,url:live};
       } else if(message.action!=='get') {
         if(!ChatGPTGoalPolicy.canonical(live))throw Error('Goal ещё ожидает первое сообщение');
-        const controlled=await goalController.control({action:message.action,url:live,tabId});
+        const controlled=await goalController.control({action:message.action,url:live,tabId,
+          ...(message.action==='stop'&&typeof message.goalId==='string'&&message.goalId?{id:message.goalId}:{})});
         if(controlled.record?.resumeRequested)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_ROUTE_CHANGED'}).catch(()=>{});
         return {...controlled,tabId,url:live};
       }

@@ -540,11 +540,12 @@
       await deliver(record);
       return {ok:true};
     }
-    async function control({action,url,tabId}) {
+    async function control({action,url,tabId,id}) {
       const target=requireUrl(url);
       const outcome=await serialize(async()=>{
         const old=await read(target);
         if(!old)throw Error('Сохранённая цель не найдена');
+        if(id!==undefined&&old.id!==id)throw Error('Цель уже изменилась');
         if(action==='pause') {
           if(['completed','stopped','blocked','moved'].includes(old.phase))throw Error('Goal уже завершён');
           const inFlight=['sending','clicked'].includes(old.phase);
