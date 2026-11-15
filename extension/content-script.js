@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.139';
+  const SCRIPT_VERSION = '1.8.140';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -22,6 +22,7 @@
   let handoffReadinessTimer = null;
   let historyRetryTimer = null;
   let retryReadinessTimer = null;
+  let draftRestoreTimer = null;
   let returnedPageUrl = '';
   const listeners = new AbortController();
   const answerWaitSlot = ChatGPTNotifierMemory.createLatestTaskSlot();
@@ -66,6 +67,8 @@
     handoffReadinessTimer=null;
     if(retryReadinessTimer!==null)clearTimeout(retryReadinessTimer);
     retryReadinessTimer=null;
+    if(draftRestoreTimer!==null)clearTimeout(draftRestoreTimer);
+    draftRestoreTimer=null;
     manualSendIntent = null;
     listeners.abort();
     try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
@@ -423,6 +426,9 @@
     try {
       const result=await runtimeMessage({type:'CHATGPT_RETRY_DRAFT_GET',url});
       const record=result?.ok&&result.record;
+      if(startup&&record?.phase==='unknown'&&!record.claimedAt&&current===''&&draftRestoreTimer===null&&runtimeAvailable()) {
+        draftRestoreTimer=setTimeout(()=>{draftRestoreTimer=null;if(runtimeAvailable()&&location.pathname===path){draftRestorePath='';void restoreDraft(null,true).catch(()=>{});}},30000);
+      }
       if(!record||operationId&&record.operationId!==operationId||localDraft&&record.draft!==localDraft)return;
       const retryText=record.retryText||ChatGPTGoalPolicy.DEFAULT_RETRY_MESSAGE;
       if(startup&&current!==''&&current!==retryText)return;

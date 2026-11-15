@@ -52,7 +52,7 @@ function reduceRetryDraft(drafts,event,manualStartedAt) {
   if(event.kind==='retry.manual_reset')phase='superseded';
   if(event.kind==='retry.preparation_superseded'&&!retryAttemptAtOrAfter(current.attemptId,event.startedAt))phase='superseded';
   if(event.kind==='draft.restored')phase='restored';
-  if(event.kind==='draft.restore_intent')return {...drafts,[url]:{...current,phase:'claimed',claimedAt:event.recordedAt,claimSequence:event.sequence}};
+  if(event.kind==='draft.restore_intent')return {...drafts,[url]:{...current,phase:'claimed',claimedAt:event.recordedAt,claimSequence:event.sequence,...(current.phase==='unknown'?{unknownOutcome:true}:{})}};
   return phase===current.phase?drafts:{...drafts,[url]:{...current,phase}};
 }
 function retryDraftClaimable(record) {
@@ -337,7 +337,18 @@ function appendJournal(event, tab = {}) {
         throw duplicate();
     }
     if(event.kind==='retry.planned'||event.kind==='retry.send_intent')reserveRetry();
-    if(event.kind==='draft.restore_intent'&&(!retryDraftClaimable(savedDraft)||savedDraft.operationId!==operationId||savedDraft.savedSequence!==event.savedSequence)) {
+    const unknownPreparation=retryPreparingByChat[retrySource],unknownOwner=unknownPreparation?.tabId;
+    const unknownOwnerTabs=event.kind==='draft.restore_intent'&&event.allowUnknown===true&&unknownOwner!==tabId&&Number.isInteger(unknownOwner)
+      ?await chrome.tabs.query({}):null;
+    const unknownOwnerClosed=Array.isArray(unknownOwnerTabs)&&!unknownOwnerTabs.some(t=>t.id===unknownOwner);
+    const unknownDraftClaim=event.kind==='draft.restore_intent'&&event.allowUnknown===true&&savedDraft?.phase==='unknown'&&savedDraft.replacementProven===true&&
+      Number.isInteger(event.expectedSequence)&&event.expectedSequence===meta.sequence&&
+      !active[tabId]&&!active[unknownOwner]&&unknownPreparation?.operationId===operationId&&
+      (unknownOwner===tabId||event.originalTabId===unknownOwner&&unknownOwnerClosed)&&
+      retrySendClaims[unknownPreparation?.claimKey]?.operationId===operationId&&
+      retrySendClaims[unknownPreparation?.claimKey]?.tabId===unknownOwner&&
+      retrySendClaims[unknownPreparation?.claimKey]?.phase==='consumed'&&Boolean(retryConsumedOperations[operationId]);
+    if(event.kind==='draft.restore_intent'&&(!(retryDraftClaimable(savedDraft)||unknownDraftClaim)||savedDraft.operationId!==operationId||savedDraft.savedSequence!==event.savedSequence)) {
       throw Object.assign(new Error('Восстановление черновика уже выполнено или исход отправки неизвестен'),{journalPolicy:true});
     }
     const claimedDraft=event.kind==='draft.restore_intent'?await indexedRetryDraft(meta,sourceUrl):null;
@@ -417,8 +428,8 @@ function appendJournal(event, tab = {}) {
     const preparation=retryPreparingByChat[retrySource];
     const ownSavedDraft=savedDraft?.operationId===operationId;
     const releasePreparation=(owns(preparation)||event.kind==='draft.restore_intent'&&preparation?.operationId===operationId)&&(
-      event.kind==='draft.restore_intent'||
-      event.kind==='retry.finished'&&(!event.clicked||event.confirmed||!ownSavedDraft||savedDraft.claimedAt)||
+      event.kind==='draft.restore_intent'&&!unknownDraftClaim||
+      event.kind==='retry.finished'&&(!event.clicked||event.confirmed||!ownSavedDraft||savedDraft.claimedAt&&!savedDraft.unknownOutcome)||
       event.kind==='retry.confirmed'&&!ownSavedDraft||
       ['retry.cancelled','retry.failed'].includes(event.kind)&&!ownSavedDraft&&retrySendClaims[preparation.claimKey]?.phase==='reserved');
     if(releasePreparation) {

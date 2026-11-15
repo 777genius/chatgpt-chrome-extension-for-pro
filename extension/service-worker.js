@@ -1325,6 +1325,45 @@ async function recoverLateRetry(tabId,url) {
 }
 
 const retryReadinessRecoveries=new Map();
+// Restore only the editor, never an uncertain send. The durable consumed
+// retry and preparation claims remain in place until independent evidence
+// resolves that send. A failed or interrupted restoration is never replayed.
+async function restoreUnknownRetryDraft(tabId,url) {
+  const draft=await readRetryDraft(url);
+  if(!draft||draft.phase!=='unknown'||draft.claimedAt||!draft.replacementProven||typeof draft.retryText!=='string'||!draft.retryText)return false;
+  const journal=await readJournal(),meta=journal?.meta;
+  if(!journal?.ok||journal.storageError||!meta||journal.events.length!==meta.sequence||
+      journal.events.some((e,i)=>e.sequence!==i+1)||meta.active?.[tabId])return false;
+  const preparation=meta.retryPreparingByChat?.[url],claim=meta.retrySendClaims?.[preparation?.claimKey];
+  const ownerTabId=preparation?.tabId;
+  if(preparation?.operationId!==draft.operationId||!Number.isInteger(ownerTabId)||claim?.operationId!==draft.operationId||claim.tabId!==ownerTabId||
+      claim.phase!=='consumed'||!meta.retryConsumedOperations?.[draft.operationId])return false;
+  if(ownerTabId!==tabId){const tabs=await chrome.tabs.query({});if(!Array.isArray(tabs)||tabs.some(t=>t.id===ownerTabId))return false;}
+  const own=journal.events.filter(e=>e.sourceUrl===url&&e.tabId===ownerTabId&&e.operationId===draft.operationId);
+  const one=kind=>{const found=own.filter(e=>e.kind===kind);return found.length===1?found[0]:null;};
+  const saved=one('draft.saved'),replaced=one('draft.replaced'),authorized=one('send.authorized'),
+    dispatched=one('send.dispatched'),clicked=one('retry.clicked'),failed=one('retry.failed'),finished=one('retry.finished');
+  if(!saved||!replaced||!authorized||!dispatched||!clicked||!failed||!finished||saved.sequence!==draft.savedSequence||
+      !(saved.sequence<replaced.sequence&&replaced.sequence<authorized.sequence&&authorized.sequence<dispatched.sequence&&
+        dispatched.sequence<clicked.sequence&&clicked.sequence<failed.sequence&&failed.sequence<finished.sequence)||
+      failed.clicked!==true||failed.confirmed!==false||failed.errorCode!=='RETRY_CONFIRMATION_UNPROVEN'||
+      finished.clicked!==true||finished.confirmed!==false||dispatched.text!==draft.retryText||
+      journal.events.some(e=>e.sourceUrl===url&&e.kind==='request.started'&&e.sequence>dispatched.sequence))return false;
+  const tab=await chrome.tabs.get(tabId);
+  if(retryDraftUrl(tab.url)!==url)return false;
+  const [editor]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+    args:[{action:'inspect-plain-retry-draft',url:tab.url,text:''}]});
+  if(editor?.result?.ok!==true||editor.result.matches!==true)return false;
+  try {
+    await appendJournal({kind:'draft.restore_intent',sourceUrl:url,operationId:draft.operationId,
+      savedSequence:draft.savedSequence,allowUnknown:true,originalTabId:ownerTabId,expectedSequence:meta.sequence},tab);
+  } catch{return false;}
+  const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+    args:[{action:'restore-unknown-retry-draft',url:tab.url,draft:draft.draft,retryText:draft.retryText}]});
+  if(result?.result?.ok!==true)return false;
+  await appendJournal({kind:'draft.restored',sourceUrl:url,operationId:draft.operationId,draftChars:draft.draft.length,unknownOutcome:true},tab);
+  return true;
+}
 // Re-arm only a positively unclicked retry against the same failed native
 // reasoning turn. This records permission to observe again; the ordinary
 // retry coordinator still owns the next draft backup and the only send.
@@ -2031,7 +2070,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if(sender.frameId>0||typeof tabId!=='number'||!url||retryDraftUrl(sender.tab.url)!==url){sendResponse?.({ok:false});return false;}
     (async()=>{
       if(retryDraftUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
-      if(message.type==='CHATGPT_RETRY_DRAFT_GET')return {ok:true,record:await readRetryDraft(url)};
+      if(message.type==='CHATGPT_RETRY_DRAFT_GET'){
+        await restoreUnknownRetryDraft(tabId,url).catch(()=>false);
+        return {ok:true,record:await readRetryDraft(url)};
+      }
       return claimRetryDraft(url,message.operationId,message.savedSequence,sender.tab);
     })().then(sendResponse).catch(()=>sendResponse?.({ok:false,claimed:false}));
     return true;
@@ -2147,7 +2189,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
     const event = message.event;
     if (!event || typeof event.kind !== 'string') return;
-    if(['retry.manual_reset','retry.preparation_superseded','retry.preparation_recovered','retry.cancelled_recovered','retry.late_recovered','handoff.superseded','goal.unsent_release'].includes(event.kind)) {
+    if(['draft.restore_intent','retry.manual_reset','retry.preparation_superseded','retry.preparation_recovered','retry.cancelled_recovered','retry.late_recovered','handoff.superseded','goal.unsent_release'].includes(event.kind)) {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
     const prepareEvent=async()=>{

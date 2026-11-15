@@ -381,6 +381,23 @@ function controlChatComposer(options) {
     typeof options.expectedModel==='string'&&/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(options.expectedModel)&&
     effort===options.expectedEffort&&model===options.expectedModel;
   const inspection = {ok:true,matches,plainMatches,promptMatches,ready,effort,model,promptChars:typeof prompt==='string'?prompt.length:null};
+  if(options.action==='restore-unknown-retry-draft') {
+    const attachments=composer.querySelector('[data-composer-attachments]');
+    const plain=typeof controller.getPlainText==='function'?controller.getPlainText():null;
+    if(editor.tagName==='TEXTAREA'||!noSystemHints||typeof options.draft!=='string'||!options.draft||typeof options.retryText!=='string'||
+        typeof prompt!=='string'||plain!==prompt||visibleText()!==prompt||
+        prompt!==''||controller.pendingSubmit!=null||
+        controller.pendingBrowserAutocompleteSubmission!=null||attachments?.children.length||
+        composer.querySelector('[data-testid*="attachment"], [data-testid="file-upload-progress"]'))return {ok:false};
+    // Keep all checks and insertion in the same task. This changes only the
+    // editor; the uncertain retry remains fenced in the durable journal.
+    editor.focus();
+    const selection=window.getSelection(),range=document.createRange();
+    if(!selection||!range)return {ok:false};
+    range.selectNodeContents(editor);selection.removeAllRanges();selection.addRange(range);
+    if(!document.execCommand('insertText',false,options.draft))return {ok:false};
+    return {ok:true};
+  }
   if(options.action==='inspect-plain-retry-draft') {
     const attachments=composer.querySelector('[data-composer-attachments]');
     const plain=typeof controller.getPlainText==='function'?controller.getPlainText():null;
