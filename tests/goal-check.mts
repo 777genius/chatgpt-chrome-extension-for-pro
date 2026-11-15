@@ -260,6 +260,31 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
 }
 
 // Pause or stop after the send intent never clears the unknown-operation fence.
+// A worker-proved unspent intent and later native manual message can restore
+// the same Goal and its history atomically, without a new automatic send.
+{
+  const env=fixture();await begin(env);const old=state(env),op=old.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:old.id,operationId:op.id,text:op.text,baselineKey:'/c/goal-fixture-a|old'});
+  await env.store.report({url:URL_A,tabId:7,id:old.id,operationId:op.id,status:'blocked',reason:'Отправка отменена: Нет сохранённого разрешения на эту автоматическую отправку'});
+  env.time+=1000;
+  const witness={requestId:'manual-request',startedAt:env.time,userSentAtMs:env.time,userId:'manual-user',userText:'Continue the work',promptKey:'/c/goal-fixture-a|manual'};
+  const handoff={id:'transfer',sourceUrl:URL_A,stage:'navigating',text:'Earlier history',fileName:'history.txt',asFile:true,prompt:'Read history'};
+  const input={sourceUrl:URL_A,handoffId:'transfer',tabId:7,goalId:old.id,operationId:op.id,witness,handoff,nativeVerified:true};
+  assert.equal((await env.store.handoffAfterUnsent({...input,nativeVerified:false})).ok,false);
+  assert.equal((await env.store.handoffAfterUnsent({...input,witness:{...witness,startedAt:op.createdAt}})).ok,false);
+  env.failWrite=true;await assert.rejects(()=>env.store.handoffAfterUnsent(input),/Synthetic storage failure/);
+  assert.equal(state(env).phase,'blocked');assert.equal(env.data['chatgpt-handoff:7'],undefined);
+  env.failWrite=false;
+  const result=await env.store.handoffAfterUnsent(input);
+  assert.equal(result.ok,true);assert.equal(state(env).phase,'handoff');assert.equal(state(env).id,old.id);
+  assert.equal(state(env).operation,null);assert.equal(state(env).supplements.at(-1).userText,witness.userText);
+  assert.match(env.data['chatgpt-handoff:7']!.text,/Complete review, CI and merge/);
+  assert.equal(env.data['chatgpt-handoff:7']!.navigationRecoveries,1);
+  assert.equal(env.messages.length,1,'recovery does not dispatch another message');
+  assert.equal((await env.store.check({url:URL_A,tabId:7,id:old.id,operationId:op.id})).ok,false);
+}
+
+// Pause or stop after the send intent never clears the unknown-operation fence.
 {
   const env=fixture();await begin(env);
   const record=state(env),op=record.operation;

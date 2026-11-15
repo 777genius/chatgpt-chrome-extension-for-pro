@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.146';
+  const SCRIPT_VERSION = '1.8.147';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -1282,6 +1282,7 @@
   async function resumeHandoffSourceNavigation(message) {
     if(!runtimeAvailable()||message.url!==location.href||handoffNavigationRecoveryClaims.has(message.id))return;
     handoffNavigationRecoveryClaims.add(message.id);
+    try {
     const promptKey=latestPromptSnapshot()?.promptKey||location.pathname,attempt=globalThis.__chatgptNotifierAttemptId||'',request=globalThis.__chatgptNotifierRequestId||null;
     const sameSource=()=>runtimeAvailable()&&location.href===message.url&&
       (latestPromptSnapshot()?.promptKey||location.pathname)===promptKey&&
@@ -1298,6 +1299,7 @@
     handoffRecord=record;
     await navigateHandoffSource(record,alert,info,{sourceEditor:editor,draft:record.draft,
       sourceEffort:record.reasoningEffort,sourceModel:record.reasoningModel,sameSource:()=>sameSource()&&alert.isConnected});
+    } finally {handoffNavigationRecoveryClaims.delete(message.id);}
   }
 
   async function beginHandoff(error, info, alert) {
@@ -1484,6 +1486,11 @@
   }
 
   function scheduleHandoffReadiness() {
+    if(runtimeAvailable()&&handoffReadinessTimer===null&&handoffRecord?.stage==='navigating'&&
+        location.href===handoffRecord.sourceUrl) {
+      handoffReadinessTimer=setTimeout(()=>{handoffReadinessTimer=null;if(runtimeAvailable())void resumeSavedHandoff();},30000);
+      return;
+    }
     if(!runtimeAvailable()||handoffReadinessTimer!==null||handoffRecord?.stage!=='failed'||
         !['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна',
           'Исходный чат или запрос изменился; переход отменён'].includes(handoffRecord.reason)||

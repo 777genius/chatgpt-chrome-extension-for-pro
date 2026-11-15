@@ -462,6 +462,66 @@ async function recoverHandoffNavigation(tabId,expected) {
   return result;
 }
 
+// Reconcile a stranded source handoff only when the old Goal intent never
+// acquired a send grant and a later manual request is bound to the native turn.
+async function recoverHandoffAfterUnsentGoal(tabId,expected) {
+  const prior=handoffWrites.get(tabId)||Promise.resolve();
+  const work=prior.catch(()=>{}).then(async()=>{
+    const key=handoffKey(tabId),h=(await chrome.storage.local.get(key))[key],u=ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url);
+    if(!h||h.id!==expected.id||h.stage!=='navigating'||h.sourceUrl!==u||h.navigationRecoveries||h.sendReceipt)return {ok:false,record:h};
+    const goalKey='chatgpt-goal:'+u,g=(await chrome.storage.local.get(goalKey))[goalKey],op=g?.operation;
+    if(g?.phase!=='blocked'||g.reason!=='Отправка отменена: Нет сохранённого разрешения на эту автоматическую отправку'||
+        op?.status!=='intent'||op.tabId!==tabId||g.stopRequested||g.pauseRequested||g.manualPending||g.manualOverride)return {ok:false,record:h};
+    const j=await readJournal();
+    if(!j.ok||j.storageError||j.events.length!==j.meta?.sequence||j.events.some((e,i)=>e.sequence!==i+1))return {ok:false,record:h};
+    const own=j.events.filter(e=>e.operationId===op.id&&e.tabId===tabId&&e.sourceUrl===u),intents=own.filter(e=>e.kind==='goal.send_intent'),
+      release=own.filter(e=>e.kind==='goal.unsent_release'),active=j.meta.active?.[tabId];
+    if(intents.length!==1||release.length>1||!own.some(e=>e.kind==='goal.blocked')||!own.some(e=>e.kind==='goal.dispatch_failed')||
+        own.some(e=>['send.authorized','send.dispatched','request.started','goal.clicked','goal.confirmed'].includes(e.kind))||
+        release.length===0&&!(active?.kind==='goal.send_intent'&&active.operationId===op.id&&active.goalId===g.id&&active.chatUrl===u&&active.consumed!==true)||
+        release.length===1&&active||Object.entries(j.meta.active||{}).some(([owner,a])=>Number(owner)!==tabId&&(a.chatUrl===u||a.sourceUrl===u)))return {ok:false,record:h};
+    const events=j.events.filter(e=>e.operationId===h.id),nav=events.filter(e=>e.kind==='handoff.navigating');
+    if(nav.length!==1||events.some(e=>['handoff.navigation_intent','handoff.navigation_clicked','handoff.sending','handoff.clicked','handoff.sent'].includes(e.kind)||e.kind.startsWith('send.')))return {ok:false,record:h};
+    const [a]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[u,true]});
+    const n=a?.result;
+    const [b]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,true]});
+    const [c]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,args:[{action:'inspect-plain-retry-draft',url:u,text:h.draft||''}]});
+    const p=c?.result;
+    if(!n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.generating!==false||!n.hasError||!n.userId||
+        !n.userText||n.userText!==h.lastUserText||b?.result?.action!=='new-chat'||b.result.incomplete||
+        !p?.ok||!p.matches||p.effort!==h.reasoningEffort||p.model!==h.reasoningModel)return {ok:false,record:h};
+    const requests=j.events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===u&&!e.operationId&&
+      e.sequence>intents[0].sequence&&e.sequence<nav[0].sequence&&Number.isFinite(e.eventAt)&&Math.abs(e.eventAt-n.userSentAtMs)<=10000);
+    if(requests.length!==1)return {ok:false,record:h};
+    const request=requests[0];
+    if(!request.requestId||!j.events.some(e=>e.kind==='request.completed'&&e.tabId===tabId&&e.requestId===request.requestId&&e.sequence>request.sequence&&e.sequence<nav[0].sequence)||
+      j.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===u)&&e.sequence>request.sequence))return {ok:false,record:h};
+    const [fresh]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[u,true]});
+    const z=fresh?.result,last=await readJournal();
+    const freshOwn=last.events?.filter(e=>e.operationId===op.id&&e.tabId===tabId&&e.sourceUrl===u)||[],freshActive=last.meta?.active?.[tabId];
+    if(!z?.ok||z.isLatest!==true||z.isReadOnly!==false||z.generating!==false||!z.hasError||z.userId!==n.userId||z.userText!==n.userText||
+      z.userSentAtMs!==n.userSentAtMs||z.promptKey!==n.promptKey||!last.ok||last.storageError||last.events.length!==last.meta?.sequence||
+      last.events.some((e,i)=>e.sequence!==i+1)||freshOwn.some(e=>['send.authorized','send.dispatched','request.started','goal.clicked','goal.confirmed'].includes(e.kind))||
+      last.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===u)&&e.sequence>request.sequence)||
+      last.events.some(e=>e.operationId===h.id&&['handoff.navigation_intent','handoff.navigation_clicked','handoff.sending','handoff.sent'].includes(e.kind))||
+      (release.length===0&&!(freshActive?.kind==='goal.send_intent'&&freshActive.operationId===op.id&&freshActive.goalId===g.id&&freshActive.consumed!==true))||
+      (release.length===1&&freshActive)||Object.entries(last.meta.active||{}).some(([owner,a])=>Number(owner)!==tabId&&(a.chatUrl===u||a.sourceUrl===u))||
+      JSON.stringify((await chrome.storage.local.get(key))[key])!==JSON.stringify(h)||
+      JSON.stringify((await chrome.storage.local.get(goalKey))[goalKey])!==JSON.stringify(g)||
+      ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==u)return {ok:false,record:h};
+    if(!release.length)await appendJournal({kind:'goal.unsent_release',sourceUrl:u,goalId:g.id,operationId:op.id},{id:tabId,url:u});
+    if(!events.some(e=>e.kind==='handoff.navigation_recovered'))
+      await appendJournal({kind:'handoff.navigation_recovered',operationId:h.id,sourceUrl:u,promptKey:n.promptKey,userId:n.userId,reason:'Непотраченная отправка Goal и последующий ручной запрос подтверждены'},{id:tabId});
+    const restored=await goalController.handoffAfterUnsent({sourceUrl:u,handoffId:h.id,tabId,goalId:g.id,operationId:op.id,nativeVerified:true,handoff:h,
+      witness:{requestId:request.requestId,startedAt:request.eventAt,userId:n.userId,userText:n.userText,userSentAtMs:n.userSentAtMs,promptKey:n.promptKey}});
+    if(!restored.ok||!restored.handoff)return {ok:false,record:h};
+    return {ok:true,record:restored.handoff};
+  });
+  handoffWrites.set(tabId,work);let result;try{result=await work;}finally{if(handoffWrites.get(tabId)===work)handoffWrites.delete(tabId);}
+  if(result.ok)void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_NAVIGATION_READY',id:result.record.id,url:result.record.sourceUrl}).catch(()=>{});
+  return result;
+}
+
 async function handleHandoffMessage(message, tabId) {
   const key = handoffKey(tabId);
   if (message.type === 'CHATGPT_HANDOFF_GET') {
@@ -472,6 +532,11 @@ async function handleHandoffMessage(message, tabId) {
     const pending=handoffWrites.get(tabId);
     if(pending)await pending.catch(()=>{});
     let saved=(await chrome.storage.local.get(key))[key]||null;
+    if(saved?.stage==='navigating'&&!saved.navigationRecoveries&&
+        ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)===saved.sourceUrl) {
+      const recovered=await recoverHandoffAfterUnsentGoal(tabId,saved);
+      if(recovered?.record)saved=recovered.record;
+    }
     if(saved?.stage==='failed'&&saved.reason==='Не удалось дождаться готовности нового чата')
       saved=await recoverHandoffReadiness(tabId,saved);
     if(saved?.stage==='failed'&&['Кнопка нового чата недоступна',
@@ -482,6 +547,19 @@ async function handleHandoffMessage(message, tabId) {
 
     if(saved?.id&&['navigating','preparing','sending','awaiting-confirmation'].includes(saved.stage))
       await goalController.handoffBegin({sourceUrl:saved.sourceUrl,handoffId:saved.id,tabId});
+    // If MV3 stopped after the atomic Goal/handoff write but before notifying
+    // the content script, replay only the navigation readiness notification.
+    // The journal's one-use navigation claim remains the click authority.
+    if(saved?.stage==='navigating'&&saved.navigationRecoveries===1&&saved.navigationRecovery&&
+        ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)===saved.sourceUrl) {
+      const goal=await goalController.get(saved.sourceUrl);
+      if(goal?.phase==='handoff'&&goal.handoffId===saved.id&&goal.recoveredUnsentOperationId) {
+        const j=await readJournal();
+        if(j.ok&&!j.storageError&&!j.events.some(e=>e.operationId===saved.id&&
+            ['handoff.navigation_intent','handoff.navigation_clicked','handoff.sending','handoff.sent'].includes(e.kind)))
+          void chrome.tabs.sendMessage(tabId,{type:'CHATGPT_HANDOFF_NAVIGATION_READY',id:saved.id,url:saved.sourceUrl}).catch(()=>{});
+      }
+    }
     if(saved?.id&&['sent','failed'].includes(saved.stage)) {
       // A terminal historical recovery copy must not enroll a newer Goal in its
       // transfer. Only an existing exact binding may need the legacy tab fill.

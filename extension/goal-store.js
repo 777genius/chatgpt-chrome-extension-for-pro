@@ -977,6 +977,41 @@
       return record?.phase==='blocked'&&record.reason==='Восстановление запроса завершилось ошибкой'&&
         !record.operation&&!record.manualPending&&!record.pauseRequested&&!record.stopRequested&&!record.manualOverride;
     }
+    // The worker has proved an unspent old grant and a later exact manual
+    // submission. Retire the old operation without replaying it, and retain
+    // that submission as part of the same Goal before moving the conversation.
+    async function handoffAfterUnsent({sourceUrl,handoffId,tabId,goalId,operationId,witness,handoff,nativeVerified}) {
+      const source=canonical(sourceUrl);
+      if(!source||nativeVerified!==true||!witness||typeof witness.userId!=='string'||!witness.userId||
+          typeof witness.userText!=='string'||!witness.userText.trim()||witness.userText.length>10000||
+          typeof witness.requestId!=='string'||!witness.requestId||!Number.isFinite(witness.startedAt)||
+          !Number.isFinite(witness.userSentAtMs)||Math.abs(witness.userSentAtMs-witness.startedAt)>10000||
+          typeof witness.promptKey!=='string'||!witness.promptKey.startsWith(new URL(source).pathname+'|')||
+          handoff?.id!==handoffId||handoff.sourceUrl!==source||handoff.stage!=='navigating'||
+          typeof handoff.text!=='string'||typeof handoff.fileName!=='string')return {ok:false};
+      return serialize(async()=>{
+        const old=await read(source);
+        if(old?.phase==='handoff'&&old.handoffId===handoffId&&old.recoveredUnsentOperationId===operationId)
+          return {ok:true,record:view(old)};
+        if(!old||old.id!==goalId||old.phase!=='blocked'||
+            old.reason!=='Отправка отменена: Нет сохранённого разрешения на эту автоматическую отправку'||
+            old.operation?.id!==operationId||old.operation?.tabId!==tabId||old.operation?.status!=='intent'||
+            old.stopRequested||old.pauseRequested||old.manualPending||old.manualOverride||now()>=old.deadlineAt||
+            witness.startedAt<=old.operation.createdAt||(old.supplements||[]).some(x=>x.requestId===witness.requestId||x.userId===witness.userId))return {ok:false};
+        const supplement={...witness,tabId,text:witness.userText,eventAt:witness.startedAt};
+        const next={...old,phase:'handoff',preHandoffPhase:'recovering',handoffId,handoffTabId:tabId,
+          operation:null,reason:'',recoveredUnsentOperationId:operationId,
+          supplements:[...(old.supplements||[]),supplement],manualSupplementBinding:supplement,
+          manualStartedAt:witness.startedAt,expectedPromptKey:witness.promptKey};
+        const text=handoff.text+'\n\n'+policy.handoffText(next),asFile=handoff.asFile||text.length>12000;
+        const prompt=asFile?(handoff.asFile?handoff.prompt:'Прочитай приложенный файл '+handoff.fileName+': в нём история и исходная цель. Продолжи задачу end-to-end.'):text;
+        const transfer={...handoff,text,prompt,asFile,navigationRecoveries:1,
+          navigationRecovery:{url:source,promptKey:witness.promptKey,userId:witness.userId,requestId:witness.requestId,startedAt:witness.startedAt}};
+        await event('handoff_unsent_recovered',next,tabId,{handoffId,operationId,requestId:witness.requestId,userId:witness.userId});
+        await storage.set({[key(source)]:next,['chatgpt-handoff:'+tabId]:transfer});
+        return {ok:true,record:view(next),handoff:transfer};
+      });
+    }
     async function handoffBegin({sourceUrl,handoffId,tabId}) {
       const source=canonical(sourceUrl);
       if(!source)return;
@@ -1115,7 +1150,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffAfterUnsent,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});
