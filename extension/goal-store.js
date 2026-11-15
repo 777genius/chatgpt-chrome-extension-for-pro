@@ -1120,6 +1120,23 @@
         return {ok:true};
       });
     }
+    // A confirmed retry creates a new native user message after the handoff.
+    // Only the worker's journal and native proof may replace that binding.
+    async function handoffRetryBind({url,tabId,id,handoffId,acceptedUserId,promptKey,userId,operationId,nativeVerified}) {
+      const target=canonical(url);
+      if(!target||nativeVerified!==true||!id||!handoffId||!acceptedUserId||!userId||userId===acceptedUserId||
+          !operationId||typeof promptKey!=='string'||!promptKey.startsWith(new URL(target).pathname+'|'))return {ok:false};
+      return serialize(async()=>{
+        const record=await read(target);
+        if(!record||record.id!==id||record.phase!=='waiting'||record.operation||record.manualPending||record.manualOverride||
+            record.pauseRequested||record.stopRequested||now()>=record.deadlineAt||record.handoffPending!==true||
+            record.handoffId!==handoffId||record.handoffTabId!==tabId||record.handoffAcceptedUserId!==acceptedUserId)return {ok:false};
+        const next={...record,handoffPending:false,expectedPromptKey:promptKey,
+          confirmedPromptBinding:{operationId,userId}};
+        await event('handoff_retry_bound',next,tabId,{handoffId,operationId,userId,promptKey});
+        await save(next);return {ok:true};
+      });
+    }
     async function handoffConfirm({sourceUrl,targetUrl,handoffId,tabId,acceptedUserId}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target)return;
@@ -1150,7 +1167,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffAfterUnsent,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffAfterUnsent,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,handoffRetryBind,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

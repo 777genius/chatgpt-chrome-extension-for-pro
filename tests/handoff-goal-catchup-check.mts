@@ -7,22 +7,23 @@ const url='https://chatgpt.com/c/handoff-catchup-fixture';
 type V=Record<string,any>;
 function fixture(){
  const goal:V={id:'goal',url,originUrl:'https://chatgpt.com/c/handoff-source',goal:'Complete test objective',rules:'',
- phase:'waiting',operation:null,handoffId:'handoff',handoffPending:true,handoffAcceptedUserId:'accepted-user',
+ phase:'waiting',operation:null,handoffId:'handoff',handoffPending:true,handoffTabId:7,handoffAcceptedUserId:'accepted-user',
  expectedPromptKey:null,startedAt:500,deadlineAt:100000,maxContinuations:10,maxMinutes:1440,continuations:2};
  const handoff:V={id:'handoff',stage:'sent',targetUrl:url,sendReceipt:{submittedText:'Exact sent history'},acceptance:{messageId:'accepted-user'}};
- const data:V={['chatgpt-goal:'+url]:goal,'chatgpt-handoff:7':handoff},messages:V[]=[],events:V[]=[];
+ const data:V={['chatgpt-goal:'+url]:goal,'chatgpt-handoff:7':handoff},messages:V[]=[],events:V[]=[],journal:V[]=[];
  let live=url,after:(()=>void)|null=null;
  const native:V={ok:true,url,isLatest:true,isReadOnly:false,turnStatus:'complete',generating:false,hasError:false,
   userId:'accepted-user',userText:'Exact sent history',promptKey:'/c/handoff-catchup-fixture|user',assistantKey:'answer',assistantCompleted:true,assistantPhase:'final_answer',goalResponse:'Continue work',goalRawExact:false};
  const storage={get:async(keys:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,data[k]]))),set:async(v:V)=>Object.assign(data,structuredClone(v))};
  const tabs={get:async()=>({id:7,url:live}),sendMessage:async(id:number,message:V)=>{messages.push(message);return {ok:true};}};
  const ctx=createContext({URL,console,handoffKey:(id:number)=>'chatgpt-handoff:'+id,inspectCompletedTurn:function(){},
+  readJournal:async()=>({ok:true,events:structuredClone(journal),meta:{sequence:journal.length}}),ChatGPTGoalPolicy:{canonical:(u:string)=>u},
   chrome:{storage:{local:storage},tabs,scripting:{executeScript:async()=>{const result=structuredClone(native);after?.();return[{result}];}}}});
  for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),ctx);
  ctx.deps={storage,tabs,appendJournal:async(e:V)=>{events.push(e);return{ok:true};},now:()=>1000,uuid:()=> 'operation'};
  const store=runInContext('ChatGPTGoalStore.create(deps)',ctx);ctx.goalController=store;
  runInContext(source,ctx);
- return{data,goal,handoff,native,messages,events,run:()=>runInContext(`reconcileAcceptedHandoffGoal(7,'${url}')`,ctx),waiting:()=>runInContext(`reconcileWaitingGoalAnswer(7,'${url}')`,ctx),after:(f:()=>void)=>{after=f;},route:(u:string)=>{live=u;}};
+ return{data,goal,handoff,native,messages,events,journal,run:()=>runInContext(`reconcileAcceptedHandoffGoal(7,'${url}')`,ctx),waiting:()=>runInContext(`reconcileWaitingGoalAnswer(7,'${url}')`,ctx),after:(f:()=>void)=>{after=f;},route:(u:string)=>{live=u;}};
 }
 {
  const h=fixture();await h.run();
@@ -65,3 +66,33 @@ for(const patch of [{generating:true},{promptKey:'wrong'},{hasError:true},{isLat
  await h.waiting();assert.equal(h.messages.length,0);
 }
 console.log('Waiting Goal catch-up: missed matching final answer resumes once, unrelated or unfinished answers do not dispatch.');
+
+function retried() {
+ const h=fixture();Object.assign(h.native,{userId:'retry-user',userText:'Continue',userSentAtMs:2000,
+   promptKey:'/c/handoff-catchup-fixture|retry'});
+ h.journal.push(...[
+  {kind:'retry.planned',requestId:'old',retryUserId:'accepted-user'},
+  {kind:'send.dispatched',text:'Continue'},
+  {kind:'request.started',requestId:'new',eventAt:2000},
+  {kind:'retry.confirmed',requestId:'old',newPromptKey:h.native.promptKey}
+ ].map((e,i)=>({...e,operationId:'retry',tabId:7,sourceUrl:url,sequence:i+1})));
+ return h;
+}
+{
+ const h=retried();await h.run();assert.equal(h.messages.length,1,'confirmed retry completion resumes exactly once');
+ assert.equal(h.events.filter(e=>e.kind==='goal.handoff_retry_bound').length,1);
+ await h.run();assert.equal(h.messages.length,1);
+}
+for(const change of ['different-user','different-text','unconfirmed','newer-request','gap','paused','manual','route-race']){
+ const h=retried();
+ if(change==='different-user')h.journal[0].retryUserId='other';
+ if(change==='different-text')h.native.userText='different';
+ if(change==='unconfirmed')h.journal.pop();
+ if(change==='newer-request')h.journal.push({kind:'request.started',tabId:7,sourceUrl:url,sequence:5});
+ if(change==='gap')h.journal[1].sequence=8;
+ if(change==='paused')h.goal.pauseRequested=true;
+ if(change==='manual')h.goal.manualPending={};
+ if(change==='route-race')h.route('https://chatgpt.com/c/other');
+ await h.run();assert.equal(h.messages.length,0,change);
+}
+console.log('Handoff retry: verified retry response resumes once; identity, state and request fences hold.');

@@ -1765,7 +1765,40 @@ async function reconcileAcceptedHandoffGoal(tabId,url) {
   const native=checked?.result;
   if(!native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||native.generating!==false||
       native.turnStatus!=='complete'||native.hasError||native.assistantCompleted!==true||native.assistantPhase!=='final_answer'||
-      !native.assistantKey||native.userId!==goal.handoffAcceptedUserId||native.userText!==handoff.sendReceipt.submittedText)return;
+      !native.assistantKey||!native.userId)return;
+  if(native.userId!==goal.handoffAcceptedUserId) {
+    // A retry may have followed the transferred message before its answer.
+    // Link it only to the exact accepted user, a single confirmed retry and
+    // its exact native payload; never infer delivery from an idle UI alone.
+    const journal=await readJournal();
+    if(!journal.ok||journal.storageError||!Array.isArray(journal.events)||
+        journal.events.length!==journal.meta?.sequence||journal.events.some((e,i)=>e.sequence!==i+1))return;
+    const events=journal.events,planned=events.filter(e=>e.kind==='retry.planned'&&e.tabId===tabId&&
+      e.sourceUrl===url&&e.retryUserId===goal.handoffAcceptedUserId&&e.operationId);
+    if(planned.length!==1)return;
+    const p=planned[0],own=events.filter(e=>e.tabId===tabId&&e.sourceUrl===url&&e.operationId===p.operationId),
+      sends=own.filter(e=>e.kind==='send.dispatched'),requests=own.filter(e=>e.kind==='request.started'),
+      confirmed=own.filter(e=>e.kind==='retry.confirmed'&&e.requestId===p.requestId&&e.newPromptKey===native.promptKey);
+    if(sends.length!==1||requests.length!==1||confirmed.length!==1||!requests[0].requestId||
+        sends[0].text!==native.userText||!Number.isFinite(native.userSentAtMs)||!Number.isFinite(requests[0].eventAt)||
+        Math.abs(requests[0].eventAt-native.userSentAtMs)>10000||
+        !(p.sequence<requests[0].sequence&&requests[0].sequence<confirmed[0].sequence)||
+        events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence))return;
+    const again=await chrome.storage.local.get([key,handoffKey(tabId)]);
+    const [last]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+    const latest=await readJournal();
+    if(JSON.stringify(again[key])!==JSON.stringify(goal)||JSON.stringify(again[handoffKey(tabId)])!==JSON.stringify(handoff)||
+        !latest.ok||latest.storageError||latest.events.length!==latest.meta?.sequence||
+        latest.events.some((e,i)=>e.sequence!==i+1)||latest.events.some(e=>e.kind==='request.started'&&
+          (e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence)||
+        JSON.stringify(last?.result)!==JSON.stringify(native)||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
+    const bound=await goalController.handoffRetryBind({url,tabId,id:goal.id,handoffId:handoff.id,
+      acceptedUserId:goal.handoffAcceptedUserId,promptKey:native.promptKey,userId:native.userId,
+      operationId:p.operationId,nativeVerified:true});
+    if(!bound?.ok)return;
+    return reconcileWaitingGoalAnswer(tabId,url);
+  }
+  if(native.userText!==handoff.sendReceipt.submittedText)return;
   const current=await chrome.storage.local.get([key,handoffKey(tabId)]);
   if(JSON.stringify(current[key])!==JSON.stringify(goal)||JSON.stringify(current[handoffKey(tabId)])!==JSON.stringify(handoff)||
       ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
