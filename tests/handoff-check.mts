@@ -211,13 +211,14 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT'&&interference==='upload-edit'&&(document.querySelector('input') as any).files?.length)activeEditor().textContent=ownerEdit;
    if(m.type==='CHATGPT_INSPECT_ATTACHMENT')return {ok:true,status:(document.querySelector('input') as any).files?.length?(clock.now()-uploadStartedAt<(effortOptions.uploadDelayMs||0)?'uploading':'ready'):'missing'};
    if(m.type==='CHATGPT_INSPECT_ERROR'){
+    const initialEscalation=effortOptions.escalate&&effortOptions.sourceStillGenerating&&!generationFixture;
     if(effortOptions.sourceStillGenerating&&m.captureRetryHistory&&!generationFixture){
       generationFixture=true;const stop=document.createElement('button');stop.setAttribute('data-testid','stop-button');stop.type='button';
       document.querySelector('[data-app-shell-active-page="true"] form')!.append(stop);
       clock.setTimeout(()=>{stop.remove();sourceIdleAt=clock.now();if(effortOptions.pauseDuringSourceWait)goalPhase='paused';if(effortOptions.errorChangesDuringWait)alert.firstElementChild!.textContent='Different error';},2000);
     }
     if(restoredUnknown){(context as any).errorIndex=m.alertIndex;return {ok:true,...runInContext('inspectChatError(errorIndex,true)',context)};}
-    return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages:effortOptions.escalate&&!m.captureRetryHistory?[]:messages,incomplete:interference==='history-loading'&&++historyInspections<3};
+    return {ok:true,action:effortOptions.escalate?'retry':'new-chat',messages:effortOptions.escalate&&!m.captureRetryHistory?[]:messages,incomplete:interference==='history-loading'&&!initialEscalation&&++historyInspections<3};
    }
    if(m.type==='CHATGPT_HANDOFF_SUCCESSOR')return {ok:true,record:stored};
    if(['CHATGPT_HANDOFF_GET','CHATGPT_HANDOFF_BEGIN','CHATGPT_HANDOFF_UPDATE','CHATGPT_HANDOFF_RECONCILE','CHATGPT_HANDOFF_DRAFT_CLAIM'].includes(m.type)){
@@ -364,6 +365,7 @@ async function transferCheck(long=false,ambiguous=false,hiddenFirstPrompt=false,
  if(sourceEffort===destinationEffort&&sourceModel===destinationModel)assert.equal(effortOpens,0,'matching destination mode never opens its selector');
  else assert.ok(effortOpens>=1,'mode changes use the native selector');
  assert.equal(sends.length,1,'handoff sends once');assert.notEqual(sends[0],'доделай е2е');
+ if(effortOptions.escalate&&interference==='history-loading')assert.ok(historyInspections>=3,'retry handoff waits until the native history is fully loaded');
  if(restoredUnknown){
    assert.equal(begins,1,'a restored failed prompt with exhausted retry budget starts one existing protected handoff');
    assert.equal(logs.filter(event=>event.kind==='retry.planned').length,0,'terminal native CTA never resets or spends another same-chat retry');
@@ -427,6 +429,7 @@ await transferCheck(false,false,false,false,false,false,'source-model-change');
 
 await transferCheck(false,false,false,false,false,false,'',{escalate:true});
 await transferCheck(false,false,false,false,false,false,'',{escalate:true,sourceStillGenerating:true});
+await transferCheck(false,false,false,false,false,false,'history-loading',{escalate:true,sourceStillGenerating:true});
 await transferCheck(false,false,false,false,false,false,'',{escalate:true,sourceStillGenerating:true,pauseDuringSourceWait:true});
 await transferCheck(false,false,false,false,false,false,'',{escalate:true,sourceStillGenerating:true,errorChangesDuringWait:true});
 

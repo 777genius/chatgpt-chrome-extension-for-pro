@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.138';
+  const SCRIPT_VERSION = '1.8.139';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -1338,10 +1338,11 @@
         throw new Error('Исходный чат или запрос изменился во время загрузки истории');
       }
       const fresh = await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
-        alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
+        alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true,
+        captureRetryHistory:Boolean(error.escalated)});
       if (!sameSource()) throw new Error('Исходный запрос изменился во время проверки истории');
-      if (fresh?.action !== 'new-chat') throw new Error('Действие нового чата больше не подтверждено');
-      info = fresh;
+      if (fresh?.action !== (error.escalated?'retry':'new-chat')) throw new Error('Действие нового чата больше не подтверждено');
+      info = error.escalated?{...fresh,action:'new-chat'}:fresh;
     }
     if (!/\/c\/[^/]+/.test(location.pathname) || info.incomplete || !info.messages?.length) {
       throw new Error('Не удалось получить полные последние сообщения; исходный чат сохранён');
