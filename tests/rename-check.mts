@@ -352,6 +352,16 @@ for(const mode of ['streaming','late-menu'] as const) {
   await h.rename();assert.equal(h.saved,1);
 }
 {
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'one-operation'}};
+  for(let i=0;i<3;i++){await h.rename({goalOperationId:'one-operation'});h.advance(10000);}
+  h.allowReady();await h.rename({goalOperationId:'one-operation'});
+  assert.equal(h.saved,0,'the same operation cannot reopen an exhausted readiness budget');
+  h.storage['chatgpt-goal:'+targetUrl]={phase:'stopped'};
+  await h.rename({goalOperationId:'one-operation'});assert.equal(h.saved,0,'stopped Goal cannot authorize title recovery');
+}
+{
   const h=harness('no-ack');await h.rename();
   assert.ok(h.record.titleSaveStartedAt);assert.equal(h.saved,1);
   h.record.titleStatus='waiting';h.record.titleRetryable=true;
