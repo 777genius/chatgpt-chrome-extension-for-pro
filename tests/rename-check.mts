@@ -345,6 +345,13 @@ for(const mode of ['streaming','late-menu'] as const) {
   await h.rename({goalOperationId:'fresh-goal-operation'});assert.equal(h.saved,1);
 }
 {
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  h.allowReady();h.storage['chatgpt-goal:'+targetUrl]={phase:'completed',lastCompletionKey:'/c/target|user|answer'};
+  await h.rename();assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1,'a completed Goal also permits title recovery');
+  await h.rename();assert.equal(h.saved,1);
+}
+{
   const h=harness('no-ack');await h.rename();
   assert.ok(h.record.titleSaveStartedAt);assert.equal(h.saved,1);
   h.record.titleStatus='waiting';h.record.titleRetryable=true;

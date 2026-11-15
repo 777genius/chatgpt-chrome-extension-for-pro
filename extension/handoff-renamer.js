@@ -125,11 +125,14 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       // A new, already reserved Goal continuation is a fresh opportunity to
       // check native readiness, not a reason to retry a prior title save.
       // Consume each operation once and retain the original title snapshot.
-      if(record.titlePrepareAttempts>=3&&goalOperationId&&goalPreparing&&
+      const completionKey=goal?.phase==='completed'&&typeof goal.lastCompletionKey==='string'&&goal.lastCompletionKey||'';
+      const freshGoal=goalOperationId&&goalPreparing&&record.titleRecoveryGoalOperationId!==goalOperationId;
+      const freshCompletion=completionKey&&record.titleRecoveryCompletionKey!==completionKey;
+      if(record.titlePrepareAttempts>=3&&(freshGoal||freshCompletion)&&
           record.titleReason==='Новый чат ещё не готов к переименованию'&&
-          record.titleRecoveryGoalOperationId!==goalOperationId) {
+          (!goalOperationId||freshGoal)) {
         const next={...record,titlePrepareAttempts:0,titleRetryAfter:0,titleRetryable:true,
-          titleRecoveryGoalOperationId:goalOperationId};
+          ...(freshGoal?{titleRecoveryGoalOperationId:goalOperationId}:{titleRecoveryCompletionKey:completionKey})};
         await appendJournal({kind:'handoff.title_preparation_recovered',operationId:id,
           sourceUrl:record.sourceUrl,targetUrl:url,titleGoalOperationId:goalOperationId},{id:tabId});
         const current=await chrome.storage.local.get([key,goalKey]);
