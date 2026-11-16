@@ -228,6 +228,24 @@ function fixture() {
 }
 
 // A transient native probe failure must not hide the existing durable Goal.
+for(const scenario of ['safe','unproven','stopped','other-reason']) {
+ let reconciled=0,recovered=0,listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
+ const goal={phase:'blocked',reason:scenario==='other-reason'?'Another reason':'Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён',
+  operation:{status:'intent'},stopRequested:scenario==='stopped',deadlineAt:Date.now()+60000};
+ const context=createContext({chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
+  ChatGPTGoalPolicy:{canonical:(value:string)=>value},reconcileGoalMarker:async()=>null,reconcileWaitingGoalAnswer:async()=>null,
+  reconcileGoalPreparation:async()=>{reconciled++;return {ok:scenario!=='unproven'};},
+  bindNativeManualSupplement:async()=>({ok:true}),reconcileGoalPromptBinding:async()=>({ok:false}),
+  goalController:{composerGet:async()=>null,get:async()=>goal,recoverTab:async()=>{recovered++;return {ok:true};}}});
+ runInContext(listenerSource,context);
+ const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
+ assert.equal(result.ok,true,scenario);
+ assert.equal(reconciled,['safe','unproven'].includes(scenario)?1:0,scenario);
+ if(scenario==='unproven')assert.equal(result.pending,true,'unproven intent remains pending without a send');
+ if(scenario==='stopped'||scenario==='other-reason')assert.equal(recovered,1,scenario);
+}
+
+// A transient native probe failure must not hide the existing durable Goal.
 for(const failure of ['supplement','prompt']) {
  let recovered=0;
  let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;

@@ -2145,10 +2145,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;
         const answer=await reconcileWaitingGoalAnswer(tabId,url);if(answer?.ok||answer?.pendingMarker)return answer;
         const goal=await goalController.get(url);
-        if(goal?.phase==='blocked'&&goal.operation?.status==='reserved'&&
+        const recoverableReservation=goal?.operation?.status==='reserved'&&
             ['Отправка отменена: Чат занят или другой механизм восстановления активен',
               'Отправка отменена: Поле сообщения недоступно',
-              'Отправка отменена: Черновик или вложение пользователя имеют приоритет; Goal остановлен без изменения ввода'].includes(goal.reason)&&
+              'Отправка отменена: Черновик или вложение пользователя имеют приоритет; Goal остановлен без изменения ввода'].includes(goal.reason);
+        const recoverableRestartIntent=goal?.operation?.status==='intent'&&
+          goal.reason==='Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён';
+        if(goal?.phase==='blocked'&&(recoverableReservation||recoverableRestartIntent)&&
             !goal.pauseRequested&&!goal.stopRequested&&!goal.manualPending&&!goal.manualOverride&&Date.now()<goal.deadlineAt) {
           const recovered=await reconcileGoalPreparation(tabId,url);
           if(!recovered?.ok)return {ok:true,pending:true,canRetry:true};
