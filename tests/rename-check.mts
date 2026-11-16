@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'no-header' | 'sidebar-no-header' | 'sidebar-hidden-no-header' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
+type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'no-header' | 'sidebar-no-header' | 'sidebar-hidden-no-header' | 'sidebar-outside-header' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -85,25 +85,25 @@ function harness(mode: Mode = 'success') {
     document.body.append(menu);
   }
   actions.addEventListener('click',()=>openMenu());
-  if(mode==='no-header'||mode==='sidebar-no-header'||mode==='sidebar-hidden-no-header')actions.remove();
+  if(mode==='no-header'||mode==='sidebar-no-header'||mode==='sidebar-hidden-no-header'||mode==='sidebar-outside-header')actions.remove();
   if(mode.startsWith('sidebar-')) {
     const row=document.createElement('div');row.setAttribute('data-sidebar-cycle-item','');
     row.innerHTML=`<a aria-current="page" href="${mode==='sidebar-wrong-chat'?'https://chatgpt.com/c/other':targetUrl}">Native saved chat</a><button id="saved-chat-menu" aria-haspopup="menu"><svg><use href="#ellipsis-horizontal" /></svg></button>`;
     const link=row.querySelector('a')!,trigger=row.querySelector('button')!;
     link.textContent=mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')?'Server stored title':document.title;
     trigger.addEventListener('click',()=>openMenu(trigger,true));document.body.append(row);
-    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-no-header'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')&&mode!=='sidebar-stale-visible') {
+    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-no-header'||mode==='sidebar-outside-header'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')&&mode!=='sidebar-stale-visible') {
       link.hidden=true;trigger.hidden=true;
       const toggle=document.createElement('button');toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<svg><use href="#codex-icon-sidebar-hidden-light-16" /></svg>';
-      if(mode==='sidebar-modal'||mode==='sidebar-hidden-no-header'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
-        const panel=document.createElement('aside');panel.id='native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
+      if(mode==='sidebar-modal'||mode==='sidebar-hidden-no-header'||mode==='sidebar-outside-header'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
+        const panel=document.createElement('aside');panel.id=mode==='sidebar-outside-header'?'browser-sidebar-popover':'native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
         panel.append(row);document.body.append(panel);toggle.setAttribute('aria-controls',panel.id);
         const close=document.createElement('button');close.setAttribute('aria-controls',panel.id);close.hidden=true;panel.append(close);
         const setOpen=(open:boolean)=>{toggle.setAttribute('aria-expanded',String(open));close.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;close.hidden=!open;panel.hidden=!open;
           if(open)document.querySelector('header')!.setAttribute('inert','');else document.querySelector('header')!.removeAttribute('inert');};
         toggle.addEventListener('click',()=>setOpen(toggle.getAttribute('aria-expanded')!=='true'));close.addEventListener('click',()=>setOpen(false));
       }else toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
-      document.querySelector('header')!.append(toggle);
+      (mode==='sidebar-outside-header'?document.body:document.querySelector('header')!).append(toggle);
     }
   }
   document.querySelector('main button')!.addEventListener('click',()=>sent++);
@@ -161,6 +161,12 @@ function harness(mode: Mode = 'success') {
   const h=harness('sidebar-hidden-no-header');const result=await h.rename();
   assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'confirmed');
   assert.equal(h.saved,1,'the exact owned sidebar may be opened without a header menu');
+  assert.equal(h.sent,0);
+}
+{
+  const h=harness('sidebar-outside-header');const result=await h.rename();
+  assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1,'the browser sidebar control outside the header allows the exact title save');
   assert.equal(h.sent,0);
 }
 {

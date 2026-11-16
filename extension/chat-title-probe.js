@@ -24,6 +24,11 @@ function controlChatTitle(options) {
       .filter(node=>visible(node)&&chatUrl(node.href)===url&&node.closest('[data-sidebar-cycle-item]'));
     return links.length===1?links[0]:null;
   }
+  function sidebarControl() {
+    return Array.from(document.querySelectorAll('header button, button[aria-controls="browser-sidebar-popover"]'))
+      .find(node=>visible(node)&&!node.disabled&&
+        node.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
+  }
   if (options.action==='cancel') {
     const state=globalThis.__chatgptNotifierTitleOperation;
     if(state?.id===options.operationId) {
@@ -57,8 +62,8 @@ function controlChatTitle(options) {
   const chatId = new URL(options.url).pathname.split('/').at(-1);
   const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
   const actions = Array.from(document.querySelectorAll('header button[aria-haspopup="menu"]')).find(node=>visible(node) && node.querySelector('use[href*="ellipsis-horizontal"]'));
-  const sidebarToggle=Array.from(document.querySelectorAll('header button')).find(node=>visible(node)&&!node.disabled&&
-    node.getAttribute('aria-controls')&&node.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
+  const sidebarCandidate=sidebarControl();
+  const sidebarToggle=sidebarCandidate?.getAttribute('aria-controls')?sidebarCandidate:null;
   const sidebarRow=savedChatLink(options.url)?.closest('[data-sidebar-cycle-item]');
   const sidebarMenu=Array.from(sidebarRow?.querySelectorAll('button[aria-haspopup="menu"]')||[])
     .find(node=>visible(node)&&!node.disabled&&node.id&&node.querySelector('use[href*="ellipsis-horizontal"]'));
@@ -143,7 +148,7 @@ function controlChatTitle(options) {
       if(document.title!==state.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(node=>node!==sidebar&&visible(node)))return {ok:false,reason:'title-or-form-changed'};
       const link=savedChatLink(state.url);
       const row=link?.closest('[data-sidebar-cycle-item]');
-      const toggle=Array.from(document.querySelectorAll('header button')).find(n=>visible(n)&&!n.disabled&&n.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
+      const toggle=sidebarControl();
       if(!state.sidebarFallback && (row||toggle)) {
         menu?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
         state.sidebarFallback=true;
