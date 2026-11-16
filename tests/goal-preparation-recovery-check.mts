@@ -10,19 +10,21 @@ function fixture(){
   startedAt:100,deadlineAt:100000,continuations:2,operation:{id:'unspent-operation',tabId:7,status:'reserved',kind:'continuation',text:'Exact continuation',createdAt:200}};
  const data:V={['chatgpt-goal:'+url]:goal,'chatgpt-journal:meta':{active:{}}},messages:V[]=[],events:V[]=[];
  const journal:V[]=[{sequence:1,kind:'goal.blocked',operationId:'unspent-operation'},{sequence:2,kind:'goal.dispatch_failed',operationId:'unspent-operation'}];
+ const native:V={ok:true,isLatest:true,isReadOnly:false,promptKey:'/c/preparation-recovery-fixture|previous',userId:'previous-user',turnStatus:'complete',generating:false,hasError:false,assistantCompleted:true,assistantPhase:'final_answer'};
+ const editor:V={ok:true};function inspectCompletedTurn(){}function controlChatComposer(){}
  let idle=true,live=url,after:(()=>void)|null=null;
  const storage={get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>Object.assign(data,structuredClone(v))};
  const tabs={get:async()=>({id:7,url:live}),sendMessage:async(id:number,m:V)=>{
   if(m.type==='CHATGPT_GOAL_READINESS'){after?.();return {ok:true,idle};}
   messages.push(m);return {ok:true};
  }};
- const ctx=createContext({URL,console,readJournal:async()=>({ok:true,meta:{...structuredClone(data['chatgpt-journal:meta']),sequence:journal.length},events:structuredClone(journal)}),JOURNAL_META:'chatgpt-journal:meta',chrome:{storage:{local:storage},tabs}});
+ const ctx=createContext({URL,console,inspectCompletedTurn,controlChatComposer,readJournal:async()=>({ok:true,meta:{...structuredClone(data['chatgpt-journal:meta']),sequence:journal.length},events:structuredClone(journal)}),JOURNAL_META:'chatgpt-journal:meta',chrome:{storage:{local:storage},tabs,scripting:{executeScript:async({func}:V)=>[{result:structuredClone(func===inspectCompletedTurn?native:editor)}]}}});
  for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),ctx);
  ctx.appendJournal=async(e:V)=>{events.push(e);delete data['chatgpt-journal:meta'].active[7];return {ok:true};};
  ctx.deps={storage,tabs,appendJournal:async(e:V)=>{events.push(e);return {ok:true};},now:()=>1000,uuid:()=> 'unused'};
  ctx.goalController=runInContext('ChatGPTGoalStore.create(deps)',ctx);
  runInContext(helper,ctx);
- return {goal,data,messages,events,journal,run:()=>runInContext(`reconcileGoalPreparation(7,'${url}')`,ctx),idle:(v:boolean)=>{idle=v;},route:(v:string)=>{live=v;},after:(f:()=>void)=>{after=f;}};
+ return {goal,data,messages,events,journal,native,editor,run:()=>runInContext(`reconcileGoalPreparation(7,'${url}')`,ctx),idle:(v:boolean)=>{idle=v;},route:(v:string)=>{live=v;},after:(f:()=>void)=>{after=f;}};
 }
 {
  const f=fixture();f.idle(false);await f.run();assert.equal(f.messages.length,0);
@@ -90,3 +92,26 @@ for(const kind of ['goal.send_intent','send.authorized','send.dispatched','reque
    {sequence:4,kind:'draft.not_clicked',operationId:'unspent-operation'});
  await f.run();assert.equal(f.messages.length,0,'consumed grant stays fenced');
 }
+function restartedIntent(){
+ const f=fixture();f.goal.reason='Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён';
+ f.goal.expectedPromptKey=f.native.promptKey;Object.assign(f.goal.operation,{status:'intent',baselineKey:f.native.promptKey});
+ f.data['chatgpt-journal:meta'].active[7]={kind:'goal.send_intent',goalId:'goal',operationId:'unspent-operation',chatUrl:url};
+ f.journal.unshift({sequence:1,kind:'goal.send_intent',operationId:'unspent-operation'});
+ f.journal.forEach((e,i)=>e.sequence=i+1);return f;
+}
+{
+ const f=restartedIntent();await f.run();assert.equal(f.messages.length,1,'untouched unconsumed restart intent safely resumes');
+ assert.ok(f.events.some(e=>e.kind==='goal.unsent_release'));await f.run();assert.equal(f.messages.length,1);
+}
+for(const scenario of ['draft-saved','draft-replaced','clicked','authorized','different-prompt','generating','error','editor','newer-request','stopped']){
+ const f=restartedIntent();
+ if(['draft-saved','draft-replaced','clicked','authorized'].includes(scenario))f.journal.push({sequence:f.journal.length+1,operationId:'unspent-operation',kind:{'draft-saved':'draft.saved','draft-replaced':'draft.replaced',clicked:'goal.clicked',authorized:'send.authorized'}[scenario]});
+ if(scenario==='different-prompt')f.native.promptKey='other';
+ if(scenario==='generating')f.native.generating=true;
+ if(scenario==='error')f.native.hasError=true;
+ if(scenario==='editor')f.editor.ok=false;
+ if(scenario==='newer-request')f.journal.push({sequence:f.journal.length+1,kind:'request.started',sourceUrl:url,eventAt:300});
+ if(scenario==='stopped')f.goal.stopRequested=true;
+ await f.run();assert.equal(f.messages.length,0,scenario);
+}
+console.log('Restarted unconsumed intent: exact completed previous turn and untouched empty editor recover once; uncertain sends and drafts remain fenced.');

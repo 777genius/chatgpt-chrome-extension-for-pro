@@ -1893,8 +1893,25 @@ async function reconcileGoalPreparation(tabId,url) {
         j.events.some((e,i)=>e.sequence!==i+1))return false;
     const own=j.events.filter(e=>e.operationId===op.id);
     const intents=own.filter(e=>e.kind==='goal.send_intent');
+    let restartBeforeGrant=false;
+    if(intents.length===1&&ownGrant(j.meta.active?.[tabId])&&op.status==='intent'&&
+        goal.reason==='Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён'&&
+        op.baselineKey&&op.baselineKey===goal.expectedPromptKey&&
+        !own.some(e=>['draft.saved','draft.replaced','goal.clicked','goal.confirmed'].includes(e.kind))) {
+      // A worker restart can leave a journaled but unconsumed intent before
+      // any draft was touched. Reconcile only the exact completed previous
+      // turn and an empty composer; a timeout alone is never evidence.
+      const [turn,editor]=await Promise.all([
+        chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]}),
+        chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,args:[{action:'inspect-empty-retry',text:'',url}]})
+      ]);
+      const n=turn[0]?.result;
+      restartBeforeGrant=n?.ok===true&&n.isLatest===true&&n.isReadOnly===false&&n.promptKey===op.baselineKey&&
+        !!n.userId&&n.turnStatus==='complete'&&n.generating===false&&n.hasError===false&&
+        n.assistantCompleted===true&&n.assistantPhase==='final_answer'&&editor[0]?.result?.ok===true;
+    }
     const releaseSafe=!intents.length||intents.length===1&&ownGrant(j.meta.active?.[tabId])&&
-      own.some(e=>e.kind==='draft.not_clicked'&&e.sequence>intents[0].sequence);
+      (restartBeforeGrant||own.some(e=>e.kind==='draft.not_clicked'&&e.sequence>intents[0].sequence));
     return releaseSafe&&own.some(e=>e.kind==='goal.blocked')&&own.some(e=>e.kind==='goal.dispatch_failed')&&
       !own.some(e=>['send.authorized','send.dispatched','request.started'].includes(e.kind))&&
       !j.events.some(e=>e.kind==='request.started'&&e.sourceUrl===url&&e.eventAt>=op.createdAt);
