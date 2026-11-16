@@ -57,6 +57,11 @@ function controlChatTitle(options) {
   const chatId = new URL(options.url).pathname.split('/').at(-1);
   const root=document.querySelector('[data-app-shell-active-page="true"]')||document;
   const actions = Array.from(document.querySelectorAll('header button[aria-haspopup="menu"]')).find(node=>visible(node) && node.querySelector('use[href*="ellipsis-horizontal"]'));
+  const sidebarToggle=Array.from(document.querySelectorAll('header button')).find(node=>visible(node)&&!node.disabled&&
+    node.getAttribute('aria-controls')&&node.querySelector('use[href$="#codex-icon-sidebar-hidden-light-16"]'));
+  const sidebarRow=savedChatLink(options.url)?.closest('[data-sidebar-cycle-item]');
+  const sidebarMenu=Array.from(sidebarRow?.querySelectorAll('button[aria-haspopup="menu"]')||[])
+    .find(node=>visible(node)&&!node.disabled&&node.id&&node.querySelector('use[href*="ellipsis-horizontal"]'));
   let ready = false;
   let streaming = false;
   const nativeConversationIds=new Set();
@@ -97,20 +102,21 @@ function controlChatTitle(options) {
     if(query?.state?.data?.conversation_id && query.state.data.conversation_id!==chatId)canonicalMismatch=true;
   }
   ready=ready&&!canonicalMismatch&&!streaming;
-  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions),streaming,
+  if (options.action === 'inspect') return {ok:true,ready:ready&&Boolean(actions||sidebarMenu||sidebarToggle),streaming,
     modalOpen:Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible),title:document.title,
     sidebarTitle:savedChatLink(options.url)?.textContent||null,url:location.href,
     conversationId:nativeConversationIds.size===1?Array.from(nativeConversationIds)[0]:null};
   if (Number.isFinite(options.expiresAt)&&Date.now()>=options.expiresAt) return {ok:false,reason:'title-deadline-exceeded'};
   let state=globalThis.__chatgptNotifierTitleOperation;
   if (options.action==='open') {
-    if (!ready || !actions) return {ok:false,reason:'chat-not-ready'};
+    if (!ready || !(actions||sidebarMenu||sidebarToggle)) return {ok:false,reason:'chat-not-ready'};
     if (document.title!==options.previousTitle || Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]')).some(visible)) return {ok:false,reason:'title-or-form-changed'};
     if (state && state.id!==options.operationId) return {ok:false,reason:'another-title-operation'};
     state={id:options.operationId,url:options.url,title:options.title,previousTitle:options.previousTitle,
-      previousFormTitle:options.previousTitle,expectedNativeTitle:options.expectedNativeTitle,triggerId:actions.id,createdAt:Date.now()};
+      previousFormTitle:options.previousTitle,expectedNativeTitle:options.expectedNativeTitle,triggerId:actions?.id||null,
+      sidebarFallback:!actions,createdAt:Date.now()};
     globalThis.__chatgptNotifierTitleOperation=state;
-    if (actions.getAttribute('data-state')!=='open') {
+    if (actions && actions.getAttribute('data-state')!=='open') {
       actions.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}));
       actions.click();
     }
