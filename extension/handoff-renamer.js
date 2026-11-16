@@ -122,6 +122,8 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
     if(record.titleStatus==='failed'&&!recoverFailed)return {ok:true,skipped:true};
     if(record.titleStatus==='waiting') {
       if(!noSaveIntent||record.titlePreparationVersion!==1)return {ok:false,reason:'Нет подтверждения безопасного продолжения переименования'};
+      if(goalOperationId&&record.titleLastGoalProbeOperationId===goalOperationId)
+        return {ok:true,waiting:true,retryable:true};
       // A new, already reserved Goal continuation is a fresh opportunity to
       // check native readiness, not a reason to retry a prior title save.
       // Consume each operation once and retain the original title snapshot.
@@ -166,11 +168,18 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       return result[0]?.result||{ok:false,reason:'Страница не ответила'};
     }
     try {
-      await update('waiting',{titlePreparationVersion:1,titlePrepareAttempts:(record.titlePrepareAttempts||0)+1,titleRetryable:false});
+      await update('waiting',{titlePreparationVersion:1,titlePrepareAttempts:(record.titlePrepareAttempts||0)+1,titleRetryable:false,
+        ...(goalOperationId?{titleLastGoalProbeOperationId:goalOperationId}:{})});
       // A conversation URL may be allocated before the server exposes actions.
       const notBefore=(record.sentAt||Date.now())+10000;
+      if(goalOperationId&&Date.now()<notBefore) {
+        await update('waiting',{titleRetryable:true,titlePrepareAttempts:previousAttempts,titleRetryAfter:notBefore});
+        return {ok:true,waiting:true,retryable:true};
+      }
       while(Date.now()<notBefore) await wait(Math.min(1000,notBefore-Date.now()));
-      deadline=Date.now()+60000;
+      // Goal delivery must not wait a full minute for an unavailable title
+      // menu. A later continuation may retry the readiness probe.
+      deadline=Date.now()+(goalOperationId?2000:60000);
       if(targetAlias) {
         const tab=await chrome.tabs.get(tabId);
         const candidate=ChatGPTHandoffTitle.chatUrl(tab.url);
@@ -206,6 +215,10 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
         await wait(1000);
       }
       if(!snapshot?.ready)throw notReady('Новый чат ещё не готов к переименованию');
+      // Once the native menu is ready, preserve the normal save/ACK window;
+      // a short probe deadline must never turn a slow acknowledged save into
+      // an ambiguous retry.
+      if(goalOperationId)deadline=Date.now()+60000;
       if(snapshot.title===pending.title)throw new Error('Название уже изменено без подтверждения журнала');
       const previousTitle=snapshot.title;
       for(const action of ['open','select','fill']) {
@@ -241,6 +254,11 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       throw new Error('Сервер не подтвердил новое название');
     } catch(error) {
       if(error.titleRetryable&&record.titlePreparationVersion===1&&!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt')) {
+        if(goalOperationId) {
+          await update('waiting',{titleReason:String(error.message||error),titleRetryable:true,
+            titlePrepareAttempts:previousAttempts,titleRetryAfter:0});
+          return {ok:true,waiting:true,retryable:true,reason:String(error.message||error)};
+        }
         const retryable=record.titlePrepareAttempts<3;
         await update('waiting',{titleReason:String(error.message||error),titleRetryable:retryable,titleRetryAfter:Date.now()+10000});
         return {ok:true,waiting:true,retryable,reason:String(error.message||error)};

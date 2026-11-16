@@ -362,6 +362,15 @@ for(const mode of ['streaming','late-menu'] as const) {
   await h.rename({goalOperationId:'one-operation'});assert.equal(h.saved,0,'stopped Goal cannot authorize title recovery');
 }
 {
+  const h=harness('unsaved');h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-fast'}};
+  const start=h.time;await h.rename({goalOperationId:'goal-fast'});
+  assert.ok(h.time-start<5000,'a newly sent chat cannot delay Goal delivery during title warmup');
+  h.advance(11000);h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-next'}};
+  const before=h.time;await h.rename({goalOperationId:'goal-next'});
+  assert.ok(h.time-before<5000,'an unavailable title menu does not delay the Goal');
+  assert.equal(h.record.titlePrepareAttempts,0);assert.equal(h.saved,0);
+}
+{
   const h=harness('no-ack');await h.rename();
   assert.ok(h.record.titleSaveStartedAt);assert.equal(h.saved,1);
   h.record.titleStatus='waiting';h.record.titleRetryable=true;
@@ -413,6 +422,7 @@ console.log('PASS: observed native rename DOM, local/canonical chat binding, ine
  const h=harness();h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{id:'goal-send',status:'reserved'}};
  await h.rename();assert.equal(h.opened,0,'background events must not open a modal over Goal preparation');
  await h.rename({goalOperationId:'wrong'});assert.equal(h.opened,0,'only the matching delivery barrier may prepare the title');
+ h.advance(11000);
  assert.equal((await h.rename({goalOperationId:'goal-send'})).ok,true);assert.equal(h.saved,1);assert.equal(h.sent,0);
 }
 {
