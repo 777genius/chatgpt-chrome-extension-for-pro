@@ -550,7 +550,7 @@ async function readJournal() {
   await journalQueue.catch(() => {});
   const values = await chrome.storage.local.get(null);
   return { ok: true, schema: 1, exportedAt: Date.now(), meta: values[JOURNAL_META] || null,
-    storageError: journalFailure,
+    storageError: journalFailure, storage: globalThis.ChatGPTStorage?.status() || null,
     events: Object.entries(values).filter(([key]) => key.startsWith(JOURNAL_PREFIX)).map(([, value]) => value).sort((a,b) => a.sequence - b.sequence) };
 }
 async function initializeJournal(reason) {

@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.153';
+  const SCRIPT_VERSION = '1.8.154';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -148,8 +148,13 @@
         const url=globalThis.ChatGPTGoalPolicy?.canonical(location.href);
         if(area==='local'&&(url&&Object.hasOwn(changes,'chatgpt-goal:'+url)||Object.keys(changes).some(key=>key.startsWith('chatgpt-goal-composer:'))))changed();
       };
+      // Writes that fell back to the IndexedDB overlay do not fire storage.onChanged.
+      const overlayListener=message=>{
+        if(message?.type==='CHATGPT_STORAGE_OVERLAY_CHANGED'&&Array.isArray(message.keys)&&message.keys.length)changed();
+      };
       try{chrome.storage.onChanged?.addListener(listener);}catch{}
-      return ()=>{try{chrome.storage.onChanged?.removeListener(listener);}catch{}};
+      try{chrome.runtime.onMessage.addListener(overlayListener);}catch{}
+      return ()=>{try{chrome.storage.onChanged?.removeListener(listener);}catch{}try{chrome.runtime.onMessage.removeListener(overlayListener);}catch{}};
     }})||null;
 
 
