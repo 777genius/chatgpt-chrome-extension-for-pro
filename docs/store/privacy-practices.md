@@ -47,7 +47,7 @@ All three limited-use certifications are supported by the audited extension: no 
 - `extension/manifest.json`: six permissions and only chatgpt.com host access.
 - `extension/service-worker.js`: scoped request observation, notifications and 260-character maximum response preview; native page inspection via packaged scripting; no direct fetch/XHR/WebSocket/upload endpoint.
 - `extension/handoff-renamer.js`: bounded matching native rename-request body inspection; request status acknowledgement.
-- `extension/journal-store.js`, `goal-store.js`, `request-receipts.js`: persistent local journal/state and temporary session records; no storage sync; no automatic journal deletion.
+- `extension/journal-store.js`, `goal-store.js`, `request-receipts.js`: persistent local journal/state and temporary session records; `extension/resilient-storage.js`: temporary local IndexedDB copy of the same records only while Chrome local storage rejects writes; no storage sync; no automatic journal deletion.
 - `extension/content-script.js`, `page-probe.js`: page/editor/conversation reading, protected native sends, context attachment and draft preservation.
 - `extension/popup.js`: user-triggered local text recovery download, including a saved draft when available.
 - `extension/offscreen.js`: locally synthesized sound.

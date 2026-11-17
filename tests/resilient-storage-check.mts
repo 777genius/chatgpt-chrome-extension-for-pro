@@ -4,7 +4,7 @@ import {createContext,runInContext} from 'node:vm';
 
 const IO_ERROR='IO error: /x/040152.ldb: Unable to create writable file (ChromeMethodBFE: 9::NewWritableFile::8)';
 const load=(chrome:unknown)=>{
-  const context=createContext({chrome,console:{warn(){},info(){}},structuredClone,Object,Date,JSON,Promise,Symbol,Proxy,Reflect});
+  const context=createContext({chrome,console:{warn(){},info(){},error(){}},structuredClone,Object,Date,JSON,Promise,Symbol,Proxy,Reflect});
   runInContext(readFileSync('extension/resilient-storage.js','utf8'),context);
   return context as any;
 };
@@ -33,10 +33,12 @@ function fakeOverlay() {
     async entries(){return new Map(rows);},
     async lookup(keys:string[]){return new Map(keys.filter(key=>rows.has(key)).map(key=>[key,rows.get(key)]));},
     async commit(items:[string,any][]){if(this.broken)throw new Error('overlay down');for(const [key,record] of items)rows.set(key,structuredClone(record));},
-    async clear(keys:string[]){for(const key of keys)rows.delete(key);},
-    async size(){return rows.size;}};
+    async clear(revisions:Map<string,unknown>){for(const [key,rev] of revisions)if(rows.get(key)?.rev===rev)rows.delete(key);},
+    async size(){if(this.unreadable)throw new Error('overlay unreadable');return rows.size;},
+    unreadable:false};
 }
-const make=(primary:any,overlay:any)=>lib.create({primary,overlay,probeIntervalMs:0});
+const sharedLock=()=>{let tail:Promise<unknown>=Promise.resolve();return (fn:()=>Promise<unknown>)=>{const run=tail.then(fn);tail=run.catch(()=>{});return run;};};
+const make=(primary:any,overlay:any,lock?:any)=>lib.create({primary,overlay,probeIntervalMs:0,...(lock?{lock}:{})});
 
 assert.equal(lib.isStorageFault(new Error(IO_ERROR)),true,'the sticky LevelDB failure is classified');
 assert.equal(lib.isStorageFault(new Error('QUOTA_BYTES quota exceeded')),false,'quota and argument errors are not storage faults');
@@ -111,6 +113,63 @@ assert.equal(lib.isStorageFault(new Error('QUOTA_BYTES quota exceeded')),false,'
   primary.broken=true;
   await Promise.all(Array.from({length:20},(_,index)=>store.set({counter:index})));
   assert.deepEqual(await store.get('counter'),{counter:19},'concurrent writes during a fault keep submission order');
+}
+// Several contexts (service worker, popup, journal page) each own a wrapper over the same stores.
+{
+  // A context that never heard about the overlay must not write past it and be overwritten by the copy-back.
+  const primary=fakePrimary(),overlay=fakeOverlay(),lock=sharedLock();
+  const popup=make(primary,overlay,lock),worker=make(primary,overlay,lock);
+  primary.broken=true;
+  await worker.set({k:1});
+  primary.broken=false;
+  await popup.set({k:2});
+  assert.equal(primary.data.k,2,'a stale-healthy context drains the overlay before writing, so older records never overwrite newer ones');
+  assert.equal(overlay.rows.size,0);
+}
+{
+  // Concurrent copy-back from two contexts and a write that lands meanwhile: nothing is lost or rolled back.
+  const primary=fakePrimary(),overlay=fakeOverlay(),lock=sharedLock();
+  const worker=make(primary,overlay,lock);
+  primary.broken=true;
+  await worker.set({meta:{sequence:149},intent:'op-1'});
+  primary.broken=false;
+  const popup=make(primary,overlay,lock);
+  await Promise.all([popup.recover(),worker.set({intent:'op-2 persisted before click'}),worker.set({meta:{sequence:150}}),popup.recover()]);
+  assert.deepEqual(await worker.get(['meta','intent']),{meta:{sequence:150},intent:'op-2 persisted before click'});
+  assert.deepEqual(await popup.get(['meta','intent']),{meta:{sequence:150},intent:'op-2 persisted before click'});
+  assert.equal(overlay.rows.size,0);
+}
+{
+  // Even without the lock a record that changed after the copy-back snapshot is kept, never cleared.
+  const primary=fakePrimary(),overlay=fakeOverlay(),store=make(primary,overlay);
+  primary.broken=true;
+  await store.set({k:'old'});
+  primary.broken=false;
+  const realSet=primary.set;
+  primary.set=async(items:any)=>{await realSet(items);if(Object.hasOwn(items,'k'))overlay.rows.set('k',{value:'newer',rev:'other-context'});};
+  assert.equal(await store.recover(),false,'a changed record keeps the store degraded');
+  assert.equal(store.status().degraded,true);
+  primary.set=realSet;
+  assert.equal(await store.recover(),true);
+  assert.equal(primary.data.k,'newer','the newer record is copied on the next pass');
+}
+{
+  // An overlay that cannot be read is unknown, not empty: writes are refused rather than risk being overtaken.
+  const primary=fakePrimary({a:1}),overlay=fakeOverlay();
+  overlay.unreadable=true;
+  const store=make(primary,overlay);
+  await assert.rejects(store.set({a:2}),/overlay unreadable/);
+  assert.equal(primary.data.a,1,'the primary store is untouched while the overlay state is unknown');
+  assert.deepEqual(await store.get('a'),{a:1},'reads still work');
+  overlay.unreadable=false;
+  await store.set({a:3});
+  assert.equal(primary.data.a,3,'writes resume as soon as the overlay is readable again');
+}
+{
+  // A failed install (non-configurable storage.local) must never break service worker start.
+  const chrome:any={storage:Object.freeze({local:fakePrimary()})};
+  const {ChatGPTStorage:failed}=load(chrome);
+  assert.equal(failed.status(),null);
 }
 console.log('Resilient storage: fault classification, overlay writes/deletes, merged reads, copy-back and fail-closed fences passed.');
 

@@ -12,8 +12,14 @@
 // Nothing is dropped, so the journal invariant "a failed write must not leave a
 // silent gap" still holds, and a real failure (overlay unavailable too) still
 // rejects exactly like before.
+//
+// The service worker, the popup and the journal page each load their own copy of
+// this wrapper. Every operation that can touch the overlay therefore runs under one
+// origin-wide Web Lock, and the overlay content is re-read under that lock, so two
+// contexts can never copy back, clear or overwrite each other's records.
 (function resilientStorage() {
   const PROBE_KEY = 'chatgpt-resilient-storage:probe';
+  const LOCK_NAME = 'chatgpt-resilient-storage';
   const FLUSH_CHUNK_KEYS = 100;
   const FLUSH_CHUNK_BYTES = 2 * 1024 * 1024;
   const PROBE_INTERVAL_MS = 60000;
@@ -35,8 +41,15 @@
     try { return JSON.stringify(value)?.length || 0; } catch { return 0; }
   }
 
-  // Overlay contract: entries() -> Map(key -> {deleted}|{value}); lookup(keys) -> same
-  // for the given keys; commit([[key, record]]) atomic; clear(keys); size().
+  function defaultLock(fn) {
+    const locks = globalThis.navigator?.locks;
+    return locks ? locks.request(LOCK_NAME, fn) : fn();
+  }
+
+  // Overlay contract: entries() -> Map(key -> {deleted}|{value}, each with a `rev`);
+  // lookup(keys) -> same for the given keys; commit([[key, record]]) is atomic and
+  // stores the records as given; clear(Map(key -> rev)) deletes a key only while it
+  // still carries that rev; size().
   function createIndexedDbOverlay({ indexedDB = globalThis.indexedDB, name = 'chatgpt-resilient-storage' } = {}) {
     const STORE = 'overlay';
     let opened = null;
@@ -51,7 +64,7 @@
           db.onclose = () => { opened = null; };
           resolve(db);
         };
-        request.onerror = () => { opened = null; reject(request.error); };
+        request.onerror = () => { opened = null; reject(request.error || new Error('IndexedDB overlay could not be opened')); };
         request.onblocked = () => { opened = null; reject(new Error('IndexedDB overlay is blocked')); };
       });
       return opened;
@@ -62,12 +75,16 @@
         const tx = db.transaction(STORE, mode);
         const out = {};
         tx.oncomplete = () => resolve(out.value);
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error || new Error('IndexedDB overlay transaction aborted'));
-        run(tx.objectStore(STORE), out);
+        tx.onerror = event => reject(tx.error || event?.target?.error || new Error('IndexedDB overlay transaction failed'));
+        tx.onabort = event => reject(tx.error || event?.target?.error || new Error('IndexedDB overlay transaction aborted'));
+        try { run(tx.objectStore(STORE), out); } catch (error) {
+          // Requests queued before the throw must not commit: keep the batch atomic.
+          try { tx.abort(); } catch {}
+          reject(error);
+        }
       });
     }
-    const toRecord = row => (row.deleted ? { deleted: true } : { value: row.value });
+    const toRecord = row => (row.deleted ? { deleted: true, rev: row.rev } : { value: row.value, rev: row.rev });
     return {
       entries: () => transaction('readonly', (store, out) => {
         store.getAll().onsuccess = event => { out.value = new Map(event.target.result.map(row => [row.key, toRecord(row)])); };
@@ -77,28 +94,39 @@
         for (const key of keys) store.get(key).onsuccess = event => { if (event.target.result) out.value.set(key, toRecord(event.target.result)); };
       }),
       commit: items => transaction('readwrite', store => {
-        for (const [key, record] of items) store.put(record.deleted ? { key, deleted: true } : { key, deleted: false, value: record.value });
+        for (const [key, record] of items) store.put(record.deleted ? { key, deleted: true, rev: record.rev } : { key, deleted: false, value: record.value, rev: record.rev });
       }),
-      clear: keys => transaction('readwrite', store => { for (const key of keys) store.delete(key); }),
+      clear: revisions => transaction('readwrite', store => {
+        for (const [key, rev] of revisions) store.get(key).onsuccess = event => { if (event.target.result?.rev === rev) store.delete(key); };
+      }),
       size: () => transaction('readonly', (store, out) => { store.count().onsuccess = event => { out.value = event.target.result; }; })
     };
   }
 
-  function create({ primary, overlay, channel = null, now = Date.now, probeIntervalMs = PROBE_INTERVAL_MS, onStateChange = () => {}, onOverlayWrite = () => {} }) {
-    const state = { degraded: false, since: 0, reason: '', lastProbeAt: 0 };
+  function create({ primary, overlay, channel = null, now = Date.now, probeIntervalMs = PROBE_INTERVAL_MS, lock = defaultLock, onStateChange = () => {}, onOverlayWrite = () => {} }) {
+    const state = { degraded: false, since: 0, reason: '', lastProbeAt: 0, unknown: false };
     let tail = Promise.resolve();
-    // One writer at a time keeps overlay commits and the copy-back strictly ordered.
-    const serial = fn => { const run = tail.then(fn); tail = run.catch(() => {}); return run; };
+    // One operation at a time per context, and one per origin through the Web Lock,
+    // so overlay commits, reads and the copy-back are strictly ordered.
+    const exclusive = fn => { const run = tail.then(() => lock(fn)); tail = run.catch(() => {}); return run; };
     const emit = () => { try { onStateChange({ ...state }); } catch {} };
+    const revision = () => `${now()}-${Math.random().toString(36).slice(2)}`;
 
-    async function refreshFromOverlay() {
-      const pending = overlay ? await overlay.size() : 0;
-      const next = pending > 0;
-      if (next !== state.degraded) {
-        state.degraded = next;
-        if (!next) { state.since = 0; state.reason = ''; }
-        emit();
+    // Re-reads the overlay. Must run under the lock. When the overlay cannot be read
+    // its content is unknown, and writes are refused until it can be.
+    async function refresh() {
+      if (!overlay) return;
+      let pending;
+      try { pending = await overlay.size(); } catch (error) {
+        state.unknown = true; state.reason = `IndexedDB overlay unreadable: ${String(error?.message || error)}`;
+        return;
       }
+      state.unknown = false;
+      const next = pending > 0;
+      if (next === state.degraded) return;
+      state.degraded = next;
+      if (next) { state.since = now(); state.reason = 'IndexedDB overlay holds records not yet copied back'; } else { state.since = 0; state.reason = ''; }
+      emit();
     }
 
     async function copyBack() {
@@ -113,17 +141,20 @@
       }
       await flushChunk();
       for (let i = 0; i < removes.length; i += FLUSH_CHUNK_KEYS) await primary.remove(removes.slice(i, i + FLUSH_CHUNK_KEYS).map(([key]) => key));
-      await overlay.clear([...rows.keys()]);
+      await overlay.clear(new Map([...rows].map(([key, record]) => [key, record.rev])));
+      // A record that changed after the snapshot keeps its newer rev and stays.
+      return (await overlay.size()) === 0;
     }
 
     // Returns true when the primary store is writable and the overlay is empty.
+    // Must run under the lock.
     async function tryRecover(force) {
       if (!state.degraded) return true;
       if (!force && now() - state.lastProbeAt < probeIntervalMs) return false;
       state.lastProbeAt = now();
       try {
         await primary.set({ [PROBE_KEY]: state.lastProbeAt });
-        await copyBack();
+        if (!(await copyBack())) return false;
       } catch { return false; }
       primary.remove(PROBE_KEY).catch(() => {});
       state.degraded = false; state.since = 0; state.reason = '';
@@ -132,24 +163,34 @@
       return true;
     }
 
+    // Takes the lock directly: every other operation awaits `ready` first, so none of
+    // them can be waiting on the per-context queue while this runs.
     const ready = (async () => {
-      try { await refreshFromOverlay(); } catch { return; }
-      // Every operation awaits `ready` first, so nothing else touches the stores yet.
-      if (state.degraded) await tryRecover(true).catch(() => {});
+      try {
+        await lock(async () => {
+          await refresh();
+          if (state.degraded) await tryRecover(true).catch(() => {});
+        });
+      } catch {}
     })();
-    if (channel) channel.onmessage = () => { ready.then(() => serial(refreshFromOverlay)).catch(() => {}); };
+    if (channel) channel.onmessage = () => { ready.then(() => exclusive(refresh)).catch(() => {}); };
 
     async function mergedGet(keys) {
       const list = keyList(keys);
-      const base = await primary.get(keys !== null && typeof keys === 'object' && !Array.isArray(keys) ? list : keys);
+      const objectKeys = keys !== null && typeof keys === 'object' && !Array.isArray(keys);
+      // Overlay first: the lock keeps it from changing, and a copy-back can never
+      // make the primary read older than the overlay read.
       const rows = list === null ? await overlay.entries() : await overlay.lookup(list);
+      const base = await primary.get(objectKeys ? list : keys);
       for (const [key, record] of rows) { if (record.deleted) delete base[key]; else base[key] = record.value; }
-      if (keys !== null && typeof keys === 'object' && !Array.isArray(keys)) for (const [key, fallback] of Object.entries(keys)) if (!Object.hasOwn(base, key)) base[key] = fallback;
+      if (objectKeys) for (const [key, fallback] of Object.entries(keys)) if (!Object.hasOwn(base, key)) base[key] = fallback;
       return base;
     }
 
     async function write(applyPrimary, records) {
-      await ready;
+      // Other contexts may have written to or drained the overlay since last time.
+      await refresh();
+      if (state.unknown) throw new Error(`${state.reason}; write refused so it cannot be overtaken by older overlay records`);
       if (state.degraded) await tryRecover(false);
       let primaryError = null;
       if (!state.degraded) {
@@ -158,7 +199,8 @@
           primaryError = error;
         }
       }
-      try { await overlay.commit(records); } catch (overlayError) { throw primaryError || overlayError; }
+      const rev = revision();
+      try { await overlay.commit(records.map(([key, record]) => [key, { ...record, rev }])); } catch (overlayError) { throw primaryError || overlayError; }
       if (!state.degraded) {
         state.degraded = true; state.since = now(); state.reason = String(primaryError?.message || primaryError);
         emit();
@@ -170,17 +212,21 @@
     return Object.freeze({
       async get(keys) {
         await ready;
-        if (!state.degraded) return primary.get(keys);
-        return serial(async () => (state.degraded ? mergedGet(keys) : primary.get(keys)));
+        if (!state.degraded) {
+          // Read-your-writes within this context.
+          await tail;
+          if (!state.degraded) return primary.get(keys);
+        }
+        return exclusive(async () => (state.degraded ? mergedGet(keys) : primary.get(keys)));
       },
       set(items) {
-        return serial(() => write(() => primary.set(items), Object.entries(items).map(([key, value]) => [key, { value }])));
+        return ready.then(() => exclusive(() => write(() => primary.set(items), Object.entries(items).map(([key, value]) => [key, { value }]))));
       },
       remove(keys) {
         const list = keyList(keys) || [];
-        return serial(() => write(() => primary.remove(keys), list.map(key => [key, { deleted: true }])));
+        return ready.then(() => exclusive(() => write(() => primary.remove(keys), list.map(key => [key, { deleted: true }]))));
       },
-      recover: () => ready.then(() => serial(() => tryRecover(true))),
+      recover: () => ready.then(() => exclusive(async () => { await refresh(); return tryRecover(true); })),
       status: () => ({ ...state })
     });
   }
@@ -233,7 +279,10 @@
   const api = { create, createIndexedDbOverlay, isStorageFault, PROBE_KEY };
   if (typeof module !== 'undefined') module.exports = api;
   else {
-    const store = install();
+    // A failure here must never stop the service worker from starting: without the
+    // wrapper the extension behaves exactly as before.
+    let store = null;
+    try { store = install(); } catch (error) { console.error('ChatGPT storage: resilient storage disabled', error); }
     globalThis.ChatGPTStorage = Object.freeze({ ...api, install, status: () => store?.status() || null, recover: () => store?.recover() });
   }
 })();
