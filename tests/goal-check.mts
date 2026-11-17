@@ -55,6 +55,10 @@ async function confirm(env:Env,promptKey='/c/goal-fixture-a|user-1',url=URL_A) {
   await assert.rejects(()=>env.store.intent({url,tabId:op.tabId,id:record.id,operationId:op.id,text:op.text}),/разрешённой/);
   await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'clicked'});
   await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'confirmed',newPromptKey:promptKey});
+  assert.deepEqual(state(env,url).lastConfirmedOperation,{id:op.id,tabId:op.tabId});
+  assert.equal((await env.store.report({url,tabId:op.tabId,id:record.id,operationId:op.id,status:'clicked'})).alreadyConfirmed,true,
+    'a delayed click report recognises the exact already-confirmed operation');
+  assert.equal((await env.store.report({url,tabId:op.tabId,id:record.id,operationId:'other',status:'clicked'})).ok,false);
   assert.equal(state(env,url).expectedPromptKey,promptKey);
   assert.equal(state(env,url).phase,'waiting');
 }
@@ -222,6 +226,7 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
 {
   const env=fixture();await begin(env);
   const current=state(env),op=current.operation;
+  await assert.rejects(()=>env.store.control({action:'stop',url:URL_A,tabId:7,id:'other-goal'}),'a stale stop cannot affect a replacement Goal');
   await env.store.intent({url:URL_A,tabId:7,id:current.id,operationId:op.id,text:op.text,
     baselineKey:'/c/goal-fixture-a|old'});
   const stage=(promptKey:string,userId:string,completionKey:string)=>
@@ -252,6 +257,31 @@ assert.throws(()=>policy.settings({goal:'x',maxContinuations:1,maxMinutes:Infini
     status:'confirmed',newPromptKey:'/c/goal-fixture-a|fast-user'});
   assert.equal(state(env).phase,'completed');
   assert.equal(env.messages.length,1,'final marker never causes another send');
+}
+
+// Pause or stop after the send intent never clears the unknown-operation fence.
+// A worker-proved unspent intent and later native manual message can restore
+// the same Goal and its history atomically, without a new automatic send.
+{
+  const env=fixture();await begin(env);const old=state(env),op=old.operation;
+  await env.store.intent({url:URL_A,tabId:7,id:old.id,operationId:op.id,text:op.text,baselineKey:'/c/goal-fixture-a|old'});
+  await env.store.report({url:URL_A,tabId:7,id:old.id,operationId:op.id,status:'blocked',reason:'Отправка отменена: Нет сохранённого разрешения на эту автоматическую отправку'});
+  env.time+=1000;
+  const witness={requestId:'manual-request',startedAt:env.time,userSentAtMs:env.time,userId:'manual-user',userText:'Continue the work',promptKey:'/c/goal-fixture-a|manual'};
+  const handoff={id:'transfer',sourceUrl:URL_A,stage:'navigating',text:'Earlier history',fileName:'history.txt',asFile:true,prompt:'Read history'};
+  const input={sourceUrl:URL_A,handoffId:'transfer',tabId:7,goalId:old.id,operationId:op.id,witness,handoff,nativeVerified:true};
+  assert.equal((await env.store.handoffAfterUnsent({...input,nativeVerified:false})).ok,false);
+  assert.equal((await env.store.handoffAfterUnsent({...input,witness:{...witness,startedAt:op.createdAt}})).ok,false);
+  env.failWrite=true;await assert.rejects(()=>env.store.handoffAfterUnsent(input),/Synthetic storage failure/);
+  assert.equal(state(env).phase,'blocked');assert.equal(env.data['chatgpt-handoff:7'],undefined);
+  env.failWrite=false;
+  const result=await env.store.handoffAfterUnsent(input);
+  assert.equal(result.ok,true);assert.equal(state(env).phase,'handoff');assert.equal(state(env).id,old.id);
+  assert.equal(state(env).operation,null);assert.equal(state(env).supplements.at(-1).userText,witness.userText);
+  assert.match(env.data['chatgpt-handoff:7']!.text,/Complete review, CI and merge/);
+  assert.equal(env.data['chatgpt-handoff:7']!.navigationRecoveries,1);
+  assert.equal(env.messages.length,1,'recovery does not dispatch another message');
+  assert.equal((await env.store.check({url:URL_A,tabId:7,id:old.id,operationId:op.id})).ok,false);
 }
 
 // Pause or stop after the send intent never clears the unknown-operation fence.
@@ -528,6 +558,21 @@ for(const response of ['Маркер `GOAL_COMPLETE` не выдаю.','Марк
 // survives coordinator recreation and cannot be replayed as a continuation.
 assert.deepEqual(policy.DEFAULTS,{maxContinuations:30,maxMinutes:1440});
 assert.match(policy.initialText({goal:'Test',rules:''}),/GOAL_BLOCKED/);
+// A historical no-navigation block may be restored only after the worker has
+// proven the same native turn completed; owner stop/pause always wins.
+for(const variant of ['ok','stopped','paused','new-goal','pending','expired'] as const) {
+ const env=fixture();await begin(env);await confirm(env);const g=state(env),goalId=g.id,oldPromptKey=g.expectedPromptKey;
+ Object.assign(g,{phase:'blocked',handoffId:'saved-handoff',handoffTabId:7,preHandoffPhase:'waiting',
+  reason:'Передача Goal остановлена: В исходном чате идёт генерация; переход отменён'});
+ if(variant==='stopped')g.stopRequested=true;if(variant==='paused')g.pauseRequested=true;
+ if(variant==='new-goal')g.id='replacement';if(variant==='pending')g.manualPending={id:'manual'};
+ if(variant==='expired')env.time=g.deadlineAt;
+ const outcome=await env.store.handoffSourceCompleted({sourceUrl:URL_A,handoffId:'saved-handoff',tabId:7,goalId,
+  oldPromptKey,promptKey:'/c/goal-fixture-a|verified-user',userId:'verified-user'});
+ assert.equal(outcome.ok,variant==='ok',variant);
+ assert.equal(state(env).phase,variant==='ok'?'waiting':'blocked',variant);
+ assert.equal(env.messages.length,1,'restoration itself never sends a message');
+}
 assert.match(policy.continuationText({goal:'Test'}),/штатные способы/);
 assert.equal(policy.exactBlockedMarker('GOAL_BLOCKED',true,true),true);
 for(const value of [' GOAL_BLOCKED','GOAL_BLOCKED ','`GOAL_BLOCKED`','GOAL_BLOCKED\nReason','Не выдаю GOAL_BLOCKED','GOAL_BLOCKED is the marker'])
@@ -686,6 +731,40 @@ for(const patch of [
 }
 console.log('Retry-blocked Goal handoff: shared exact eligibility, immutable objective/limits and model/unknown/manual stop fences passed');
 
+// A fresh manual request is a new explicit intervention, but it may only
+// supersede a retry failure after the normal exact native binding succeeds.
+{
+ const env=fixture();await begin(env);await confirm(env);
+ Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ const startedAt=env.time+100,promptKey='/c/goal-fixture-a|fresh-manual';
+ const result=await env.store.manual({url:URL_A,tabId:7,requestId:'fresh-manual-request',startedAt,eventAt:startedAt,text:'Continue after retry failure',baselineKey:state(env).expectedPromptKey});
+ assert.equal(result.ok,true);assert.equal(state(env).phase,'waiting');assert.ok(state(env).manualPending);assert.equal(env.messages.length,1);
+ const bound=await env.store.manualBind({url:URL_A,tabId:7,id:state(env).id,requestId:'fresh-manual-request',startedAt,promptKey,userId:'fresh-manual-user',userText:'Continue after retry failure',userSentAtMs:startedAt,nativeVerified:true});
+ assert.equal(bound.ok,true);assert.equal(state(env).manualPending,null);assert.equal(state(env).expectedPromptKey,promptKey);assert.equal(env.messages.length,1);
+}
+for(const reason of ['Модель ответила точным маркером GOAL_BLOCKED','Неподтверждённая отправка пережила перезапуск; автоматический повтор запрещён']) {
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason});const before=structuredClone(state(env));
+ await env.store.manual({url:URL_A,tabId:7,requestId:'manual',startedAt:env.time+1,eventAt:env.time+1,text:'Continue',baselineKey:state(env).expectedPromptKey});assert.deepEqual(state(env),before);
+}
+{
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});assert.equal(state(env).resumeRequested,true);assert.equal(env.messages.length,1,'one click queues observation, even when the editor looks idle');
+ const original=await env.store.get(URL_A);assert.equal((await env.store.resumeObserved({url:URL_A,tabId:7,expectedRecord:original,promptKey:original.expectedPromptKey,nativeVerified:false})).ok,false);
+ assert.equal((await env.store.resumeObserved({url:URL_A,tabId:7,expectedRecord:original,promptKey:original.expectedPromptKey,nativeVerified:true})).ok,true);assert.equal(state(env).phase,'waiting');assert.equal(env.messages.length,1,'observation never sends');
+}
+{
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});env.time=state(env).deadlineAt;
+ await env.store.expireQueuedResume({url:URL_A,tabId:7});assert.equal(state(env).phase,'stopped');assert.equal(state(env).resumeRequested,false);assert.equal(env.messages.length,1);
+}
+{
+ const env=fixture();await begin(env);await confirm(env);Object.assign(state(env),{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой'});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});const observed=await env.store.get(URL_A);
+ await env.store.control({url:URL_A,tabId:7,action:'stop'});
+ assert.equal((await env.store.resumeObserved({url:URL_A,tabId:7,expectedRecord:observed,promptKey:observed.expectedPromptKey,nativeVerified:true})).ok,false);
+ assert.equal(state(env).phase,'stopped');assert.equal(state(env).resumeRequested,false);assert.equal(env.messages.length,1,'Stop wins the observation race');
+}
+
 // Retry failure after an actual user Pause cannot silently resume the Goal
 // when a conversation-length error later moves it to a new chat.
 for(const kind of ['retry.failed','retry.blocked','draft.restore_failed']) {
@@ -797,3 +876,13 @@ for(const scenario of ['success','duplicate','stopped','wrong-tab','expired','wr
  assert.equal(env.messages.length,1,'observation cannot send a message');
 }
 console.log('Blocked handoff submitted-message witness: durable, idempotent, no authority, stop/expiry fences passed.');
+{
+ const env=fixture();await begin(env);await confirm(env);
+ await answer(env,{response:'GOAL_BLOCKED',rawExact:true});
+ const before=state(env),deadline=before.deadlineAt,objective=before.goal;
+ env.busy=true;await env.store.control({url:URL_A,tabId:7,action:'resume'});
+ assert.equal(state(env).phase,'blocked');assert.equal(state(env).resumeRequested,true);assert.equal(env.messages.length,1,'busy chat queues without sending');
+ env.busy=false;await env.store.control({url:URL_A,tabId:7,action:'resume'});
+ assert.equal(state(env).phase,'preparing');assert.equal(state(env).goal,objective);
+ assert.equal(state(env).deadlineAt,deadline);assert.equal(env.messages.length,2);
+}

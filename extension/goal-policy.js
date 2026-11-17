@@ -5,10 +5,16 @@
   const MARKER='GOAL_COMPLETE';
   const BLOCKED_MARKER='GOAL_BLOCKED';
   const COMPLETION_FORMAT='Только после полного выполнения всей цели ответь ровно одной строкой GOAL_COMPLETE без точки в конце. Всё сообщение должно состоять только из этой строки: без Markdown, кавычек, пояснений, итогов и любого другого текста.';
-  const WAIT_FORMAT='Ожидание само по себе не является блокировкой: очередь CI, ожидание runner, выполняющиеся проверки, сборка, развёртывание или распространение изменений требуют времени. Сохраняй цель активной, используй штатное ожидание результата или подписку на событие и после него продолжай работу end-to-end. Не завершай попытку только из-за ожидания и не объявляй цель заблокированной; не подменяй ожидание частыми проверками, повторными запусками или обходом ограничений. Соблюдай заданные лимиты цели и ручную остановку пользователя.';
-  const BLOCKED_FORMAT='Если цель действительно заблокирована, сначала выполни всю доступную полезную работу и проверь разумные штатные способы продолжения. Не обходи ограничения странными, сомнительными или небезопасными путями. Только когда для продолжения действительно требуется вмешательство пользователя или владельца (например, отсутствующие права, данные или решение), а простое ожидание результата не поможет, ответь ровно одной строкой GOAL_BLOCKED без оформления и другого текста.';
+  const WAIT_FORMAT='Ожидание само по себе не является блокировкой, даже если работа занимает долгое время: очередь CI, ожидание runner, выполняющиеся проверки, сборка, развёртывание или распространение изменений требуют времени. Не используй GOAL_BLOCKED для CI, runner, проверок или деплоя в очереди или в работе. Дождись результата штатным механизмом, затем проверь результат и продолжай работу end-to-end. Не завершай попытку только из-за ожидания и не объявляй цель заблокированной; не подменяй ожидание частыми проверками, повторными запусками или обходом ограничений. Соблюдай заданные лимиты цели и ручную остановку пользователя.';
+  const BLOCKED_FORMAT='Прежде чем считать цель заблокированной, проверь актуальное состояние и штатные способы продолжения; отдельно ответь себе: какое именно действие пользователя необходимо, почему его нельзя выполнить самостоятельно штатными средствами и почему до его получения нельзя сделать никакой полезной работы. Не выдавай GOAL_BLOCKED, если хоть один из этих пунктов не установлен. Ошибка проверки, уязвимая или неподтверждённая зависимость, непройденное ревью, необходимость исправить код, подготовить подписанный выпуск или выполнить merge сами по себе не требуют вмешательства владельца: изучи причины, исправь доступное, дождись текущих проверок и продолжай другие независимые части цели. Если конкретный инструмент не поддерживает действие, проверь, доступны ли в текущей среде и с имеющимися правами другие официальные штатные способы выполнить его; отсутствие функции в одном инструменте само по себе не доказывает блокировку. Не выдумывай доступные инструменты и не обходи запреты или права доступа. Не считай старое сообщение о блокировке или частичный результат доказательством текущей блокировки. Если выполнение какого-то действия ограничено, не обходи ограничения странными, сомнительными или небезопасными путями; выполни остальное в рамках разрешений. Только когда для продолжения действительно требуется вмешательство пользователя или владельца (например, отсутствующие права, данные или решение), а простое ожидание результата не поможет, ответь ровно одной строкой GOAL_BLOCKED без оформления и другого текста.';
   const INCOMPLETE_FORMAT='Пока цель не выполнена полностью, продолжай работу и сообщай конкретный прогресс или блокировки. Не обсуждай сигнал завершения и не поясняй, почему ты его не подаёшь.';
-  const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. '+INCOMPLETE_FORMAT+' '+WAIT_FORMAT+' '+COMPLETION_FORMAT+' '+BLOCKED_FORMAT;
+  const PARTIAL_PROGRESS_FORMAT='Перед объявлением блокировки сопоставь каждую незавершённую часть исходной цели и дополнений пользователя с тем, что можно сделать независимо. Ограничение одного шага не блокирует остальные части цели. Например, если для публикации нужны production-ключи или решение владельца, продолжай разрешённую работу над кодом, ревью, документацией и проверками, которые не требуют этих ключей, а текущие CI и другие запущенные процессы дождись штатно. Не подменяй production-ключи тестовыми и не выдавай частичные проверки за завершённый выпуск. Считай всю цель заблокированной только если исчерпаны все такие независимые действия и каждый оставшийся шаг действительно требует конкретного вмешательства владельца.';
+  const RETRY_MESSAGE_KEY='chatgpt-retry-message';
+  const DEFAULT_RETRY_MESSAGE='доделай е2е';
+  function retryMessage(value) {
+    return typeof value==='string'&&value.trim().length<=500&&value.trim()?value.trim():DEFAULT_RETRY_MESSAGE;
+  }
+  const CONTINUATION='Продолжай выполнение исходной цели до полного результата. Проверь всё end-to-end, включая необходимые pull requests, merge и успешные проверки, если это входит в цель. '+INCOMPLETE_FORMAT+' '+WAIT_FORMAT+' '+PARTIAL_PROGRESS_FORMAT+' '+COMPLETION_FORMAT+' '+BLOCKED_FORMAT;
   function canonical(value) {
     try {
       const url=new URL(value);
@@ -19,6 +25,13 @@
   const DEFAULTS=Object.freeze({maxContinuations:30,maxMinutes:1440});
   function pageUrl(value) {
     try {const url=new URL(value);return url.origin==='https://chatgpt.com'&&url.pathname==='/'?url.origin+'/':canonical(value);}catch{return '';}
+  }
+  function temporaryPageUrl(value) {
+    try {
+      const url=new URL(value),match=url.pathname.match(/^\/c\/([^/]+)\/?$/);
+      if(url.origin!=='https://chatgpt.com'||!match||!/^local-chatgpt:[a-z0-9-]+$/.test(decodeURIComponent(match[1])))return '';
+      return url.origin+url.pathname.replace(/\/$/,'');
+    } catch {return '';}
   }
   function composerSettings(input={}) {
     const {rules,maxContinuations,maxMinutes}=settings({...DEFAULTS,...Object.fromEntries(Object.entries(input).filter(([,value])=>value!==undefined)),goal:'Native message'});
@@ -38,7 +51,7 @@
     return ['Цель (автономное выполнение):',record.goal,
       ...(record.rules?['Условия завершения:',record.rules]:[]),
       'Продолжай работу end-to-end. Успешные проверки, публикация и merge должны действительно состояться, если это требуется целью.',
-      INCOMPLETE_FORMAT,WAIT_FORMAT,
+      INCOMPLETE_FORMAT,WAIT_FORMAT,PARTIAL_PROGRESS_FORMAT,
       COMPLETION_FORMAT,BLOCKED_FORMAT].join('\n\n');
   }
   function supplementsText(record) {
@@ -65,10 +78,41 @@
     if(!Array.isArray(linkTargets)||linkTargets.length>32||linkTargets.some(x=>typeof x!=='string'||!/^https?:\/\//.test(x)||x.length>2048))return false;
     // A trusted user click captured the editor's link targets before submit.
     // A matching visible label cannot approve a different serialized URL.
-    const pattern=/\[[^\]\n]{1,500}\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
-    const links=[...nativeText.matchAll(pattern)].map(m=>m[1].replace(/\\([()\\])/g,'$1'));
-    if(links.length!==linkTargets.length||nativeText.replace(pattern,'').includes(']('))return false;
-    return links.every((target,index)=>target===linkTargets[index]);
+    // Preserve explicitly captured targets while allowing ChatGPT to turn a
+    // literal URL in the same message into an identical automatic link.
+    const pattern=/\[([^\]\n]{1,500})\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
+    const links=[...nativeText.matchAll(pattern)];
+    if(nativeText.replace(pattern,'').includes(']('))return false;
+    const captured=[];
+    for(const match of links) {
+      const target=match[2].replace(/\\([()\\])/g,'$1');
+      if(target===linkTargets[captured.length])captured.push(target);
+      else if(match[1]!==target||!intent.includes(target))return false;
+    }
+    return captured.length===linkTargets.length&&captured.every((target,index)=>target===linkTargets[index]);
+  }
+  // A virtualized first turn may retain only ChatGPT's Markdown serialization.
+  // Accept it for an explicit recovery only when all extra bytes consist of
+  // the captured link destinations and Markdown punctuation, in order.
+  function richGoalHistoryMatches(intent,nativeText,linkTargets) {
+    if(typeof intent!=='string'||!intent||intent.length>10000||typeof nativeText!=='string'||
+        nativeText.length<intent.length||nativeText.length>100000||!Array.isArray(linkTargets)||
+        !linkTargets.length||linkTargets.length>32||linkTargets.some(x=>typeof x!=='string'||
+          x.length>2048||!/^https?:\/\//.test(x)))return false;
+    let i=0,j=0,added='';
+    while(i<intent.length&&j<nativeText.length) {
+      if(intent[i]===nativeText[j]){i++;j++;}else added+=nativeText[j++];
+    }
+    if(i!==intent.length)return false;
+    added=(added+nativeText.slice(j)).replace(/\\([()\\])/g,'$1');
+    const markdownOnly=value=>/^[\[\]()*`\\]*$/.test(value);
+    let cursor=0;
+    for(const target of linkTargets) {
+      const at=added.indexOf(target,cursor);
+      if(at<cursor||!markdownOnly(added.slice(cursor,at)))return false;
+      cursor=at+target.length;
+    }
+    return markdownOnly(added.slice(cursor));
   }
   function exactMarker(response,rawExact,nativeVerified) {
     return nativeVerified===true&&rawExact===true&&response===MARKER;
@@ -87,7 +131,7 @@
     if(record.continuations>=record.maxContinuations)return 'budget';
     return 'continue';
   }
-  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,DEFAULTS,canonical,pageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
+  const api=Object.freeze({MARKER,BLOCKED_MARKER,CONTINUATION,RETRY_MESSAGE_KEY,DEFAULT_RETRY_MESSAGE,retryMessage,DEFAULTS,canonical,pageUrl,temporaryPageUrl,composerSettings,settings,initialText,continuationText,handoffText,submittedTextMatches,richGoalHistoryMatches,exactMarker,exactBlockedMarker,terminalMarker,decision});
   root.ChatGPTGoalPolicy=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

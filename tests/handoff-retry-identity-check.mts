@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const s=readFileSync('extension/service-worker.js','utf8');
+const code=s.slice(s.indexOf('function proveHandoffRetryIdentity('),s.indexOf('const retryReadinessRecoveries='));
+const prove=new Function(code+';return proveHandoffRetryIdentity;')();
+const url='https://chatgpt.com/c/test',planned={promptKey:'/c/test',attemptId:'1000000',requestId:'r'},native={ok:true,isLatest:true,isReadOnly:false,hasError:true,generating:false,userId:'u',promptKey:'/c/test|user',lastUserSentAtMs:999990,userText:'history'},checkpoint={state:'active',url,requestId:'r',startedAt:1000000,requestFailedAt:1000100},handoff={stage:'sent',targetUrl:url,id:'h',acceptance:{messageId:'u',targetUrl:url}},events=[{kind:'request.started',tabId:7,requestId:'r',operationId:'h',eventAt:1000000,sequence:4},{kind:'send.dispatched',tabId:7,operationId:'h',text:'history',sequence:5}];
+events[0].sequence=1;events[1].sequence=2;
+const journal={ok:true,meta:{sequence:2},events};
+const base={url,tabId:7,planned,native,checkpoint,handoff,journal};
+assert.equal(prove(base),true);
+assert.equal(prove({...base,checkpoint:{...checkpoint,url:'https://chatgpt.com/'}}),true,'an allocating root request can be bound by the accepted handoff');
+for(const change of [{native:{...native,userId:'different'}},{native:{...native,userText:'different'}},{native:{...native,generating:true}},{checkpoint:{...checkpoint,requestFailedAt:undefined}},{handoff:{...handoff,stage:'awaiting-confirmation'}},{journal:{...journal,events:[...events,{kind:'request.started',tabId:7,sequence:3}],meta:{sequence:3}}},{planned:{...planned,promptKey:'/c/test|other'}},{journal:{...journal,events:[...events,events[1]],meta:{sequence:3}}},{journal:{...journal,storageError:'lost'}},{journal:{...journal,meta:{sequence:3}}}])assert.equal(prove({...base,...change}),false);
+console.log('Handoff retry identity: accepted exact user, failed request and unique send only; no action authorized.');

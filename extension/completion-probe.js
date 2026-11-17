@@ -3,7 +3,7 @@
 // Serialized into MAIN. Metadata by default; an armed Goal may explicitly
 // request already-sent message text. Never reads drafts or invokes handlers.
 // The expected attempt is bound by the extension caller.
-function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null, sentText = null) {
+function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPromptKey = null, sentAt = null, conversationBinding = null, sentText = null, scheduledRecovery = false) {
   function plainGoalMarkerDOM(rendered,sourceMessageId='',marker='GOAL_COMPLETE') {
     if(!rendered||rendered.textContent!==marker)return false;
     const plain=node=>{
@@ -80,7 +80,7 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
     entry=candidates[0].candidate;
     historicalUserIndex=candidates[0].index;
     element=turns.find(node=>(node.getAttribute('data-content-search-turn-key')||node.getAttribute('data-testid'))===entry.id);
-    if(!element)return {ok:false,reason:'historical-user-not-rendered'};
+
   }
   let recoveryTimeline=null;
   if(historicalUserIndex!==null) {
@@ -115,6 +115,28 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
   const users=(entry.turn?.items||[]).filter(item=>item.type==='user-message');
   const assistants=(entry.turn?.items||[]).filter(item=>item.type==='assistant-message'&&item.phase==='final_answer');
   const user=historicalUserIndex===null?users.at(-1):users[historicalUserIndex],assistant=assistants.at(-1);
+  // Scheduled runs append assistant-only turns and can virtualize the
+  // original user row. Recover its identity without certifying completion.
+  const lastUserEntry=nativeEntries.findLast(candidate=>candidate.turn?.items?.some(item=>item.type==='user-message'));
+  const scheduledTail=lastUserEntry?.turn?.items?.some(item=>item.type==='chatgpt-automation')&&
+    nativeEntries.at(-1)!==lastUserEntry&&nativeEntries.slice(nativeEntries.indexOf(lastUserEntry)+1)
+      .every(candidate=>candidate.turn?.status==='complete'&&candidate.turn.items.length&&
+        candidate.turn.items.every(item=>item.type==='assistant-message'));
+  if(scheduledRecovery===true&&includeGoalText===true&&scheduledTail&&(historicalUserIndex===null||!element)&&
+      (/^local-chatgpt:[a-z0-9-]+$/.test(entry.conversationId)||entry.conversationId===location.pathname.split('/').at(-1))&&
+      nativeEntries.every(candidate=>candidate.isReadOnly===false&&candidate.conversationId===entry.conversationId)) {
+    const identity=historicalUserIndex===null?lastUserEntry.turn.items.findLast(item=>item.type==='user-message'):user;
+    const owner=historicalUserIndex===null?lastUserEntry:entry;
+    const timestamp=(owner.timestampTurns||[]).filter(item=>item.role==='user')[historicalUserIndex??
+      owner.turn.items.filter(item=>item.type==='user-message').length-1]?.sentAtMs;
+    if(identity?.messageId&&typeof identity.message==='string'&&Number.isFinite(timestamp)&&
+        (historicalUserIndex===null||recoveryTimeline))
+      return {ok:true,url,isReadOnly:false,isLatest:historicalUserIndex===null,
+        userId:identity.messageId,userText:identity.message,userSentAtMs:timestamp,
+        promptKey:location.pathname+'|'+owner.id+':'+owner.turn.items.indexOf(identity)+':user',
+        recoveryTimeline,firstTurn:false};
+  }
+  if(!element)return {ok:false,reason:'historical-user-not-rendered'};
   const domUsers=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-message-author-role="user"],[data-turn="user"]'));
   const domUser=historicalUserIndex===null?domUsers.at(-1):domUsers[historicalUserIndex];
   const domAssistant=Array.from(element.querySelectorAll('[data-chatgpt-search-unit-key$=":assistant"],[data-message-author-role="assistant"],[data-turn="assistant"]')).at(-1);
@@ -188,7 +210,10 @@ function inspectCompletedTurn(expectedUrl, includeGoalText = false, failedPrompt
           const style=document.defaultView?.getComputedStyle?.(originals[index]);
           if(style?.display==='none'||['hidden','collapse'].includes(style?.visibility))clones[index].remove();
         }
-        copy.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"],[hidden],.ProseMirror-widget,[data-composer-attachments],[data-testid*="attachment"],h4.sr-only[data-conversation-role="user"]').forEach(node=>node.remove());
+        // ChatGPT can mark actual message links aria-hidden while retaining
+        // their text visually. Keep those labels for the subsequent exact
+        // message comparison, which independently verifies every link target.
+        copy.querySelectorAll('button,[role="button"],svg,[aria-hidden="true"]:not(a[href]),[hidden],.ProseMirror-widget,[data-composer-attachments],[data-testid*="attachment"],h4.sr-only[data-conversation-role="user"]').forEach(node=>node.remove());
         function text(node) {
           if(node.nodeType===3)return node.textContent||'';
           if(node.nodeType!==1)return '';

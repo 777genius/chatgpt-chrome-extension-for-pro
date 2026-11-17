@@ -63,6 +63,21 @@ function retry(attempt: string, promptKey = 'prompt'): JournalEvent {
   return {kind: 'error.detected', action: 'retry', attemptId: attempt, promptKey};
 }
 
+{
+ const h=harness(),j=h.boot();
+ await j.append({kind:'handoff.navigating',sourceUrl:url,operationId:'handoff-one'});
+ for(const kind of ['retry.planned','retry.send_intent'])
+  await assert.rejects(()=>j.append({kind,sourceUrl:url,operationId:'retry-old',attemptId:'999999',promptKey:'changed-prompt'}),/Автоповтор/,
+   'a source handoff fences a later retry even when the DOM prompt key changes');
+ const restarted=h.boot();
+ await assert.rejects(()=>restarted.append({kind:'retry.planned',sourceUrl:url,operationId:'retry-restart',attemptId:'999999',promptKey:'other-prompt'}),/Автоповтор/,
+  'the source handoff fence survives worker restart');
+ h.advance(2);await restarted.append({kind:'retry.preparation_superseded',sourceUrl:url,requestId:'manual-new',startedAt:1000001});
+ await assert.rejects(()=>restarted.append({kind:'retry.planned',sourceUrl:url,operationId:'retry-stale',attemptId:'999999',promptKey:'old'}),/Автоповтор/,
+  'a newer manual send never reauthorizes an old attempt');
+ await restarted.append({kind:'retry.planned',sourceUrl:url,operationId:'retry-new',attemptId:'1000001',promptKey:'new-user'});
+}
+
 const live = harness();
 let runtime = live.boot();
 await Promise.all([runtime.append(retry('one')), runtime.append(retry('two')), runtime.append(retry('one'))]);

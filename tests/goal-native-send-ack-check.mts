@@ -26,6 +26,13 @@ function fixture() {
  assert.equal(h.reports[0].newPromptKey,prompt);assert.equal(h.reports[0].status,'confirmed');
  assert.deepEqual(JSON.parse(JSON.stringify(h.probes[0].args)),[url,true]);
 }
+{
+ const h=fixture();h.record().phase='waiting';h.record().operation=null;
+ h.record().lastConfirmedOperation={id:'operation',tabId:7};
+ assert.equal((await h.run()).alreadyConfirmed,true,'a separately committed ACK is idempotent');
+ assert.equal(h.reports.length,0);assert.equal(h.probes.length,0);assert.equal(h.completions.length,0);
+ for(const patch of [{id:'other'},{operationId:'other'},{tabId:8}])assert.equal((await h.run(patch)).ok,false);
+}
 for(const patch of [{userText:'Wrong native text'},{userSentAtMs:-10000},{userId:''},{promptKey:baseline},{isLatest:false},{isReadOnly:true},{url:'https://chatgpt.com/c/other'}]) {
  const h=fixture();Object.assign(h.native,patch);assert.equal((await h.run()).ok,false);assert.equal(h.reports.length,0);
 }

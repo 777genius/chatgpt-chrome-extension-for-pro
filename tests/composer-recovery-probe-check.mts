@@ -39,5 +39,19 @@ try{
    'historical-user proof is independent from latest aggregate identity');
  entries[1].isReadOnly=false;rows[0].remove();
  assert.equal(inspectCompletedTurn('https://chatgpt.com/c/probe-recovery',true,null,100000).ok,false,'unrendered history cannot authorize recovery');
+ entries[0].conversationId=entries[1].conversationId='local-chatgpt:fixture';
+ entries[0].turn.items.push({type:'chatgpt-automation'} as any);
+ entries[1].turn.items=[{type:'assistant-message',messageId:'scheduled-result',message:'GOAL_COMPLETE'}];
+ entries[1].turn.status='complete';
+ rows[1].replaceChildren();
+ entries[1].timestampTurns=[{role:'assistant',sentAtMs:160000}];
+ const scheduledUrl='https://chatgpt.com/c/probe-recovery';
+ const scheduled=inspectCompletedTurn(scheduledUrl,true,null,100000,null,'Message 0',true);
+ assert.equal(scheduled.userId,'user-0');
+ assert.equal(scheduled.recoveryTimeline.length,1);
+ const anchor=inspectCompletedTurn(scheduledUrl,true,null,null,null,null,true);
+ assert.equal(anchor.userId,'user-0');
+ assert.equal(anchor.assistantCompleted,undefined,'scheduled output cannot finalize a Goal');
+ assert.equal(inspectCompletedTurn(scheduledUrl,true).ok,false,'ordinary completion does not use scheduled recovery');
 }finally{g.document=old.document;g.location=old.location;}
 console.log('Composer recovery probe: native conversation identity, chronological rendered users, text opt-in, readonly and missing history fences passed.');

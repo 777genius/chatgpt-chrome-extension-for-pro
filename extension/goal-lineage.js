@@ -2,6 +2,34 @@
 // Trace only observed allocations belonging to recorded handoff operations.
 // A matching tab ID or a later URL alone does not carry Goal authorization.
 globalThis.ChatGPTGoalLineage=Object.freeze({
+  // Explicit owner restoration may bridge a positively failed no-send
+  // handoff followed by one manual new-chat allocation. Never use this as
+  // automatic proof that the original Goal was delivered.
+  traceExplicitManualBridge(events,tabId,request) {
+    const canonical=globalThis.ChatGPTGoalPolicy.canonical,rows=events.filter(e=>e.tabId===tabId);
+    const initial=rows.filter(e=>e.kind==='request.started'&&!e.operationId&&e.sourceUrl==='https://chatgpt.com/'&&
+      e.requestId===request?.requestId&&e.eventAt===request.startedAt);
+    if(initial.length!==1)return null;
+    const later=rows.filter(e=>e.sequence>initial[0].sequence),firstNavigation=later.find(e=>e.kind==='handoff.navigating');
+    if(!firstNavigation?.operationId)return null;
+    const allocations=later.filter(e=>e.sequence<firstNavigation.sequence&&e.kind==='tab.updated'&&canonical(e.changes?.url));
+    const origin=canonical(allocations[0]?.changes?.url);
+    if(!origin||origin!==canonical(firstNavigation.sourceUrl)||allocations.some(e=>canonical(e.changes.url)!==origin))return null;
+    const bridge=this.traceManualSuccessor(events,tabId,origin,firstNavigation.operationId);
+    if(!bridge)return null;
+    const hops=[{id:firstNavigation.operationId,sourceUrl:origin,targetUrl:bridge.firstTargetUrl,
+      requestId:bridge.manualRequestId,manualBridge:true}];
+    for(const item of bridge.handoffs){const hop=this.handoffTarget(events,tabId,item.id,item.sourceUrl);if(!hop)return null;hops.push(hop);}
+    const allowedRequests=new Map(hops.map(h=>[h.requestId,h.manualBridge?null:h.id]));
+    const after=later.filter(e=>e.sequence>firstNavigation.sequence),targets=hops.map(h=>h.targetUrl);let index=0,current=origin;
+    for(const e of after){
+      if(e.kind==='request.started'&&e.sourceUrl==='https://chatgpt.com/'&&
+          (!allowedRequests.has(e.requestId)||(e.operationId||null)!==allowedRequests.get(e.requestId)))return null;
+      const target=e.kind==='tab.updated'&&canonical(e.changes?.url);
+      if(target&&target!==current){if(target!==targets[index])return null;current=target;index++;}
+    }
+    return index===targets.length&&current===bridge.targetUrl?{originUrl:origin,targetUrl:current,handoffs:hops}:null;
+  },
   // This is evidence only: the caller must independently verify the manual
   // message and the current Goal before using the resulting path.
   traceManualSuccessor(events,tabId,sourceUrl,handoffId) {

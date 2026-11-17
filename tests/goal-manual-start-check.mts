@@ -10,7 +10,7 @@ const composerKey=(tabId:number)=>'chatgpt-goal-composer:'+tabId;
 const objective='  Explicit user objective\n\nKeep exact whitespace  ';
 function fixture() {
   const data:Record<string,any>={},events:any[]=[],messages:any[]=[],writes:Record<string,any>[]=[];
-  let time=1000000,sequence=0,failSet=false,failJournal=false;
+  let time=1000000,sequence=0,failSet=false,failJournal=false,oldTabOpen=true,newTabOpen=true;
   const context=createContext({URL});
   for(const name of ['goal-policy','goal-store'])runInContext(readFileSync(`extension/${name}.js`,'utf8'),context);
   const options={
@@ -18,7 +18,7 @@ function fixture() {
       if(failSet)throw Error('Synthetic atomic write failure');
       writes.push(structuredClone(values));Object.assign(data,structuredClone(values));
     }},
-    tabs:{get:async(id:number)=>({id,url:saved}),sendMessage:async(tabId:number,message:any)=>{
+    tabs:{get:async(id:number)=>({id,url:saved}),query:async()=>[...(oldTabOpen?[{id:7,url:saved}]:[]),...(newTabOpen?[{id:8,url:saved}]:[])],sendMessage:async(tabId:number,message:any)=>{
       messages.push({tabId,message});return {ok:true};
     }},
     appendJournal:async(event:any)=>{if(failJournal)throw Error('Synthetic journal failure');events.push(structuredClone(event));},
@@ -38,7 +38,31 @@ function fixture() {
   }
   return {data,events,messages,writes,store,fresh,intent,proof,
     clock:(next:number)=>{time=next;},failSet:(next:boolean)=>{failSet=next;},
-    failJournal:(next:boolean)=>{failJournal=next;}};
+    failJournal:(next:boolean)=>{failJournal=next;},closeOldTab:()=>{oldTabOpen=false;},newTab:(open:boolean)=>{newTabOpen=open;}};
+}
+
+// A later, explicitly submitted manual goal may replace a stopped goal with
+// an unresolved intent or click, while retaining the old record and its fence.
+for (const status of ['intent','clicked']) {
+  const env=fixture();
+  const old={id:'old-goal',url:saved,phase:'stopped',
+    reason:'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском',
+    operation:{id:'old-op',status,createdAt:999000,tabId:7}};
+  env.data[goalKey(saved)]=structuredClone(old);
+  env.data[composerKey(7)]={id:'old-goal',phase:'bound',binding:{url:saved}};
+  const armId=await env.intent(7,saved);
+  const proof=env.proof(armId);
+  env.clock(1000300);
+  await assert.rejects(()=>env.store.composerBind(proof),/не подтверждена/);
+  assert.deepEqual(env.data[goalKey(saved)],old);
+  await env.store.composerRequest({tabId:7,armId,requestId:proof.requestId,startedAt:proof.startedAt,url:saved,
+    submission:{userId:proof.userId,userText:objective}});
+  const bound=await env.store.composerBind(proof);
+  assert.equal(bound.goal.id,armId);
+  assert.equal(bound.goal.phase,'waiting');
+  assert.deepEqual(env.data['chatgpt-goal-retired:old-goal'],old);
+  assert.equal(env.messages.length,0,'manual adoption never dispatches the old operation');
+  assert.equal((await env.store.check({url:saved,tabId:7,id:'old-goal',operationId:'old-op'})).ok,false);
 }
 
 // Arming and exact send intent are durable authorization only, with no draft
@@ -172,6 +196,48 @@ for(const target of [root,other]) {
   assert.equal(env.data[goalKey(saved)].phase,'stopped');
   assert.equal(env.data[goalKey(saved)].goal,objective,'the durable objective remains available');
   assert.equal(env.messages.length,0);
+}
+
+// Closing a tab removes its binding without silently converting a live,
+// blocked, paused, or explicitly stopped Goal into a different state.
+for(const phase of ['waiting','blocked','paused','stopped']) {
+  const env=fixture(),armId=await env.intent(7,saved);
+  await env.store.composerBind({...env.proof(armId),firstTurn:false});
+  env.data[goalKey(saved)].phase=phase;
+  env.data[goalKey(saved)].reason=phase==='blocked'?'Unknown retry outcome':'';
+  const before=structuredClone(env.data[goalKey(saved)]);
+  await env.store.composerDisarm({tabId:7,preserveBoundGoal:true});
+  assert.deepEqual(env.data[goalKey(saved)],before,`closing tab preserves ${phase} Goal`);
+  assert.equal(env.data[composerKey(7)],null);
+  assert.equal(env.events.at(-1).kind,'goal.composer_detached');
+  assert.equal(env.messages.length,0,'closing tab never dispatches');
+}
+{
+  const env=fixture(),armId=await env.intent(7,saved);
+  await env.store.composerBind({...env.proof(armId),firstTurn:false});
+  await env.store.composerDisarm({tabId:7,preserveBoundGoal:true});
+  await assert.rejects(()=>env.store.composerDisarm({tabId:7,armId:'wrong'}));
+  assert.equal(env.data[goalKey(saved)].phase,'waiting');
+  await env.store.composerDisarm({tabId:7,armId});
+  assert.equal(env.data[goalKey(saved)].phase,'stopped','a late explicit switch-off still wins over close');
+  assert.equal(env.data['chatgpt-goal-closed-composer:7'],null);
+  assert.equal(env.messages.length,0);
+}
+{
+  const env=fixture(),armId=await env.intent(7,saved);
+  await env.store.composerBind({...env.proof(armId),firstTurn:false});
+  const goal=env.data[goalKey(saved)];goal.phase='preparing';
+  goal.operation={id:'reserved-continuation',kind:'continuation',text:'retry',tabId:7,status:'reserved',createdAt:1000100};
+  await env.store.composerDisarm({tabId:7,preserveBoundGoal:true});
+  assert.equal((await env.store.recoverTab({id:8,url:saved})).ok,false,'a live owner tab keeps its reservation');
+  env.closeOldTab();env.newTab(false);
+  assert.equal((await env.store.recoverTab({id:8,url:saved})).ok,false,'a closed destination cannot acquire the reservation');
+  env.newTab(true);assert.equal((await env.store.recoverTab({id:8,url:saved})).ok,true);
+  assert.equal(env.data[goalKey(saved)].operation.tabId,8);assert.equal(env.messages.length,1);
+  assert.equal(env.messages[0].message.operationId,'reserved-continuation','reopen retains the same reservation');
+  env.data[goalKey(saved)].operation.status='intent';
+  assert.equal((await env.store.recoverTab({id:8,url:saved})).ok,false,'an uncertain intent is never redelivered');
+  assert.equal(env.messages.length,1);
 }
 
 // Native rich links serialize as Markdown after the user sends them. Their
@@ -441,3 +507,16 @@ for(const scenario of ['text','url','before-arm','late-after-intent','no-body','
  assert.equal((await env.store.composerRequest(wire)).ok,false,'old arm candidate cannot attach to refreshed arm');
 }
 console.log('Pre-intent request observation: durable exact candidate, intent/native proof gates, ambiguity retention and cancellation passed.');
+
+// Exercise the worker's actual tab-close listener, not just the store API.
+{
+ const worker=readFileSync('extension/service-worker.js','utf8');
+ const from=worker.indexOf('chrome.tabs.onRemoved.addListener('),to=worker.indexOf('\n\nasync function restoreStatusAnimation()',from);
+ assert.ok(from>0&&to>from);let listener:any,called:any;
+ const world=createContext({chrome:{tabs:{onRemoved:{addListener:(fn:any)=>{listener=fn}}}},
+  goalController:{composerDisarm:async(value:any)=>{called=value}},journalInBackground:()=>{},
+  lastNotificationFingerprintByTab:new Map(),legacyHandoffStatusFences:new Map(),manualRequestReceiptsByTab:new Map(),
+  forgetRequestReceipts:async()=>{},statusAnimation:{remove(){}}});
+ runInContext(worker.slice(from,to),world);listener(7);await new Promise<void>(resolve=>setImmediate(resolve));
+ assert.deepEqual(structuredClone(called),{tabId:7,preserveBoundGoal:true});
+}

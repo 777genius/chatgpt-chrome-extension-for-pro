@@ -20,7 +20,7 @@ async function fixture(){
   chrome:{tabs:{get:async()=>({id:7,url:live})},scripting:{executeScript:async({args}:V)=>{
    const result=structuredClone(args.length>2?original:latest);await afterProbe?.();return [{result}];
   }}}});
- for(const file of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+file,'utf8'),ctx);
+ for(const file of ['goal-policy.js','goal-lineage.js','goal-store.js'])runInContext(readFileSync('extension/'+file,'utf8'),ctx);
  ctx.dependencies={storage:{get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>{if(failSave&&v['chatgpt-goal:'+url])throw Error('Synthetic disk failure');Object.assign(data,structuredClone(v));}},
   tabs:{get:async()=>({id:7,url:live}),sendMessage:async(id:number,message:V)=>{messages.push({id,message});return {ok:true};}},
   appendJournal:async(e:V)=>{events.push(structuredClone(e));return {ok:true};},now:()=>200000,uuid:()=> 'late-arm'};
@@ -121,5 +121,33 @@ console.log('Late Goal recovery: atomic original+all supplements, original limit
 {
  const f=await fixture();f.journalError();
  assert.equal((await f.recover()).pending,true,'incomplete journal evidence cannot authorize Goal adoption');
+ assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.messages.length,0);
+}
+{
+ const f=await fixture();f.requests[2].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:f.users[2].userText});
+ const r=await f.recover(),g=f.data['chatgpt-goal:'+url];
+ assert.equal(r.ok,true);assert.equal(g.expectedPromptKey,f.users[2].promptKey);
+ assert.deepEqual(g.supplements.map((item:V)=>item.text),['First clarification']);
+ assert.equal(f.messages.length,0);
+}
+{
+ const f=await fixture();f.requests[2].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:'wrong'});
+ assert.equal((await f.recover()).pending,true);
+ assert.equal(f.data['chatgpt-goal:'+url],undefined);
+}
+{
+ const f=await fixture();f.requests[1].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:f.users[1].userText});
+ const r=await f.recover(),g=f.data['chatgpt-goal:'+url];
+ assert.equal(r.ok,true,'a verified retry followed by a manual message must not strand the original Goal');
+ assert.deepEqual(g.supplements.map((item:V)=>item.text),['Second clarification']);
+ assert.equal(g.expectedPromptKey,f.users[2].promptKey);assert.equal(f.messages.length,0);
+}
+{
+ const f=await fixture();f.requests[1].operationId='retry-op';
+ f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:'different'});
+ assert.equal((await f.recover()).pending,true,'an unproven intermediate retry never binds');
  assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.messages.length,0);
 }

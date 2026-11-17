@@ -41,6 +41,49 @@ async function fixture(witness=false){
 {
  const f=await fixture(true);assert.equal((await f.recover()).ok,true);assert.equal(f.data['chatgpt-goal:'+url].restoredIntent.confirmation,'request-body');
 }
+for(const scenario of ['valid','no-consent','wrong-link','wrong-allocation','wrong-first-id','duplicate-allocation','conflicting-allocation']) {
+ const f=await fixture(),intent=f.data['chatgpt-goal-composer:7'].intent;
+ intent.text='Formatted label';
+ intent.linkTargets=['https://example.test/source'];
+ const initial={userId:'original-native-user',userText:'Formatted [label](https://example.test/source)',userSentAtMs:1100,promptKey:prefix+'initial'};
+ f.history.recoveryTimeline.unshift(initial);
+ f.events.push({kind:'completion.url_allocated',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'root-request',attemptId:'1100',promptKey:initial.promptKey});
+ if(scenario==='wrong-link')initial.userText='Formatted [label](https://example.test/other)';
+ if(scenario==='wrong-allocation')f.events.at(-1)!.promptKey=prefix+'other';
+ if(scenario==='wrong-first-id')f.native.firstTurnMessageIds=['other'];
+ if(scenario==='duplicate-allocation')f.events.push({...f.events.at(-1)});
+ if(scenario==='conflicting-allocation')f.events.push({...f.events.at(-1),promptKey:prefix+'different'});
+ f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ const r=await f.recover(scenario!=='no-consent');
+ if(scenario==='valid'||scenario==='duplicate-allocation'){
+  assert.equal(r.ok,true,'explicit restore accepts uniquely bound virtualized rich original');
+  assert.equal(f.data['chatgpt-goal:'+url].goal,'Formatted label');
+  assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+ }else{assert.equal(r.pending,true,scenario);assert.equal(f.data['chatgpt-goal:'+url],undefined,scenario);}
+ assert.equal(f.dispatched.length,0,'original message is never resent');
+}
+for(const scenario of ['valid','no-consent','changed-text','added-text','changed-link','reordered-links','duplicate-idempotent','duplicate-conflict','duplicate-source','duplicate-target']) {
+ const f=await fixture(),intent=f.data['chatgpt-goal-composer:7'].intent;
+ intent.text='Read label and details';intent.linkTargets=['https://example.test/one','https://example.test/two'];
+ const initial={userId:'original-native-user',userText:'Read [label](https://example.test/one) and [details](https://example.test/two)',userSentAtMs:1100,promptKey:prefix+'initial'};
+ f.history.recoveryTimeline.unshift(initial);
+ f.events.push({kind:'completion.url_allocated',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'root-request',attemptId:'1100',promptKey:initial.promptKey});
+ if(scenario==='changed-text')initial.userText=initial.userText.replace('details','different');
+ if(scenario==='added-text')initial.userText+=' extra instruction';
+ if(scenario==='changed-link')initial.userText=initial.userText.replace('/one','/other');
+ if(scenario==='reordered-links')intent.linkTargets.reverse();
+ if(scenario==='duplicate-idempotent')f.events.push({...f.events.at(-1)});
+ if(scenario==='duplicate-conflict')f.events.push({...f.events.at(-1),promptKey:prefix+'other'});
+ if(scenario==='duplicate-source')f.events.push({...f.events.at(-1),sourceUrl:'https://chatgpt.com/c/other'});
+ if(scenario==='duplicate-target')f.events.push({...f.events.at(-1),targetUrl:'https://chatgpt.com/c/other'});
+ f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ const r=await f.recover(scenario!=='no-consent');
+ if(scenario==='valid'||scenario==='duplicate-idempotent') {
+  assert.equal(r.ok,true,scenario);assert.equal(f.data['chatgpt-goal:'+url].goal,intent.text);
+  assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2);
+ } else {assert.equal(r.pending,true,scenario);assert.equal(f.data['chatgpt-goal:'+url],undefined,scenario);}
+ assert.equal(f.dispatched.length,0,'original rich message is never replayed');
+}
 for(const marker of [false,true]){
  const f=await fixture();Object.assign(f.native,{turnStatus:'complete',generating:false,assistantCompleted:true,assistantPhase:'final_answer',
   assistantKey:'final-answer',goalResponse:marker?'GOAL_COMPLETE':'Work remains',goalRawExact:marker});
@@ -105,6 +148,27 @@ for(const broken of ['foreign-source','wrong-operation','missing-request','manua
  assert.equal((await f.recover()).pending,true,broken);assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.dispatched.length,0);
 }
 console.log('Goal restoration across handoff: exact operation lineage, explicit legacy/exact-body consent, original budgets, manual successor supersession and unknown-send fences passed.');
+{
+ const f=await fixture(),source='https://chatgpt.com/c/source-fixture',manual='https://chatgpt.com/c/manual-fixture';
+ f.events[1].changes.url=source;f.events[1].sourceUrl=source;
+ f.events.splice(2,0,
+  {kind:'handoff.navigating',tabId:7,sourceUrl:source,operationId:'failed-handoff',text:'Retained original context'},
+  {kind:'handoff.failed',tabId:7,sourceUrl:source,operationId:'failed-handoff',reason:'Не удалось дождаться готовности нового чата'},
+  {kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'manual-bridge',eventAt:2100},
+  {kind:'tab.updated',tabId:7,changes:{url:manual}},
+  {kind:'handoff.navigating',tabId:7,sourceUrl:manual,operationId:'handoff-id',text:'Retained manual successor context'},
+  {kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'handoff-request',eventAt:3000,operationId:'handoff-id'},
+  {kind:'tab.updated',tabId:7,changes:{url},operationId:'handoff-id'},
+  {kind:'handoff.sent',tabId:7,sourceUrl:manual,targetUrl:url,operationId:'handoff-id'});
+ f.events.forEach((e:V,i:number)=>{e.sequence=i+1;});
+ f.data['handoff:7']={id:'handoff-id',stage:'sent',sourceUrl:manual,targetUrl:url,
+  acceptance:{messageId:'accepted-handoff-user',targetUrl:url},text:'Retained manual successor context'};
+ assert.equal((await f.recover()).pending,true,'manual bridge cannot create automatic consent');
+ assert.equal((await f.recover(true)).ok,true,'explicit request restores through a proven failed handoff and manual bridge');
+ const g=f.data['chatgpt-goal:'+url];assert.equal(g.goal,'Exact original objective');assert.equal(g.originUrl,source);
+ assert.equal(g.sourceContexts.length,2);assert.equal(g.supplements.length,2);
+ assert.equal(f.dispatched.length,0,'an active response is not interrupted or resent');
+}
 {
  const f=await fixture(true);const origin=transfer(f,'sent');
  await f.store.composerObserveOrigin({tabId:7,armId:'root-arm',url:origin,requestId:'root-request',startedAt:1100,userId:'original-native-user',userText:'Exact original objective',userSentAtMs:1100,firstMessageVerified:true,nativeVerified:true});

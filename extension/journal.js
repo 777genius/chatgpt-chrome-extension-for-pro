@@ -43,7 +43,7 @@ function render() {
     article.append(details); root.append(article);
   }
   const start = journal?.meta?.startedAt;
-  document.getElementById('status').textContent = `${entries.length} событий · журнал с ${start ? new Date(start).toLocaleString() : '—'}\nПрошлые автоповторы до начала журнала недоступны.${journal?.storageError ? '\n⚠️ Ошибка записи: ' + journal.storageError : ''}`;
+  document.getElementById('status').textContent = `${entries.length} событий · журнал с ${start ? new Date(start).toLocaleString() : '—'}\nПрошлые автоповторы до начала журнала недоступны.${journal?.storage?.degraded ? '\n⚠️ Хранилище Chrome не принимает запись: данные временно пишутся в резервное хранилище и вернутся в основное после перезапуска Chrome.' : ''}${journal?.storageError ? '\n⚠️ Ошибка записи: ' + journal.storageError : ''}`;
   document.getElementById('more').hidden = entries.length <= limit;
 }
 async function refresh() {
