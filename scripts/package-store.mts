@@ -12,7 +12,7 @@ const runtimeFiles=[
   'content-script.js','deferred-task-status.js','goal-inline.js','goal-lineage.js','goal-request-proof.js','reply-probe.js','goal-policy.js','goal-store.js',
   'handoff-history.js','handoff-renamer.js','handoff-title.js','journal-store.js','journal.html','journal.js',
   'legacy-handoff-status.js','manifest.json','memory-maintenance.js','offscreen.html','offscreen.js',
-  'page-probe.js','popup.html','popup.js','request-receipts.js','service-worker.js',
+  'page-probe.js','popup.html','popup.js','request-receipts.js','resilient-storage.js','service-worker.js',
   'status-animation.js','status-indicator.js','status-store.js','watcher-bootstrap.js',
   'icons/icon16.png','icons/icon48.png','icons/icon128.png',
   'icons/status-error.png','icons/status-error.svg','icons/status-success.png','icons/status-success.svg'

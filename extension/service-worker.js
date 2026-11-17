@@ -1,4 +1,5 @@
 'use strict';
+importScripts('resilient-storage.js');
 importScripts('page-probe.js');
 importScripts('handoff-history.js');
 importScripts('completion-probe.js');
