@@ -3,8 +3,8 @@ import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
 
 const IO_ERROR='IO error: /x/040152.ldb: Unable to create writable file (ChromeMethodBFE: 9::NewWritableFile::8)';
-const load=(chrome:unknown)=>{
-  const context=createContext({chrome,console:{warn(){},info(){},error(){}},structuredClone,Object,Date,JSON,Promise,Symbol,Proxy,Reflect});
+const load=(chrome:unknown,extra:Record<string,unknown>={})=>{
+  const context=createContext({chrome,...extra,console:{warn(){},info(){},error(){}},structuredClone,Object,Date,JSON,Promise,Symbol,Proxy,Reflect});
   runInContext(readFileSync('extension/resilient-storage.js','utf8'),context);
   return context as any;
 };
@@ -34,7 +34,7 @@ function fakeOverlay() {
     async lookup(keys:string[]){return new Map(keys.filter(key=>rows.has(key)).map(key=>[key,rows.get(key)]));},
     async commit(items:[string,any][]){if(this.broken)throw new Error('overlay down');for(const [key,record] of items)rows.set(key,structuredClone(record));},
     async clear(revisions:Map<string,unknown>){for(const [key,rev] of revisions)if(rows.get(key)?.rev===rev)rows.delete(key);},
-    async size(){if(this.unreadable)throw new Error('overlay unreadable');return rows.size;},
+    async hasRecords(){if(this.unreadable)throw new Error('overlay unreadable');return rows.size>0;},
     unreadable:false};
 }
 const sharedLock=()=>{let tail:Promise<unknown>=Promise.resolve();return (fn:()=>Promise<unknown>)=>{const run=tail.then(fn);tail=run.catch(()=>{});return run;};};
@@ -114,7 +114,7 @@ assert.equal(lib.isStorageFault(new Error('QUOTA_BYTES quota exceeded')),false,'
   await Promise.all(Array.from({length:20},(_,index)=>store.set({counter:index})));
   assert.deepEqual(await store.get('counter'),{counter:19},'concurrent writes during a fault keep submission order');
 }
-// Several contexts (service worker, popup, journal page) each own a wrapper over the same stores.
+// Several contexts (service worker, popup) each own a wrapper over the same stores.
 {
   // A context that never heard about the overlay must not write past it and be overwritten by the copy-back.
   const primary=fakePrimary(),overlay=fakeOverlay(),lock=sharedLock();
@@ -140,7 +140,7 @@ assert.equal(lib.isStorageFault(new Error('QUOTA_BYTES quota exceeded')),false,'
   assert.equal(overlay.rows.size,0);
 }
 {
-  // Even without the lock a record that changed after the copy-back snapshot is kept, never cleared.
+  // Even if a record were changed by a context outside the lock, a record that changed after the copy-back snapshot is kept, never cleared.
   const primary=fakePrimary(),overlay=fakeOverlay(),store=make(primary,overlay);
   primary.broken=true;
   await store.set({k:'old'});
@@ -170,6 +170,45 @@ assert.equal(lib.isStorageFault(new Error('QUOTA_BYTES quota exceeded')),false,'
   const chrome:any={storage:Object.freeze({local:fakePrimary()})};
   const {ChatGPTStorage:failed}=load(chrome);
   assert.equal(failed.status(),null);
+}
+{
+  // Deterministic version of the rollback race: the popup's copy-back has taken its snapshot and is
+  // about to write it when the worker persists a newer record. Without the Web Lock the stale snapshot lands last.
+  const scenario=async(lock:any)=>{
+    const primary=fakePrimary(),overlay=fakeOverlay(),worker=make(primary,overlay,lock);
+    primary.broken=true;
+    await worker.set({meta:{sequence:149},intent:'op-1'});
+    primary.broken=false;
+    let release!:()=>void,reached!:()=>void,gated=false;
+    const gate=new Promise<void>(resolve=>{release=resolve;}),atGate=new Promise<void>(resolve=>{reached=resolve;});
+    const realSet=primary.set;
+    primary.set=async(items:any)=>{if(Object.hasOwn(items,'intent')&&!gated){gated=true;reached();await gate;}return realSet(items);};
+    const popup=make(primary,overlay,lock);
+    await atGate;
+    const newer=worker.set({intent:'op-2 persisted before click'});
+    await new Promise(resolve=>setTimeout(resolve,25));
+    release();
+    await newer;await popup.recover();
+    return {primary,overlay};
+  };
+  const shared=await scenario(sharedLock());
+  assert.equal(shared.primary.data.intent,'op-2 persisted before click','a newer record is never rolled back by another context\'s copy-back');
+  assert.equal(shared.overlay.rows.size,0);
+  const {ChatGPTStorage:withLocks}=load(undefined,{navigator:globalThis.navigator});
+  assert.ok(globalThis.navigator?.locks,'Node provides navigator.locks');
+  const realLocks=await (async()=>{
+    const primary=fakePrimary(),overlay=fakeOverlay(),make2=()=>withLocks.create({primary,overlay,probeIntervalMs:0});
+    const worker=make2();primary.broken=true;
+    await worker.set({meta:{sequence:149},intent:'op-1'});primary.broken=false;
+    let release!:()=>void,reached!:()=>void,gated=false;
+    const gate=new Promise<void>(resolve=>{release=resolve;}),atGate=new Promise<void>(resolve=>{reached=resolve;});
+    const realSet=primary.set;
+    primary.set=async(items:any)=>{if(Object.hasOwn(items,'intent')&&!gated){gated=true;reached();await gate;}return realSet(items);};
+    const popup=make2();await atGate;
+    const newer=worker.set({intent:'op-2'});await new Promise(resolve=>setTimeout(resolve,25));release();await newer;await popup.recover();
+    return primary.data.intent;
+  })();
+  assert.equal(realLocks,'op-2','the default navigator.locks lock serializes the two wrappers as well');
 }
 console.log('Resilient storage: fault classification, overlay writes/deletes, merged reads, copy-back and fail-closed fences passed.');
 

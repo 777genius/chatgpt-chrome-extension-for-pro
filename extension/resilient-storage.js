@@ -13,8 +13,7 @@
 // silent gap" still holds, and a real failure (overlay unavailable too) still
 // rejects exactly like before.
 //
-// The service worker, the popup and the journal page each load their own copy of
-// this wrapper. Every operation that can touch the overlay therefore runs under one
+// The service worker and the popup each load their own copy of this wrapper. Every operation that can touch the overlay therefore runs under one
 // origin-wide Web Lock, and the overlay content is re-read under that lock, so two
 // contexts can never copy back, clear or overwrite each other's records.
 (function resilientStorage() {
@@ -41,22 +40,29 @@
     try { return JSON.stringify(value)?.length || 0; } catch { return 0; }
   }
 
+  let warnedNoLocks = false;
   function defaultLock(fn) {
     const locks = globalThis.navigator?.locks;
-    return locks ? locks.request(LOCK_NAME, fn) : fn();
+    if (locks) return locks.request(LOCK_NAME, fn);
+    // Chrome 116+ (the minimum version) always has Web Locks. Without them contexts
+    // are only ordered inside themselves, so say so once.
+    if (!warnedNoLocks) { warnedNoLocks = true; try { console.warn('ChatGPT storage: navigator.locks is unavailable, overlay access is not serialized across extension contexts.'); } catch {} }
+    return fn();
   }
 
   // Overlay contract: entries() -> Map(key -> {deleted}|{value}, each with a `rev`);
   // lookup(keys) -> same for the given keys; commit([[key, record]]) is atomic and
   // stores the records as given; clear(Map(key -> rev)) deletes a key only while it
-  // still carries that rev; size().
+  // still carries that rev; hasRecords() -> boolean, constant time.
   function createIndexedDbOverlay({ indexedDB = globalThis.indexedDB, name = 'chatgpt-resilient-storage' } = {}) {
     const STORE = 'overlay';
     let opened = null;
     function open() {
       if (opened) return opened;
       opened = new Promise((resolve, reject) => {
-        const request = indexedDB.open(name, 1);
+        let request;
+        // A synchronous throw must not leave a rejected promise cached forever.
+        try { request = indexedDB.open(name, 1); } catch (error) { opened = null; reject(error); return; }
         request.onupgradeneeded = () => request.result.createObjectStore(STORE, { keyPath: 'key' });
         request.onsuccess = () => {
           const db = request.result;
@@ -70,9 +76,12 @@
       return opened;
     }
     async function transaction(mode, run) {
-      const db = await open();
+      let db = await open(), tx;
+      try { tx = db.transaction(STORE, mode); } catch {
+        // The connection was closed under us (InvalidStateError); reopen once.
+        opened = null; db = await open(); tx = db.transaction(STORE, mode);
+      }
       return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE, mode);
         const out = {};
         tx.oncomplete = () => resolve(out.value);
         tx.onerror = event => reject(tx.error || event?.target?.error || new Error('IndexedDB overlay transaction failed'));
@@ -99,7 +108,7 @@
       clear: revisions => transaction('readwrite', store => {
         for (const [key, rev] of revisions) store.get(key).onsuccess = event => { if (event.target.result?.rev === rev) store.delete(key); };
       }),
-      size: () => transaction('readonly', (store, out) => { store.count().onsuccess = event => { out.value = event.target.result; }; })
+      hasRecords: () => transaction('readonly', (store, out) => { store.openKeyCursor().onsuccess = event => { out.value = Boolean(event.target.result); }; })
     };
   }
 
@@ -116,13 +125,12 @@
     // its content is unknown, and writes are refused until it can be.
     async function refresh() {
       if (!overlay) return;
-      let pending;
-      try { pending = await overlay.size(); } catch (error) {
+      let next;
+      try { next = await overlay.hasRecords(); } catch (error) {
         state.unknown = true; state.reason = `IndexedDB overlay unreadable: ${String(error?.message || error)}`;
         return;
       }
-      state.unknown = false;
-      const next = pending > 0;
+      if (state.unknown) { state.unknown = false; if (!state.degraded) state.reason = ''; }
       if (next === state.degraded) return;
       state.degraded = next;
       if (next) { state.since = now(); state.reason = 'IndexedDB overlay holds records not yet copied back'; } else { state.since = 0; state.reason = ''; }
@@ -143,7 +151,7 @@
       for (let i = 0; i < removes.length; i += FLUSH_CHUNK_KEYS) await primary.remove(removes.slice(i, i + FLUSH_CHUNK_KEYS).map(([key]) => key));
       await overlay.clear(new Map([...rows].map(([key, record]) => [key, record.rev])));
       // A record that changed after the snapshot keeps its newer rev and stays.
-      return (await overlay.size()) === 0;
+      return !(await overlay.hasRecords());
     }
 
     // Returns true when the primary store is writable and the overlay is empty.
@@ -173,7 +181,13 @@
         });
       } catch {}
     })();
-    if (channel) channel.onmessage = () => { ready.then(() => exclusive(refresh)).catch(() => {}); };
+    let refreshQueued = false;
+    // Many writes in another context produce many messages; one refresh covers them all.
+    if (channel) channel.onmessage = () => {
+      if (refreshQueued) return;
+      refreshQueued = true;
+      ready.then(() => exclusive(() => { refreshQueued = false; return refresh(); })).catch(() => { refreshQueued = false; });
+    };
 
     async function mergedGet(keys) {
       const list = keyList(keys);
@@ -226,7 +240,7 @@
         const list = keyList(keys) || [];
         return ready.then(() => exclusive(() => write(() => primary.remove(keys), list.map(key => [key, { deleted: true }]))));
       },
-      recover: () => ready.then(() => exclusive(async () => { await refresh(); return tryRecover(true); })),
+      recover: () => ready.then(() => exclusive(async () => { await refresh(); return state.unknown ? false : tryRecover(true); })),
       status: () => ({ ...state })
     });
   }
