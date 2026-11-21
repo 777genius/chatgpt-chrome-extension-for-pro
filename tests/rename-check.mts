@@ -395,6 +395,21 @@ for(const mode of ['streaming','late-menu'] as const) {
   assert.ok(h.time-before<5000,'an unavailable title menu does not delay the Goal');
   assert.equal(h.record.titlePrepareAttempts,0);assert.equal(h.saved,0);
 }
+// A ready saved chat with an unavailable Rename item must exercise the
+// post-readiness menu deadline, not just the native readiness probe.
+{
+  const h=harness('late-menu');
+  h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-menu'}};
+  h.advance(11000);
+  const before=h.time;
+  const result=await h.rename({goalOperationId:'goal-menu'});
+  assert.equal(result.waiting,true,'an unavailable Rename item remains a no-click wait');
+  assert.ok(h.time-before<5000,'menu selection cannot delay a reserved Goal continuation for a minute');
+  assert.equal(h.opened,1,'ready chat must actually open the native menu');
+  assert.equal(h.selected,0);
+  assert.equal(h.saved,0);
+  assert.equal(h.sent,0);
+}
 {
   const h=harness('no-ack');await h.rename();
   assert.ok(h.record.titleSaveStartedAt);assert.equal(h.saved,1);
