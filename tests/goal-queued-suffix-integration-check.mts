@@ -24,6 +24,9 @@ await store.completion({url,tabId:7,completionKey:oldPrompt+'|blocked',promptKey
 busy=false;await store.control({action:'resume',url,tabId:7});
 assert.equal(data['chatgpt-goal:'+url].resumeRequested,true);
 assert.equal(sent.length,1,'an idle blocked Goal must wait for manual-turn reconciliation');
+const queuedManual=await store.manual({url,tabId:7,requestId:'later-manual',startedAt:sentAt+100,eventAt:sentAt+100,text:'Later follow-up',baselineKey:oldPrompt});
+assert.equal(queuedManual.ok,false);assert.equal(queuedManual.pending,true);
+assert.equal(data['chatgpt-goal:'+url].phase,'blocked');assert.equal(data['chatgpt-goal:'+url].resumeRequested,true,'a manual request cannot bypass earlier unbound follow-ups');
 clock=sentAt+1;
 const sentAt2=sentAt+25000,receipt={requestId:'request-2',startedAt:sentAt2,submittedUserId:'manual-user-2'};
 clock=sentAt2+1;

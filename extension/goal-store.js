@@ -853,6 +853,11 @@
           !record.manualOverride&&(record.reason==='Восстановление запроса завершилось ошибкой'||
             record.resumeRequested===true&&record.reason==='Модель ответила точным маркером GOAL_BLOCKED');
         if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase)&&!retryBlocked)return {ok:false};
+        // A queued blocked Goal must first reconcile the entire witnessed
+        // manual timeline. Staging only this request could skip an earlier
+        // already-sent follow-up and accidentally release the Goal.
+        if(record.phase==='blocked'&&record.resumeRequested===true&&
+            record.reason==='Модель ответила точным маркером GOAL_BLOCKED')return {ok:false,pending:true};
         const supplement=typeof requestId==='string'&&requestId&&Number.isFinite(startedAt)&&Number.isFinite(eventAt)&&
           startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
           typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'))&&

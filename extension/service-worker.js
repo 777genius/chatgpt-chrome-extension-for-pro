@@ -1767,9 +1767,16 @@ async function reconcileQueuedGoalResume(tabId,url) {
   if(JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
       fresh?.result?.userId!==n.userId||fresh.result.userText!==n.userText||fresh.result.userSentAtMs!==n.userSentAtMs||fresh.result.promptKey!==n.promptKey||fresh.result.assistantKey!==n.assistantKey||
       fresh.result.goalResponse!==n.goalResponse||fresh.result.goalRawExact!==n.goalRawExact||fresh.result.goalMarkerPending!==n.goalMarkerPending||
+      fresh.result.isLatest!==true||fresh.result.isReadOnly!==false||fresh.result.hasError||
       fresh.result.turnStatus!=='complete'||fresh.result.generating!==false||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
   if(goal.reason==='Модель ответила точным маркером GOAL_BLOCKED'&&n.promptKey===goal.expectedPromptKey&&
       goal.lastCompletionKey===n.promptKey+'|'+n.assistantKey) {
+    const current=await readJournal(),tail=current?.events?.filter(e=>e.sequence>=requestSequence)||[];
+    if(!current?.ok||current.storageError||tail.length!==current.meta?.sequence-requestSequence+1||
+        tail.some((e,i)=>e.sequence!==requestSequence+i)||tail.some(e=>e.kind==='request.started'&&
+          (e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requestSequence)||
+        JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||
+        JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt))return pending();
     return goalController.control({action:'resume',url,tabId,verifiedResumeRecord:goal});
   }
   if(!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(goal.reason))return pending();
@@ -1824,8 +1831,14 @@ async function reconcileQueuedGoalResume(tabId,url) {
   const [last]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
   if(last?.result?.userId!==n.userId||last.result.userText!==n.userText||last.result.userSentAtMs!==n.userSentAtMs||last.result.promptKey!==n.promptKey||last.result.assistantKey!==n.assistantKey||
       last.result.goalResponse!==n.goalResponse||last.result.goalRawExact!==n.goalRawExact||last.result.goalMarkerPending!==n.goalMarkerPending||
+      last.result.isLatest!==true||last.result.isReadOnly!==false||last.result.hasError||
       last.result.turnStatus!=='complete'||last.result.generating!==false||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
       ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
+  const finalJournal=await readJournal(),finalSuffix=finalJournal?.events?.filter(e=>e.sequence>=requestSequence)||[];
+  if(!finalJournal?.ok||finalJournal.storageError||finalSuffix.length!==finalJournal.meta?.sequence-requestSequence+1||
+      finalSuffix.some((e,i)=>e.sequence!==requestSequence+i)||finalSuffix.some(e=>e.kind==='request.started'&&
+        (e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requestSequence)||
+      JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt))return pending();
   const completed=await goalController.completion({url,tabId,completionKey:n.promptKey+'|'+n.assistantKey,promptKey:n.promptKey,userId:n.userId,
     response:n.goalResponse||'',rawExact:n.goalRawExact===true,nativeMarkerPending:n.goalMarkerPending===true,nativeVerified:true});
   return completed.pendingMarker?pending():completed;
