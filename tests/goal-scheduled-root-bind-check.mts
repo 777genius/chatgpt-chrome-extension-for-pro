@@ -26,8 +26,7 @@ async function run(variant:Variant) {
  const user={userId:'native-user',userText:'Original objective',userSentAtMs:startedAt,
    promptKey:'/c/scheduled-recovery|native-user'};
  const native:any={ok:true,url,isLatest:true,isReadOnly:false,...user,
-   userVisibleText:user.userText,firstTurn:true,firstTurnMessageIds:[user.userId],
-   recoveryTimeline:[user],firstTurn:false};
+   userVisibleText:user.userText,recoveryTimeline:[user],firstTurn:false};
  if(variant==='missing-history')native.recoveryTimeline=[];
  const events:any[]=[
    {kind:'request.started',tabId:7,sourceUrl:rootIntent?root:url,
@@ -46,12 +45,12 @@ async function run(variant:Variant) {
        if(args.length===2)return[{result:variant==='other-probe'?{ok:false,reason:'native-turn-missing'}:
          {ok:false,reason:'bound-messages-missing'}}];
        scheduledFlags.push(args.at(-1)===true);
-       return[{result:structuredClone(native)}];
+       return[{result:{...structuredClone(native),isLatest:!Number.isFinite(args[3])}}];
      }}
    },
    goalController:{
      composerGet:async()=>{composerReads++;return structuredClone(
-       variant==='changed-composer'&&composerReads>=3?{...pending,phase:'armed'}:pending);},
+       variant==='changed-composer'&&composerReads>=2?{...pending,phase:'armed'}:pending);},
      composerObserveOrigin:async()=>{calls.push('observe');return{ok:true};},
      composerBind:async()=>{calls.push('bind');return{ok:true,record:{phase:'bound'}};},
      completion:async()=>{calls.push('complete');return{ok:true};},
@@ -68,8 +67,8 @@ async function run(variant:Variant) {
 {
  const f=await run('scheduled');
  assert.equal(f.result.ok,true);
- assert.deepEqual(f.calls,['observe','bind'],
-   'unchanged receipt can bind the original user without completing an assistant-only tail');
+ assert.deepEqual(f.calls,['bind'],
+   'the scheduled tail proves original identity only: no false native ACK or Goal completion');
  assert.deepEqual(f.scheduledFlags,[true,true],
    'both recovery probes inspect the exact scheduled native turn');
  assert.equal(f.probeCount,3,'ordinary probe fails before two scheduled recovery inspections');
