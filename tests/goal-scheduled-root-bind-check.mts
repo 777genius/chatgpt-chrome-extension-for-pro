@@ -78,6 +78,8 @@ for(const variant of ['missing-history','changed-composer','saved-chat','other-p
  assert.equal(f.result.pending,true,variant);
  assert.equal(f.calls.includes('bind'),false,variant);
  assert.equal(f.calls.includes('complete'),false,variant);
- assert.equal(f.probeCount,variant==='saved-chat'||variant==='other-probe'?1:variant==='missing-history'?2:3,variant);
+ // Missing history also invokes the independent submitted-body restoration
+ // probe; it must still refuse binding and completion.
+ assert.equal(f.probeCount,variant==='saved-chat'||variant==='other-probe'?1:3,variant);
 }
 console.log('Scheduled root Goal binding: unchanged receipt, identity-only assistant tail, no false completion, history and disarm fences passed.');
