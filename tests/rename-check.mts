@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
+type Mode = 'late-ack' | 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'no-header' | 'sidebar-no-header' | 'sidebar-hidden-no-header' | 'sidebar-outside-header' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,6 +28,7 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0, cancels = 0;
   let clickAt = 0;
+  let delayedCompletion:(()=>void)|null=null;
   let menuReady=mode!=='late-menu'&&!mode.startsWith('sidebar-');
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
@@ -79,41 +80,43 @@ function harness(mode: Mode = 'success') {
         const pathname=mode.startsWith('native')?`conversation/id/${id}/rename`:`${path}/${id}`;
         const request:Request={tabId:mode.endsWith('-wrong-tab')?8:7,method:mode==='native-patch'?'PATCH':mode.startsWith('native')||mode==='plural-post'?'POST':mode==='plural-get'?'GET':'PATCH',url:`https://chatgpt.com/backend-api/${pathname}`,requestId:'rename-1',requestBody:{raw}};
         before.forEach(fn=>fn(request));
-        complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'||mode.endsWith('-failed-ack')?503:200}));
+        const acknowledge=()=>complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'||mode.endsWith('-failed-ack')?503:200}));
+        if(mode==='late-ack')delayedCompletion=acknowledge;else acknowledge();
       });
     });
     document.body.append(menu);
   }
   actions.addEventListener('click',()=>openMenu());
+  if(mode==='no-header'||mode==='sidebar-no-header'||mode==='sidebar-hidden-no-header'||mode==='sidebar-outside-header')actions.remove();
   if(mode.startsWith('sidebar-')) {
     const row=document.createElement('div');row.setAttribute('data-sidebar-cycle-item','');
     row.innerHTML=`<a aria-current="page" href="${mode==='sidebar-wrong-chat'?'https://chatgpt.com/c/other':targetUrl}">Native saved chat</a><button id="saved-chat-menu" aria-haspopup="menu"><svg><use href="#ellipsis-horizontal" /></svg></button>`;
     const link=row.querySelector('a')!,trigger=row.querySelector('button')!;
     link.textContent=mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')?'Server stored title':document.title;
     trigger.addEventListener('click',()=>openMenu(trigger,true));document.body.append(row);
-    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')&&mode!=='sidebar-stale-visible') {
+    if(mode==='sidebar-hidden'||mode==='sidebar-hidden-no-header'||mode==='sidebar-outside-header'||mode==='sidebar-hidden-delayed-cancel'||mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')&&mode!=='sidebar-stale-visible') {
       link.hidden=true;trigger.hidden=true;
       const toggle=document.createElement('button');toggle.setAttribute('aria-expanded','false');toggle.innerHTML='<svg><use href="#codex-icon-sidebar-hidden-light-16" /></svg>';
-      if(mode==='sidebar-modal'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
-        const panel=document.createElement('aside');panel.id='native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
+      if(mode==='sidebar-modal'||mode==='sidebar-hidden-no-header'||mode==='sidebar-outside-header'||mode==='sidebar-native-title'||mode.startsWith('sidebar-stale')) {
+        const panel=document.createElement('aside');panel.id=mode==='sidebar-outside-header'?'browser-sidebar-popover':'native-sidebar-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.hidden=true;
         panel.append(row);document.body.append(panel);toggle.setAttribute('aria-controls',panel.id);
         const close=document.createElement('button');close.setAttribute('aria-controls',panel.id);close.hidden=true;panel.append(close);
         const setOpen=(open:boolean)=>{toggle.setAttribute('aria-expanded',String(open));close.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;close.hidden=!open;panel.hidden=!open;
           if(open)document.querySelector('header')!.setAttribute('inert','');else document.querySelector('header')!.removeAttribute('inert');};
         toggle.addEventListener('click',()=>setOpen(toggle.getAttribute('aria-expanded')!=='true'));close.addEventListener('click',()=>setOpen(false));
       }else toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-expanded')!=='true';toggle.setAttribute('aria-expanded',String(open));link.hidden=!open;trigger.hidden=!open;});
-      document.querySelector('header')!.append(toggle);
+      (mode==='sidebar-outside-header'?document.body:document.querySelector('header')!).append(toggle);
     }
   }
   document.querySelector('main button')!.addEventListener('click',()=>sent++);
   const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,KeyboardEvent:class extends window.Event{constructor(type:string,options:{key:string}){super(type);Object.defineProperty(this,'key',{value:options.key});}},HTMLInputElement:window.HTMLInputElement,
-    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
+    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(delayedCompletion&&time>=clickAt+59000){delayedCompletion();delayedCompletion=null;}if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
     handoffKey:(id:number)=>`handoff:${id}`,
     journalChatId:(url:string)=>new URL(url).pathname.split('/').at(-1),
     appendJournal:async(event:Record<string,unknown>)=>events.push(structuredClone(event)),
     journalInBackground:(event:Record<string,unknown>)=>events.push(structuredClone(event)),
     chrome:{
-      storage:{local:{get:async(key:string)=>structuredClone({[key]:storage[key]}),set:async(value:Record<string,unknown>)=>{storageWrites.push(structuredClone(value));Object.assign(storage,structuredClone(value));}}},
+      storage:{local:{get:async(key:string|string[])=>structuredClone(Object.fromEntries((Array.isArray(key)?key:[key]).map(k=>[k,storage[k]]))),set:async(value:Record<string,unknown>)=>{storageWrites.push(structuredClone(value));Object.assign(storage,structuredClone(value));}}},
       tabs:{get:async()=>({id:7,url:location.href})},
       webRequest:{onBeforeRequest:{addListener:(fn:(r:Request)=>void)=>before.push(fn)},onCompleted:{addListener:(fn:(r:Completion)=>void)=>complete.push(fn)},onErrorOccurred:{addListener:(fn:(r:unknown)=>void)=>failure.push(fn)}},
       scripting:{executeScript:async({func,args}:{func:(o:ProbeOptions)=>Result;args:[ProbeOptions]})=>{
@@ -149,6 +152,28 @@ function harness(mode: Mode = 'success') {
   assert.equal(h.sent,0,'rename must never submit the composer');
   assert.equal((h.storage[`chatgpt-handoff-title:${targetUrl}`] as {title:string}).title,expectedTitle);
   assert.equal((await h.rename()).ok,true);assert.equal(h.saved,1,'confirmed intent is not replayed');
+}
+{
+  const h=harness('sidebar-no-header');const result=await h.rename();
+  assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1,'exact sidebar menu renames even when the header has no ellipsis');
+  assert.equal(h.sent,0,'rename never submits the message composer');
+}
+{
+  const h=harness('sidebar-hidden-no-header');const result=await h.rename();
+  assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1,'the exact owned sidebar may be opened without a header menu');
+  assert.equal(h.sent,0);
+}
+{
+  const h=harness('sidebar-outside-header');const result=await h.rename();
+  assert.equal(result.ok,true);assert.equal(h.record.titleStatus,'confirmed');
+  assert.equal(h.saved,1,'the browser sidebar control outside the header allows the exact title save');
+  assert.equal(h.sent,0);
+}
+{
+  const h=harness('no-header');await h.rename();
+  assert.equal(h.saved,0,'missing header and sidebar controls never authorize a save');
 }
 for(const mode of ['no-ack','wrong-request','wrong-path','failed-ack','optimistic','plural-wrong-id','plural-wrong-title','plural-failed-ack','plural-get','plural-wrong-tab','native-wrong-id','native-wrong-title','native-patch','native-failed-ack','native-wrong-tab'] as const){
   const h=harness(mode);
@@ -337,6 +362,55 @@ for(const mode of ['streaming','late-menu'] as const) {
   await h.rename();assert.equal(h.time,before);assert.equal(h.opened,0);assert.equal(h.saved,0,'exhausted preparation never starts an unbounded background job');
 }
 {
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  h.allowReady();h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'fresh-goal-operation'}};
+  await h.rename({goalOperationId:'fresh-goal-operation'});
+  assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1,'a fresh reserved continuation permits one safe readiness retry');
+  await h.rename({goalOperationId:'fresh-goal-operation'});assert.equal(h.saved,1);
+}
+{
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  h.allowReady();h.storage['chatgpt-goal:'+targetUrl]={phase:'completed',lastCompletionKey:'/c/target|user|answer'};
+  await h.rename();assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1,'a completed Goal also permits title recovery');
+  await h.rename();assert.equal(h.saved,1);
+}
+{
+  const h=harness('unsaved');
+  for(let i=0;i<3;i++){await h.rename();h.advance(10000);}
+  h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'one-operation'}};
+  for(let i=0;i<3;i++){await h.rename({goalOperationId:'one-operation'});h.advance(10000);}
+  h.allowReady();await h.rename({goalOperationId:'one-operation'});
+  assert.equal(h.saved,0,'the same operation cannot reopen an exhausted readiness budget');
+  h.storage['chatgpt-goal:'+targetUrl]={phase:'stopped'};
+  await h.rename({goalOperationId:'one-operation'});assert.equal(h.saved,0,'stopped Goal cannot authorize title recovery');
+}
+{
+  const h=harness('unsaved');h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-fast'}};
+  const start=h.time;await h.rename({goalOperationId:'goal-fast'});
+  assert.ok(h.time-start<5000,'a newly sent chat cannot delay Goal delivery during title warmup');
+  h.advance(11000);h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-next'}};
+  const before=h.time;await h.rename({goalOperationId:'goal-next'});
+  assert.ok(h.time-before<5000,'an unavailable title menu does not delay the Goal');
+  assert.equal(h.record.titlePrepareAttempts,0);assert.equal(h.saved,0);
+}
+// A ready saved chat with an unavailable Rename item must exercise the
+// post-readiness menu deadline, not just the native readiness probe.
+{
+  const h=harness('late-menu');
+  h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-menu'}};
+  h.advance(11000);
+  const before=h.time;
+  const result=await h.rename({goalOperationId:'goal-menu'});
+  assert.equal(result.waiting,true,'an unavailable Rename item remains a no-click wait');
+  assert.ok(h.time-before<5000,'menu selection cannot delay a reserved Goal continuation for a minute');
+  assert.equal(h.opened,1,'ready chat must actually open the native menu');
+  assert.equal(h.selected,0);
+  assert.equal(h.saved,0);
+  assert.equal(h.sent,0);
+}
+{
   const h=harness('no-ack');await h.rename();
   assert.ok(h.record.titleSaveStartedAt);assert.equal(h.saved,1);
   h.record.titleStatus='waiting';h.record.titleRetryable=true;
@@ -388,6 +462,7 @@ console.log('PASS: observed native rename DOM, local/canonical chat binding, ine
  const h=harness();h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{id:'goal-send',status:'reserved'}};
  await h.rename();assert.equal(h.opened,0,'background events must not open a modal over Goal preparation');
  await h.rename({goalOperationId:'wrong'});assert.equal(h.opened,0,'only the matching delivery barrier may prepare the title');
+ h.advance(11000);
  assert.equal((await h.rename({goalOperationId:'goal-send'})).ok,true);assert.equal(h.saved,1);assert.equal(h.sent,0);
 }
 {
@@ -486,4 +561,24 @@ for(const mode of ['sidebar-stale-no-ack','sidebar-stale-failed-ack'] as const){
  const input=h.document.querySelector('[role="dialog"] input')!;
  (input as any).__reactProps$test={value:evidence.title};
  h.probe({...options,action:'cancel'});assert.equal(input.isConnected,false,'owned unchanged form cleanup tolerates lagging native props');
+}
+
+{
+ const h=harness('late-menu');h.advance(11000);
+ h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-menu-probe'}};
+ const before=h.time,result=await h.rename({goalOperationId:'goal-menu-probe'});
+ assert.equal(result.waiting,true);assert.equal(result.retryable,true);
+ assert.ok(h.time-before<5000,'ready chat with unavailable rename menu cannot hold the Goal delivery barrier for a minute');
+ assert.equal(h.saved,0);assert.equal(h.record.titleStatus,'waiting');assert.equal(h.record.titlePrepareAttempts,0);
+ assert.equal(h.record.titleSaveStartedAt,undefined,'expired preparation never persists a save intent');
+ assert.equal(h.document.querySelector('[role="menu"]'),null,'owned preparation menu is closed before Goal delivery');
+ await h.rename({goalOperationId:'goal-menu-probe'});assert.equal(h.saved,0,'same Goal operation cannot restart menu preparation');
+}
+{
+ const h=harness('late-ack');h.advance(11000);
+ h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-slow-ack'}};
+ const result=await h.rename({goalOperationId:'goal-slow-ack'});
+ assert.equal(result.ok,true,result.reason||'slow native save acknowledgement retains the complete save window');
+ assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1);assert.ok(h.time-h.clickAt>=59000);
+ await h.rename({goalOperationId:'goal-slow-ack'});assert.equal(h.saved,1,'late accepted save is never replayed');
 }

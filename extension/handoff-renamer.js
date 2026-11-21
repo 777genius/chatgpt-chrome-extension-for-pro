@@ -122,6 +122,26 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
     if(record.titleStatus==='failed'&&!recoverFailed)return {ok:true,skipped:true};
     if(record.titleStatus==='waiting') {
       if(!noSaveIntent||record.titlePreparationVersion!==1)return {ok:false,reason:'Нет подтверждения безопасного продолжения переименования'};
+      if(goalOperationId&&record.titleLastGoalProbeOperationId===goalOperationId)
+        return {ok:true,waiting:true,retryable:true};
+      // A new, already reserved Goal continuation is a fresh opportunity to
+      // check native readiness, not a reason to retry a prior title save.
+      // Consume each operation once and retain the original title snapshot.
+      const completionKey=goal?.phase==='completed'&&typeof goal.lastCompletionKey==='string'&&goal.lastCompletionKey||'';
+      const freshGoal=goalOperationId&&goalPreparing&&record.titleRecoveryGoalOperationId!==goalOperationId;
+      const freshCompletion=completionKey&&record.titleRecoveryCompletionKey!==completionKey;
+      if(record.titlePrepareAttempts>=3&&(freshGoal||freshCompletion)&&
+          record.titleReason==='Новый чат ещё не готов к переименованию'&&
+          (!goalOperationId||freshGoal)) {
+        const next={...record,titlePrepareAttempts:0,titleRetryAfter:0,titleRetryable:true,
+          ...(freshGoal?{titleRecoveryGoalOperationId:goalOperationId}:{titleRecoveryCompletionKey:completionKey})};
+        await appendJournal({kind:'handoff.title_preparation_recovered',operationId:id,
+          sourceUrl:record.sourceUrl,targetUrl:url,titleGoalOperationId:goalOperationId},{id:tabId});
+        const current=await chrome.storage.local.get([key,goalKey]);
+        if(JSON.stringify(current[key])!==JSON.stringify(record)||JSON.stringify(current[goalKey])!==JSON.stringify(goal))
+          return {ok:false,reason:'Передача или цель изменилась'};
+        await chrome.storage.local.set({[key]:next});record=next;
+      }
       if(record.titlePrepareAttempts>=3||Date.now()<record.titleRetryAfter)return {ok:true,waiting:true,retryable:record.titlePrepareAttempts<3};
     }
     if ((!url&&!targetAlias) || url===ChatGPTHandoffTitle.chatUrl(record.sourceUrl)) return {ok:false,reason:'Не сохранён адрес нового чата'};
@@ -148,11 +168,18 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       return result[0]?.result||{ok:false,reason:'Страница не ответила'};
     }
     try {
-      await update('waiting',{titlePreparationVersion:1,titlePrepareAttempts:(record.titlePrepareAttempts||0)+1,titleRetryable:false});
+      await update('waiting',{titlePreparationVersion:1,titlePrepareAttempts:(record.titlePrepareAttempts||0)+1,titleRetryable:false,
+        ...(goalOperationId?{titleLastGoalProbeOperationId:goalOperationId}:{})});
       // A conversation URL may be allocated before the server exposes actions.
       const notBefore=(record.sentAt||Date.now())+10000;
+      if(goalOperationId&&Date.now()<notBefore) {
+        await update('waiting',{titleRetryable:true,titlePrepareAttempts:previousAttempts,titleRetryAfter:notBefore});
+        return {ok:true,waiting:true,retryable:true};
+      }
       while(Date.now()<notBefore) await wait(Math.min(1000,notBefore-Date.now()));
-      deadline=Date.now()+60000;
+      // Goal delivery must not wait a full minute for an unavailable title
+      // menu. A later continuation may retry the readiness probe.
+      deadline=Date.now()+(goalOperationId?2000:60000);
       if(targetAlias) {
         const tab=await chrome.tabs.get(tabId);
         const candidate=ChatGPTHandoffTitle.chatUrl(tab.url);
@@ -199,6 +226,9 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       }
       // Durable intent before one click. A lost reply never causes a second save.
       if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');
+      // Menu and form preparation share the short Goal delivery deadline.
+      // Once prepared, a native save and its ACK retain their full window.
+      if(goalOperationId)deadline=Date.now()+60000;
       await update('saving',{previousTitle,titleSaveStartedAt:Date.now()});
       pendingTitles.set(tabId,pending);
       let saved;
@@ -223,6 +253,11 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       throw new Error('Сервер не подтвердил новое название');
     } catch(error) {
       if(error.titleRetryable&&record.titlePreparationVersion===1&&!Object.hasOwn(record,'previousTitle')&&!Object.hasOwn(record,'titleSaveStartedAt')) {
+        if(goalOperationId) {
+          await update('waiting',{titleReason:String(error.message||error),titleRetryable:true,
+            titlePrepareAttempts:previousAttempts,titleRetryAfter:0});
+          return {ok:true,waiting:true,retryable:true,reason:String(error.message||error)};
+        }
         const retryable=record.titlePrepareAttempts<3;
         await update('waiting',{titleReason:String(error.message||error),titleRetryable:retryable,titleRetryAfter:Date.now()+10000});
         return {ok:true,waiting:true,retryable,reason:String(error.message||error)};

@@ -15,6 +15,7 @@
     const key=url=>'chatgpt-goal:'+policy.canonical(url);
     const canonical=url=>policy.canonical(url);
     const composerKey=tabId=>'chatgpt-goal-composer:'+tabId;
+    const closedComposerKey=tabId=>'chatgpt-goal-closed-composer:'+tabId;
     const composerBindingKey=id=>'chatgpt-goal-composer-binding:'+id;
     const buffered=(record,plural,singular)=>[
       ...(Array.isArray(record?.[plural])?record[plural]:[]),
@@ -35,7 +36,7 @@
       return value;
     }
     function requireAvailable(previous) {
-      if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат или вручную разберите журнал');
+      if(previous?.operation)throw Error('Предыдущая отправка не подтверждена; для нового Goal используйте другой чат в другой вкладке или вручную разберите журнал');
       if(previous&&!['completed','stopped','moved'].includes(previous.phase))
         throw Error('Для этого чата уже запущена цель. Сначала остановите её');
     }
@@ -81,13 +82,20 @@
         ...(maxContinuations===undefined?{}:{maxContinuations}),
         ...(maxMinutes===undefined?{}:{maxMinutes})});
       return serialize(async()=>{
+        // A manual request cannot resolve an older automatic send. Refuse the
+        // arm here as well as the eventual bind, including in a different tab.
+        if(canonical(target)) {
+          const existing=await read(target);
+          if(existing?.operation)requireAvailable(existing);
+        }
         const previous=await readComposer(tabId);
         if(previous?.phase==='bound') {
           const boundUrl=previous.binding?.url;
           const bound=boundUrl?await read(boundUrl):null;
           const expiredElsewhere=bound?.url!==target&&bound?.phase==='blocked'&&
             Number.isFinite(bound.deadlineAt)&&now()>=bound.deadlineAt;
-          if(bound?.id!==previous.id||bound.operation||
+          if(bound?.operation)requireAvailable(bound);
+          if(bound?.id!==previous.id||
               (!expiredElsewhere&&!['completed','stopped','moved'].includes(bound.phase)))
             throw Error('Предыдущая ручная цель ещё активна; сначала явно выключите Goal');
         } else if(previous?.phase==='intent') {
@@ -105,16 +113,28 @@
         return {ok:true,record};
       });
     }
-    async function composerDisarm({tabId,armId}) {
+    async function composerDisarm({tabId,armId,preserveBoundGoal=false}) {
       requireTab(tabId);
       return serialize(async()=>{
-        const current=await readComposer(tabId);
+        let current=await readComposer(tabId);
+        // A trusted switch-off already in flight may arrive just after the
+        // tab-close callback. Retain its exact binding so that explicit Stop
+        // still wins over merely detaching a closed tab.
+        if(!current&&!preserveBoundGoal&&typeof armId==='string'&&armId) {
+          const closed=(await storage.get(closedComposerKey(tabId)))[closedComposerKey(tabId)];
+          if(closed?.id===armId&&closed.phase==='bound')current=closed;
+        }
         if(armId!==undefined&&current?.id!==armId)throw Error('Разрешение Goal уже изменилось');
-        const changes={[composerKey(tabId)]:null};
+        const changes={[composerKey(tabId)]:null,...(!preserveBoundGoal?{[closedComposerKey(tabId)]:null}:{})};
         let stopped=null;
         if(current?.phase==='bound'&&current.binding?.url) {
           const goal=await read(current.binding.url);
-          if(goal?.id===current.id&&!['completed','stopped','moved'].includes(goal.phase)) {
+          if(goal?.id===current.id&&preserveBoundGoal) {
+            // Closing a tab removes its composer binding; it is not an
+            // explicit Stop or permission to change the durable Goal.
+            await event('composer_detached',goal,tabId,{reason:'Вкладка закрыта; цель сохранена'});
+            changes[closedComposerKey(tabId)]={id:current.id,phase:'bound',binding:{url:current.binding.url}};
+          } else if(goal?.id===current.id&&!['completed','stopped','moved'].includes(goal.phase)) {
             stopped=stopTransition(goal);
             await event(stopped.stopRequested||goal.operation?'stop_requested':'stopped',stopped,tabId);
             changes[key(goal.url)]=stopped;
@@ -261,6 +281,13 @@
             supplements.push({...item,tabId,text:item.userText,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
           }
         }
+        const anchor=recovery?.anchor;
+        if(anchor&&(!anchor.operationId||!anchor.userId||!anchor.requestId||
+            !Number.isFinite(anchor.startedAt)||!Number.isFinite(anchor.userSentAtMs)||
+            Math.abs(anchor.startedAt-anchor.userSentAtMs)>10000||
+            anchor.startedAt<=(supplements.at(-1)?.startedAt||startedAt)||
+            typeof anchor.promptKey!=='string'||!anchor.promptKey.startsWith(new URL(target).pathname+'|')))
+          throw Error('Автоматическое продолжение не подтверждено');
         if(current.url==='https://chatgpt.com/'?firstTurn!==true&&recovery?.firstUserId!==userId:current.url!==target)
           throw Error('Ручная отправка Goal относится к другому чату или не является первым сообщением');
         // Native Markdown may retain link targets absent from the visible
@@ -284,7 +311,7 @@
         const next={schema:1,id:armId,url:target,originUrl:target,goal:userText,rules:current.config.rules,
           maxContinuations:current.config.maxContinuations,maxMinutes:current.config.maxMinutes,
           startedAt,manualStartedAt:supplements.at(-1)?.startedAt||startedAt,deadlineAt:startedAt+current.config.maxMinutes*60000,phase:'waiting',reason:'',continuations:0,
-          expectedPromptKey:supplements.at(-1)?.promptKey||promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
+          expectedPromptKey:anchor?.promptKey||supplements.at(-1)?.promptKey||promptKey,lastCompletionKey:'',pendingCompletion:null,pauseRequested:false,stopRequested:false,
           ...(recovery?{supplements}:{}),
           handoffPending:false,handoffId:null,operation:null,manualStart:{...binding,tabId,sourceUrl:current.url}};
         await event('manual_started',next,tabId,{text:userText,intentText:intent.text,userVisibleText:binding.userVisibleText,rules:next.rules,
@@ -409,7 +436,7 @@
     }
     function stopTransition(old) {
       const inFlight=['sending','clicked'].includes(old.phase);
-      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,
+      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,resumeRequested:false,
         ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
         reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
           'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
@@ -492,12 +519,25 @@
       const record=await serialize(async()=>{
         const current=await read(url);
         if(!current||current.phase!=='preparing'||current.operation?.status!=='reserved'||
-            current.operation.tabId!==tab.id||current.stopRequested||current.pauseRequested)return null;
+            current.stopRequested||current.pauseRequested)return null;
         if(now()>=current.deadlineAt) {
           const expired={...current,phase:'stopped',operation:null,reason:'Время Goal истекло'};
           await event('stopped',expired,tab.id);
           await save(expired);
           return null;
+        }
+        if(current.operation.tabId!==tab.id) {
+          // Only an unclaimed reservation can move to a reopened tab, and
+          // only after Chrome positively reports that its old tab is gone.
+          // The same operation ID remains subject to the normal send grant.
+          if(typeof tabs.query!=='function')return null;
+          const open=await tabs.query({});
+          if(!Array.isArray(open)||open.some(item=>item.id===current.operation.tabId)||
+              !open.some(item=>item.id===tab.id&&canonical(item.url)===url))return null;
+          const rebound={...current,operation:{...current.operation,tabId:tab.id}};
+          await event('reservation_rebound',rebound,tab.id,{previousTabId:current.operation.tabId});
+          await save(rebound);
+          return rebound;
         }
         return current;
       });
@@ -507,11 +547,12 @@
       await deliver(record);
       return {ok:true};
     }
-    async function control({action,url,tabId}) {
+    async function control({action,url,tabId,id,verifiedResumeRecord}) {
       const target=requireUrl(url);
       const outcome=await serialize(async()=>{
         const old=await read(target);
         if(!old)throw Error('Сохранённая цель не найдена');
+        if(id!==undefined&&old.id!==id)throw Error('Цель уже изменилась');
         if(action==='pause') {
           if(['completed','stopped','blocked','moved'].includes(old.phase))throw Error('Goal уже завершён');
           const inFlight=['sending','clicked'].includes(old.phase);
@@ -542,17 +583,32 @@
             return {record};
           }
           const recoveryBlocked=old.phase==='blocked'&&!old.operation&&
-            old.reason==='Восстановление запроса завершилось ошибкой';
+            ['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(old.reason);
           if((old.phase!=='paused'&&!recoveryBlocked)||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
+          // A blocked Goal may have a newer manual turn even when the editor
+          // is already idle. Queue every unverified resume so the worker can
+          // bind that turn before granting a continuation.
+          if(recoveryBlocked&&(!verifiedResumeRecord||old.reason!=='Модель ответила точным маркером GOAL_BLOCKED'||
+              old.resumeRequested!==true||JSON.stringify(view(old))!==JSON.stringify(verifiedResumeRecord))) {
+            const record={...old,resumeRequested:true};
+            await event('resume_queued',record,tabId);await save(record);
+            return {record,queued:true};
+          }
           if(old.manualOverride||recoveryBlocked) {
             // An explicit Resume after a real manual intervention is a fresh
             // user authorization, but the current chat must be idle first.
             const ready=await tabs.sendMessage(tabId,{type:'CHATGPT_GOAL_READINESS',url:target});
-            if(!ready?.ok||ready.idle!==true)throw Error(ready?.reason||'Дождитесь завершения ручного ответа и очистите черновик');
+            if(!ready?.ok)throw Error(ready?.reason||'Не удалось проверить состояние чата');
+            if(ready.idle!==true) {
+              if(!recoveryBlocked)throw Error(ready.reason||'Дождитесь завершения ручного ответа');
+              const record={...old,resumeRequested:true,reason:old.reason};
+              await event('resume_queued',record,tabId);await save(record);
+              return {record,queued:true};
+            }
           }
-          let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,reason:''};
+          let record={...old,phase:'waiting',pauseRequested:false,manualOverride:false,resumeRequested:false,reason:''};
           const pendingKind=old.manualPending?null:old.pendingSendKind||
             (old.pendingCompletion||old.manualOverride||recoveryBlocked?'continuation':null);
           if(pendingKind) {
@@ -592,8 +648,8 @@
         if(record?.id!==id||record.phase!=='blocked'||op?.id!==operationId||op.tabId!==tabId||
             !(op.status==='reserved'||op.status==='intent'&&noGrantVerified===true)||record.pauseRequested||record.stopRequested||record.manualOverride||
             record.manualPending||now()>=record.deadlineAt)return {ok:false};
-        const next={...record,phase:'preparing',reason:'',operation:{...op,status:'reserved',createdAt:now()}};
-        await event('preparation_retried',next,tabId);await save(next);
+        const next={...record,phase:'preparing',reason:'',operation:{...op,id:uuid(),status:'reserved',createdAt:now()}};
+        await event('preparation_retried',next,tabId,{previousOperationId:op.id});await save(next);
         return {ok:true,record:next};
       });
       if(outcome.ok)await deliver(outcome.record);
@@ -631,6 +687,8 @@
     async function report({url,tabId,id,operationId,status,reason='',newPromptKey='',nativeConfirmed=false}) {
       const result=await serialize(async()=>{
         const record=await read(url);
+        if(['clicked','confirmed'].includes(status)&&operationId&&record?.id===id&&record.lastConfirmedOperation?.id===operationId&&
+            record.lastConfirmedOperation.tabId===tabId)return {ok:true,alreadyConfirmed:true};
         if(!record||record.id!==id||record.operation?.id!==operationId||
             record.operation.tabId!==tabId)return {ok:false,reason:'Операция Goal изменена'};
         if(status==='clicked') {
@@ -656,6 +714,7 @@
           const next={...record,phase:stop?'stopped':pause?'paused':'waiting',
             reason:stop?'Остановлено пользователем':pause?'Приостановлено пользователем':'',
             expectedPromptKey:expected,confirmedPromptBinding:null,handoffPending:false,operation:null,
+            lastConfirmedOperation:{id:operationId,tabId},
             earlyCompletion:stop?null:early,earlyCompletions:[],
             continuations:record.continuations+(record.operation.kind==='continuation'?1:0)};
           await event('confirmed',next,tabId,{operationId,promptKey:newPromptKey});
@@ -675,7 +734,8 @@
       // the response durably bound to the operation, then process after the
       // confirmed new user turn. Recovery can replay the same record safely.
       if(result.replay)await completion(result.replay);
-      return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason};
+      return {ok:result.ok,record:result.replay?await get(url):result.record,reason:result.reason,
+        ...(result.alreadyConfirmed?{alreadyConfirmed:true}:{})};
     }
     // Observation-only recovery: consume an already accepted click, including
     // sent manual follow-ups. This method never dispatches or changes limits.
@@ -702,6 +762,7 @@
         }
         const last=supplements.at(-1),expired=now()>=old.deadlineAt;
         const next={...old,phase:expired?'stopped':'waiting',reason:expired?'Время Goal истекло':'',operation:null,
+          lastConfirmedOperation:{id:operationId,tabId:op.tabId},
           expectedPromptKey:last?.promptKey||promptKey,confirmedPromptBinding:last?null:{operationId,userId},
           continuations:old.continuations+(op.kind==='continuation'?1:0),
           supplements:[...(old.supplements||[]),...supplements],
@@ -715,13 +776,14 @@
         await save(next);return {ok:true,record:view(next)};
       });
     }
-    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false}) {
+    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false,verifiedQueuedResumeFence=null}) {
       const target=canonical(url);
       if(!target||typeof completionKey!=='string'||!completionKey||typeof promptKey!=='string'||
           !completionKey.startsWith(promptKey+'|')||typeof response!=='string')return {ok:false};
       const result=await serialize(async()=>{
         const record=await read(target);
         if(!record||record.lastCompletionKey===completionKey)return {ok:false};
+        if(record.queuedResumeFence&&JSON.stringify(record.queuedResumeFence)!==JSON.stringify(verifiedQueuedResumeFence))return {ok:false};
         if(record?.manualPending) {
           const pending=record.manualPending;
           if(nativeVerified!==true||pending.tabId!==tabId||promptKey===pending.baselineKey||!promptKey.startsWith(new URL(target).pathname+'|')||!userId)return {ok:false};
@@ -760,7 +822,7 @@
           return {ok:false,pendingMarker:true};
         }
         const outcome=policy.decision(record,response,rawExact,nativeVerified,now());
-        let next={...record,markerPending:null,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
+        let next={...record,queuedResumeFence:null,markerPending:null,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
           handoffPending:false,earlyCompletion:null,earlyCompletions:[]};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
         else if(outcome==='blocked')next={...next,phase:'blocked',reason:'Модель ответила точным маркером GOAL_BLOCKED',pendingCompletion:null};
@@ -788,7 +850,15 @@
         const record=await read(target);
         if(record&&Number.isFinite(startedAt)&&Math.max(record.startedAt||0,record.manualStartedAt||0)>startedAt)return {ok:false};
         if(record&&Number.isFinite(startedAt)&&record.manualStart?.startedAt===startedAt)return {ok:false};
-        if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase))return {ok:false};
+        const retryBlocked=record?.phase==='blocked'&&!record.operation&&!record.stopRequested&&!record.pauseRequested&&
+          !record.manualOverride&&(record.reason==='Восстановление запроса завершилось ошибкой'||
+            record.resumeRequested===true&&record.reason==='Модель ответила точным маркером GOAL_BLOCKED');
+        if(!record||!['preparing','sending','clicked','waiting','recovering','paused'].includes(record.phase)&&!retryBlocked)return {ok:false};
+        // A queued blocked Goal must first reconcile the entire witnessed
+        // manual timeline. Staging only this request could skip an earlier
+        // already-sent follow-up and accidentally release the Goal.
+        if(record.phase==='blocked'&&record.resumeRequested===true&&
+            record.reason==='Модель ответила точным маркером GOAL_BLOCKED')return {ok:false,pending:true};
         const supplement=typeof requestId==='string'&&requestId&&Number.isFinite(startedAt)&&Number.isFinite(eventAt)&&
           startedAt>=eventAt&&startedAt-eventAt<=10000&&typeof text==='string'&&text.trim()&&text.length<=10000&&
           typeof baselineKey==='string'&&(!baselineKey||baselineKey.startsWith(new URL(target).pathname+'|'))&&
@@ -806,13 +876,14 @@
           const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
           const pending=[...pendingManuals(record),{tabId,requestId,startedAt,eventAt,text,baselineKey,
             ...(linkTargets!==undefined?{linkTargets}: {})}];
-          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,
+          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,resumeRequested:false,queuedResumeFence:null,
             manualPending:pending[0],manualPendingQueue:pending,manualOverride:false,markerPending:null,
             pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
             ...(!inFlight?{operation:null}:{}),reason:'Подтверждается отправленное дополнение к цели'};
           await event('manual_supplement_pending',next,tabId,{requestId,startedAt,eventAt,text,baselineKey});
           await save(next);return {ok:true,record:view(next)};
         }
+        if(retryBlocked)return {ok:false};
         // Explicit manual Stop remains a pause. Missing/invalid sent-text proof
         // cannot silently change an objective or authorize another send.
         const inFlight=['sending','clicked'].includes(record.phase),reserved=record.phase==='preparing'&&record.operation?.status==='reserved';
@@ -823,7 +894,7 @@
         await event('manual_pause',next,tabId);await save(next);return {ok:true};
       });
     }
-    async function manualBind({url,tabId,id,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,nativeVerified}) {
+    async function manualBind({url,tabId,id,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,nativeVerified,queuedResumeFence}) {
       const target=requireUrl(url);
       const result=await serialize(async()=>{
         const old=await read(target),pending=old?.manualPending,prior=old?.manualSupplementBinding;
@@ -839,12 +910,14 @@
             !policy.submittedTextMatches(pending.text,userText,userVisibleText,pending.linkTargets)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
           return {ok:false};
+        if(queuedResumeFence&&(queuedResumeFence.requestId!==requestId||queuedResumeFence.startedAt!==startedAt||
+            queuedResumeFence.userId!==userId||!Number.isSafeInteger(queuedResumeFence.requestSequence)||queuedResumeFence.requestSequence<1))return {ok:false};
         if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};
         const supplement={...binding,text:pending.text,eventAt:pending.eventAt,baselineKey:pending.baselineKey};
         const remaining=pendingManuals(old).slice(1);
         const early=remaining.length?null:buffered(old,'manualEarlyCompletions','manualEarlyCompletion').find(item=>item.userId===userId&&item.promptKey===promptKey)||null;
         const fenced=!!old.operation||old.phase==='blocked',paused=old.phase==='paused'||old.pauseRequested;
-        const next={...old,supplements:[...(old.supplements||[]),supplement],manualPending:remaining[0]||null,manualPendingQueue:remaining,manualSupplementBinding:supplement,
+        const next={...old,...(queuedResumeFence?{queuedResumeFence}:{}),supplements:[...(old.supplements||[]),supplement],manualPending:remaining[0]||null,manualPendingQueue:remaining,manualSupplementBinding:supplement,
           expectedPromptKey:promptKey,handoffPending:false,manualEarlyCompletion:null,
           manualEarlyCompletions:remaining.length?buffered(old,'manualEarlyCompletions','manualEarlyCompletion'):[],
           earlyCompletion:early,phase:fenced?old.phase:paused?'paused':'waiting',
@@ -855,6 +928,58 @@
       if(result.replay)await completion(result.replay);
       return {ok:result.ok,record:result.replay?await get(target):result.record};
     }
+    async function resumeObserved({url,tabId,expectedRecord,promptKey,nativeVerified,queuedResumeFence}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{
+        const old=await read(target);
+        if(nativeVerified!==true||JSON.stringify(view(old))!==JSON.stringify(expectedRecord)||
+            old?.phase!=='blocked'||!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(old.reason)||
+            old.resumeRequested!==true||old.operation||old.manualPending||old.stopRequested||old.pauseRequested||
+            old.manualOverride||now()>=old.deadlineAt||old.expectedPromptKey!==promptKey)return {ok:false};
+        const next={...old,phase:'waiting',reason:'',resumeRequested:false,queuedResumeFence:queuedResumeFence||null};
+        await event('resumed',next,tabId);await save(next);return {ok:true,record:view(next)};
+      });
+    }
+    // Adopt a fully witnessed run of manual messages atomically. No send is
+    // granted here: completion still evaluates the latest native answer.
+    async function resumeWithSupplements({url,tabId,expectedRecord,supplements,nativeVerified,queuedResumeFence}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{
+        const old=await read(target);
+        if(nativeVerified!==true||JSON.stringify(view(old))!==JSON.stringify(expectedRecord)||
+            old?.phase!=='blocked'||old.reason!=='Модель ответила точным маркером GOAL_BLOCKED'||
+            old.resumeRequested!==true||old.operation||old.manualPending||old.stopRequested||old.pauseRequested||
+            old.manualOverride||now()>=old.deadlineAt||!Array.isArray(supplements)||!supplements.length||supplements.length>100)return {ok:false};
+        const knownRequests=new Set((old.supplements||[]).map(x=>x.requestId));
+        const knownUsers=new Set((old.supplements||[]).map(x=>x.userId));
+        const added=[];let previous=old.manualStartedAt||old.startedAt||0;
+        for(const item of supplements) {
+          if(typeof item.requestId!=='string'||!item.requestId||knownRequests.has(item.requestId)||
+              typeof item.userId!=='string'||!item.userId||knownUsers.has(item.userId)||
+              !Number.isFinite(item.startedAt)||item.startedAt<=previous||!Number.isFinite(item.userSentAtMs)||
+              Math.abs(item.startedAt-item.userSentAtMs)>10000||typeof item.userText!=='string'||
+              !item.userText.trim()||item.userText.length>10000||typeof item.promptKey!=='string'||
+              !item.promptKey.startsWith(new URL(target).pathname+'|'))return {ok:false};
+          knownRequests.add(item.requestId);knownUsers.add(item.userId);previous=item.startedAt;
+          added.push({...item,tabId,text:item.userText,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
+        }
+        const last=added.at(-1),next={...old,phase:'waiting',reason:'',resumeRequested:false,queuedResumeFence:queuedResumeFence||null,
+          expectedPromptKey:last.promptKey,manualStartedAt:last.startedAt,manualSupplementBinding:last,
+          supplements:[...(old.supplements||[]),...added],manualPending:null,manualPendingQueue:[],
+          handoffPending:false,markerPending:null,pendingCompletion:null,pendingSendKind:null,
+          earlyCompletion:null,earlyCompletions:[],manualEarlyCompletion:null,manualEarlyCompletions:[]};
+        await event('manual_supplements_recovered',next,tabId,{requestIds:added.map(x=>x.requestId)});
+        await save(next);return {ok:true,record:view(next)};
+      });
+    }
+    async function expireQueuedResume({url,tabId}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{const old=await read(target);
+        if(old?.phase!=='blocked'||old.resumeRequested!==true||now()<old.deadlineAt)return {ok:false};
+        const next={...old,phase:'stopped',reason:'Время Goal истекло',resumeRequested:false};
+        await event('stopped',next,tabId);await save(next);return {ok:true,record:view(next)};
+      });
+    }
     async function retry({url,tabId,kind,promptKey,attemptId,goalHandoff=false}) {
       const target=canonical(url);
       if(!target)return;
@@ -863,6 +988,7 @@
         const recoveredBlock=record?.phase==='blocked'&&!record.operation&&
           record.reason==='Восстановление запроса завершилось ошибкой'&&['retry.confirmed','retry.preparation_recovered'].includes(kind);
         if(!record||!['waiting','recovering','paused'].includes(record.phase)&&!recoveredBlock)return;
+        if(kind==='retry.confirmed'&&(record.stopRequested||record.pauseRequested||record.manualPending||record.operation||record.manualOverride||now()>=record.deadlineAt))return;
         // Journal delivery and Goal writes use different queues. Recheck the
         // request fence here, after serialization: an accepted old callback
         // may arrive after a manual send or a newly started Goal.
@@ -876,7 +1002,7 @@
         if(kind==='retry.preparation_recovered')next={...record,phase:'recovering',reason:''};
         if(kind==='retry.planned')next={...record,phase:record.phase==='paused'?'paused':'recovering'};
         if(kind==='retry.confirmed'&&typeof promptKey==='string'&&promptKey.startsWith(new URL(target).pathname+'|'))
-          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,reason:''};
+          next={...record,phase:record.phase==='paused'?'paused':'waiting',expectedPromptKey:promptKey,resumeRequested:false,reason:''};
         if(['retry.failed','retry.blocked','draft.restore_failed'].includes(kind))
           next={...record,phase:record.phase==='paused'||record.pauseRequested?'paused':'blocked',reason:'Восстановление запроса завершилось ошибкой'};
         if(next===record)return;
@@ -889,6 +1015,41 @@
     function retryBlockedForHandoff(record) {
       return record?.phase==='blocked'&&record.reason==='Восстановление запроса завершилось ошибкой'&&
         !record.operation&&!record.manualPending&&!record.pauseRequested&&!record.stopRequested&&!record.manualOverride;
+    }
+    // The worker has proved an unspent old grant and a later exact manual
+    // submission. Retire the old operation without replaying it, and retain
+    // that submission as part of the same Goal before moving the conversation.
+    async function handoffAfterUnsent({sourceUrl,handoffId,tabId,goalId,operationId,witness,handoff,nativeVerified}) {
+      const source=canonical(sourceUrl);
+      if(!source||nativeVerified!==true||!witness||typeof witness.userId!=='string'||!witness.userId||
+          typeof witness.userText!=='string'||!witness.userText.trim()||witness.userText.length>10000||
+          typeof witness.requestId!=='string'||!witness.requestId||!Number.isFinite(witness.startedAt)||
+          !Number.isFinite(witness.userSentAtMs)||Math.abs(witness.userSentAtMs-witness.startedAt)>10000||
+          typeof witness.promptKey!=='string'||!witness.promptKey.startsWith(new URL(source).pathname+'|')||
+          handoff?.id!==handoffId||handoff.sourceUrl!==source||handoff.stage!=='navigating'||
+          typeof handoff.text!=='string'||typeof handoff.fileName!=='string')return {ok:false};
+      return serialize(async()=>{
+        const old=await read(source);
+        if(old?.phase==='handoff'&&old.handoffId===handoffId&&old.recoveredUnsentOperationId===operationId)
+          return {ok:true,record:view(old)};
+        if(!old||old.id!==goalId||old.phase!=='blocked'||
+            old.reason!=='Отправка отменена: Нет сохранённого разрешения на эту автоматическую отправку'||
+            old.operation?.id!==operationId||old.operation?.tabId!==tabId||old.operation?.status!=='intent'||
+            old.stopRequested||old.pauseRequested||old.manualPending||old.manualOverride||now()>=old.deadlineAt||
+            witness.startedAt<=old.operation.createdAt||(old.supplements||[]).some(x=>x.requestId===witness.requestId||x.userId===witness.userId))return {ok:false};
+        const supplement={...witness,tabId,text:witness.userText,eventAt:witness.startedAt};
+        const next={...old,phase:'handoff',preHandoffPhase:'recovering',handoffId,handoffTabId:tabId,
+          operation:null,reason:'',recoveredUnsentOperationId:operationId,
+          supplements:[...(old.supplements||[]),supplement],manualSupplementBinding:supplement,
+          manualStartedAt:witness.startedAt,expectedPromptKey:witness.promptKey};
+        const text=handoff.text+'\n\n'+policy.handoffText(next),asFile=handoff.asFile||text.length>12000;
+        const prompt=asFile?(handoff.asFile?handoff.prompt:'Прочитай приложенный файл '+handoff.fileName+': в нём история и исходная цель. Продолжи задачу end-to-end.'):text;
+        const transfer={...handoff,text,prompt,asFile,navigationRecoveries:1,
+          navigationRecovery:{url:source,promptKey:witness.promptKey,userId:witness.userId,requestId:witness.requestId,startedAt:witness.startedAt}};
+        await event('handoff_unsent_recovered',next,tabId,{handoffId,operationId,requestId:witness.requestId,userId:witness.userId});
+        await storage.set({[key(source)]:next,['chatgpt-handoff:'+tabId]:transfer});
+        return {ok:true,record:view(next),handoff:transfer};
+      });
     }
     async function handoffBegin({sourceUrl,handoffId,tabId}) {
       const source=canonical(sourceUrl);
@@ -937,12 +1098,33 @@
             record.pauseRequested||record.stopRequested||record.manualPending||
             record.preHandoffPhase==='paused'||now()>=record.deadlineAt)return {ok:false};
         if(record.phase==='handoff')return {ok:true};
-        if(!['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна'].includes(reason)||
+        if(!['Не удалось дождаться готовности нового чата','Кнопка нового чата недоступна',
+            'Исходный чат или запрос изменился; переход отменён'].includes(reason)||
             record.phase!=='blocked'||record.reason!=='Передача Goal остановлена: '+reason)return {ok:false};
         const next={...record,phase:'handoff',reason:''};
         await event('handoff_preparation_ready',next,tabId,{handoffId,preparationReason:reason});
         await save(next);
         return {ok:true};
+      });
+    }
+    // A prior version could block a Goal when the original response was still
+    // finishing before any navigation. Only the worker's independently
+    // verified native completion may restore that exact Goal to waiting.
+    async function handoffSourceCompleted({sourceUrl,handoffId,tabId,goalId,oldPromptKey,promptKey,userId}) {
+      const source=canonical(sourceUrl);
+      if(!source||!handoffId||!goalId||!userId||typeof promptKey!=='string'||
+          !promptKey.startsWith(new URL(source).pathname+'|'))return {ok:false};
+      return serialize(async()=>{
+        const record=await read(source);
+        if(!record||record.id!==goalId||record.phase!=='blocked'||record.handoffId!==handoffId||
+            record.handoffTabId!==tabId||record.preHandoffPhase!=='waiting'||
+            record.reason!=='Передача Goal остановлена: В исходном чате идёт генерация; переход отменён'||
+            record.expectedPromptKey!==oldPromptKey||record.operation||record.manualPending||record.manualOverride||
+            record.pauseRequested||record.stopRequested||now()>=record.deadlineAt)return {ok:false};
+        const next={...record,phase:'waiting',reason:'',expectedPromptKey:promptKey,
+          handoffId:null,handoffPending:false,preHandoffPhase:null,confirmedPromptBinding:null};
+        await event('handoff_source_completed',next,tabId,{handoffId,userId,promptKey});
+        await save(next);return {ok:true,record:view(next)};
       });
     }
     async function stageHandoffCompletion({sourceUrl,targetUrl,handoffId,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false}) {
@@ -977,6 +1159,23 @@
         return {ok:true};
       });
     }
+    // A confirmed retry creates a new native user message after the handoff.
+    // Only the worker's journal and native proof may replace that binding.
+    async function handoffRetryBind({url,tabId,id,handoffId,acceptedUserId,promptKey,userId,operationId,nativeVerified}) {
+      const target=canonical(url);
+      if(!target||nativeVerified!==true||!id||!handoffId||!acceptedUserId||!userId||userId===acceptedUserId||
+          !operationId||typeof promptKey!=='string'||!promptKey.startsWith(new URL(target).pathname+'|'))return {ok:false};
+      return serialize(async()=>{
+        const record=await read(target);
+        if(!record||record.id!==id||record.phase!=='waiting'||record.operation||record.manualPending||record.manualOverride||
+            record.pauseRequested||record.stopRequested||now()>=record.deadlineAt||record.handoffPending!==true||
+            record.handoffId!==handoffId||record.handoffTabId!==tabId||record.handoffAcceptedUserId!==acceptedUserId)return {ok:false};
+        const next={...record,handoffPending:false,expectedPromptKey:promptKey,
+          confirmedPromptBinding:{operationId,userId}};
+        await event('handoff_retry_bound',next,tabId,{handoffId,operationId,userId,promptKey});
+        await save(next);return {ok:true};
+      });
+    }
     async function handoffConfirm({sourceUrl,targetUrl,handoffId,tabId,acceptedUserId}) {
       const source=canonical(sourceUrl),target=canonical(targetUrl);
       if(!source||!target||source===target)return;
@@ -1007,7 +1206,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffFailed,handoffPreparationReady,handoffConfirm,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,resumeWithSupplements,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffAfterUnsent,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,handoffRetryBind,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

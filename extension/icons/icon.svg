@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect x="4" y="4" width="120" height="120" rx="32" fill="#14352d"/>
+  <g fill="none" stroke="#91c9b7" stroke-width="5" stroke-linecap="round">
+    <path id="loop" d="M64 29c15-12 35 4 27 21l-9 17"/>
+    <use href="#loop" transform="rotate(60 64 64)"/>
+    <use href="#loop" transform="rotate(120 64 64)"/>
+    <use href="#loop" transform="rotate(180 64 64)"/>
+    <use href="#loop" transform="rotate(240 64 64)"/>
+    <use href="#loop" transform="rotate(300 64 64)"/>
+  </g>
+  <circle cx="64" cy="64" r="25" fill="#14352d"/>
+  <path d="M50 73c5-4 5-9 5-15a9 9 0 0 1 18 0c0 6 0 11 5 15H50Z" fill="#fff4d8"/>
+  <path d="M60 79a4 4 0 0 0 8 0" fill="none" stroke="#fff4d8" stroke-width="3" stroke-linecap="round"/>
+</svg>

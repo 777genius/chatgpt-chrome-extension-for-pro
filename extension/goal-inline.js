@@ -3,7 +3,7 @@
 // Presentation only: the worker and existing guarded sender own authorization.
 (function(root) {
   let instance=0;
-  function create({document,getUrl,request,subscribe=()=>()=>{},alive=()=>true}) {
+  function create({document,getUrl,request,subscribe=()=>()=>{},alive=()=>true,composerActivity=()=>'unknown'}) {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     const win=document.defaultView||root;
@@ -46,7 +46,7 @@
       button.innerHTML='<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+icons[action]+'</svg>';
       bannerActions[action]=button;
       banner.append(button);
-      listen(button,'click',event=>{if(consent(event,button))action==='expand'?show(!open):void act(action);});
+      listen(button,'click',event=>{event.stopPropagation();if(consent(event,button))action==='expand'?show(!open):void act(action);});
     }
     banner.hidden=true;
     let elapsedId=null,elapsedBase=0,elapsedSince=null,pageOpen=true;
@@ -60,7 +60,13 @@
         elapsedId=id;elapsedBase=0;
         try{if(id)elapsedBase=Math.max(0,Number(win.localStorage.getItem('cggi-elapsed:'+id))||0);}catch{}
       }
-      elapsedSince=pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
+      const activity=record?.phase==='waiting'?composerActivity():null;
+      if(activity!==null) {
+        const label='◎ '+(activity==='generating'?'Active':record.manualPending?'Confirming message':
+          activity==='idle'?'Waiting to continue':'Checking chat');
+        if(bannerStatus.textContent!==label)bannerStatus.textContent=label;
+      }
+      elapsedSince=(activity===null||activity==='generating')&&pageOpen&&id&&active()&&record.phase!=='paused'&&!record.pauseRequested&&!record.stopRequested?now:null;
       const seconds=Math.floor(elapsedBase/1000),minutes=Math.floor(seconds/60);
       bannerTime.textContent=id?(minutes>=60?Math.floor(minutes/60)+'h '+minutes%60+'m':minutes?minutes+'m':seconds+'s'):'';
     }
@@ -113,7 +119,9 @@
     panel.append(actions);
     const style=node('style',{'data-chatgpt-goal-inline':'style'});
     style.textContent=`
-.cggi-banner{box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:rgba(127,127,127,.12);color:inherit;text-align:left;font:inherit;cursor:pointer}
+.cggi-banner{position:relative;z-index:1;box-sizing:border-box;width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:9px 16px;border:1px solid rgba(127,127,127,.25);border-radius:18px 18px 0 0;background:#ececec;color:inherit;text-align:left;font:inherit;cursor:pointer}
+html.dark .cggi-banner,[data-theme=dark] .cggi-banner{background:#242424}
+@media(prefers-color-scheme:dark){html:not(.light):not([data-theme=light]) .cggi-banner{background:#242424}}
 .cggi-banner[hidden],.cggi-banner button[hidden]{display:none}
 .cggi-banner button{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:none;color:inherit;opacity:.65;cursor:pointer}
 .cggi-banner button:hover{background:rgba(127,127,127,.17);opacity:1}.cggi-banner button:disabled{opacity:.3;cursor:default}
@@ -140,22 +148,27 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     }
     resetFields();
     const phases={preparing:'Preparing message',sending:'Sending authorized message',clicked:'Awaiting send confirmation',waiting:'Active',recovering:'Recovering request',handoff:'Moving to a new chat',paused:'Paused',completed:'Model declared GOAL_COMPLETE',blocked:'Blocked',stopped:'Stopped',moved:'Moved to a new chat'};
+    const phaseLabel=value=>value?.resumeRequested?'Resume queued':value?.phase!=='blocked'?(phases[value?.phase]||value?.phase):
+      value.reason==='Модель ответила точным маркером GOAL_BLOCKED'?'Blocked':
+      value.reason==='Восстановление запроса завершилось ошибкой'?'Recovery paused':
+      value.operation?.status==='reserved'?'Send paused':'Needs review';
     function render() {
       if(!valid())return;
       const goalText=record?.goal||(composer?.phase==='intent'?composer.intent?.text:'');
       banner.hidden=!goalText||record?.phase==='moved';
-      bannerStatus.textContent='◎ '+(record?.phase==='blocked'&&record.operation?.status==='reserved'?'Send paused':record?(phases[record.phase]||'Goal'):'Goal pending');
+      bannerStatus.textContent='◎ '+(record?phaseLabel(record):'Goal pending');
       bannerText.textContent=goalText||'';
       banner.title=goalText||'';
       updateElapsed();
-      const on=(active()&&!record.stopRequested)||armed();
+      const on=(active()&&!record.stopRequested)||record?.resumeRequested===true||armed();
       toggle.setAttribute('aria-checked',String(on));
       toggle.disabled=!route||loading||busy||(!loaded&&!error)||(!on&&(!!record?.operation||record?.phase==='blocked'));
       toggle.title=!route?'Goal is available on ChatGPT chat pages':!loaded&&error?'Retry loading Goal':active()?'Stop Goal automatic continuations':armed()?'Turn Goal off':'Turn Goal on for the message you send';
       details.setAttribute('aria-expanded',String(open));
       const editable=!!route&&loaded&&!loading&&!busy&&!active()&&!armed();
       const paused=record?.phase==='paused'||record?.phase==='handoff'&&record.preHandoffPhase==='paused'||
-        record?.phase==='blocked'&&!record.operation&&record.reason==='Восстановление запроса завершилось ошибкой';
+        record?.phase==='blocked'&&!record.operation&&
+        ['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(record.reason);
       for(const input of Object.values(fields))input.disabled=!editable;
       const restorable=!record&&composer?.phase==='intent'&&Boolean(policy.canonical(route));
       buttons.restore.hidden=!restorable;
@@ -164,7 +177,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       buttons.resume.hidden=!paused;
       buttons.stop.hidden=!active()&&record?.phase!=='blocked';
       buttons.pause.disabled=busy||loading||!loaded||!!record?.pauseRequested||!!record?.stopRequested;
-      buttons.resume.disabled=busy||loading||!loaded||!!record?.operation;
+      buttons.resume.disabled=busy||loading||!loaded||!!record?.operation||!!record?.resumeRequested;
       buttons.stop.disabled=busy||loading||!loaded||!!record?.stopRequested;
       for(const action of ['stop','pause','resume']) {
         bannerActions[action].hidden=buttons[action].hidden;
@@ -174,13 +187,13 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       objective.textContent=restorable?'Saved objective: '+(composer.intent?.text||''):record?.goal?'Objective: '+record.goal+(record.supplements||[]).map((item,index)=>'\n\nFollow-up '+(index+1)+': '+item.userText).join(''):'';
       let message=!route?'Open a ChatGPT chat to use Goal.':!loaded?'Loading Goal…':'Off. Turn Goal on, then write the goal in the message box and send it yourself.';
       if(record) {
-        message=(phases[record.phase]||record.phase)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
+        message=phaseLabel(record)+' · '+record.continuations+' / '+record.maxContinuations+' continuations';
         if(record.deadlineAt)message+=' · deadline '+new Date(record.deadlineAt).toLocaleTimeString();
         if(record.reason)message+=' · '+record.reason;
         if(record.operation&&['blocked','stopped'].includes(record.phase))message+=record.operation.status==='reserved'
           ?' · Message was not sent. Stop Goal before starting again.'
-          :' · Previous send is unconfirmed. Review the activity log before a new Goal.';
-        if(record.phase==='blocked')message+=' · Review the activity log, then explicitly stop Goal.';
+          :' · Previous send is unconfirmed. Goal cannot continue automatically in this chat. Start a new Goal in a different chat in another tab; the saved operation and activity log are preserved.';
+        if(record.phase==='blocked'&&!paused)message+=' · Review the activity log before continuing.';
       }
       if(composer?.phase==='armed')message='On. Write the goal in the message box and send it yourself. Turn Goal off to change settings.';
       if(composer?.phase==='intent')message='Confirmation pending. Your objective is saved. Background verification continues without resending your message.';
@@ -226,9 +239,17 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       if(bindTimer!==null)win.clearTimeout(bindTimer);
       bindTimer=null;binding=null;
     }
+    function temporaryAllocation() {
+      const temporary=policy.temporaryPageUrl(getUrl());
+      if(!temporary||!binding||binding.origin!==ROOT_URL||route!==ROOT_URL||
+          binding.temporary&&binding.temporary!==temporary)return false;
+      binding.temporary=temporary;
+      return true;
+    }
     function syncRoute() {
       const next=current();
       if(next===route)return false;
+      if(temporaryAllocation())return false;
       const allocation=binding&&binding.origin===ROOT_URL&&route===ROOT_URL&&!!policy.canonical(next)&&
         (!binding.allocated||binding.allocated===next);
       route=next;epoch++;sequence++;
@@ -303,7 +324,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     function contextMatches(token) {
       if(!valid()||!binding||binding.token!==token)return false;
       syncRoute();
-      return !!binding&&binding.token===token&&current()===route&&
+      return !!binding&&binding.token===token&&(current()===route||temporaryAllocation())&&
         (route===binding.origin||route===binding.allocated);
     }
     function validateResult(result,url) {
@@ -356,6 +377,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     }
     async function pollBind(token) {
       if(!contextMatches(token))return;
+      if(temporaryAllocation()){scheduleBind();return;}
       if(Date.now()>=binding.deadline){scheduleBind();return;}
       binding.inFlight=true;
       const url=route,id=binding.id;
@@ -386,6 +408,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
     async function refresh() {
       if(!valid()||!mount())return;
       syncRoute();attach();
+      if(temporaryAllocation()){render();return;}
       if(!route){loaded=true;render();return;}
       if(busy){pendingRefresh=true;return;}
       const url=route,revision=epoch,serial=++sequence;
@@ -426,6 +449,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         } catch(cause){error=String(cause?.message||cause);render();return;}
       }
       if(action==='restore'){if(record||composer?.phase!=='intent')return;input={armId:composer.id};stopBinding();}
+      if(action==='stop'&&record?.id)input={goalId:record.id};
       if(action==='disarm') {
         if(!composer?.id)return;
         input={armId:composer.id};
@@ -488,7 +512,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       // A click after a failed read retries that read only. Unknown state is
       // never permission to arm, disarm or stop an existing Goal.
       if(!loaded){void refresh();return;}
-      void act(active()&&!record.stopRequested?'stop':armed()?'disarm':'arm');
+      void act((active()&&!record.stopRequested)||record?.resumeRequested?'stop':armed()?'disarm':'arm');
     });
     listen(details,'click',()=>{if(syncRoute()||!loaded)void refresh();show(!open);});
     listen(close,'click',()=>show(false));

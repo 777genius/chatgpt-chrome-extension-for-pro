@@ -16,7 +16,8 @@ native.setAttribute=(name:string,value:string)=>{if(name==='rel')nativeRelWrites
 let url='https://chatgpt.com/c/alpha',alive=true;
 const pending:Array<{url:string;resolve:(value:State)=>void}>=[];
 const world=createContext({URL});runInContext(source,world);
-const indicator=(world.ChatGPTStatusIndicator as Factory).create({document,getUrl:()=>url,alive:()=>alive,
+let composerIdle=false, activeRequest=false;
+const indicator=(world.ChatGPTStatusIndicator as Factory).create({document,getUrl:()=>url,alive:()=>alive,composerActivity:()=>composerIdle?'idle':'generating',hasActiveRequest:(_url:string,startedAt:number)=>activeRequest&&startedAt===4000,
  load:(requested:string)=>new Promise<State>(resolve=>pending.push({url:requested,resolve}))});
 const state=(kind:'error'|'success'|'loading'|null,revision:number,chat=url):State=>({ok:true,url:chat,revision,status:kind?{kind,eventAt:revision*1000}:null});
 const tick=()=>new Promise<void>(resolve=>setImmediate(resolve));
@@ -63,6 +64,13 @@ assert.equal(indicator.loadingStartedAt(),4000);
 const firstFrame=owned()!.getAttribute('href');
 assert.equal(indicator.tick({url,frame:1}),true);assert.notEqual(owned()!.getAttribute('href'),firstFrame,'loader really changes favicon frames');
 assert.match(decodeURIComponent(owned()!.getAttribute('href')!),/#2563eb/);
+composerIdle=true;indicator.tick({url,frame:2});
+assert.equal(owned(),null,'idle composer hides a stale loading animation');
+assert.equal(indicator.loadingStartedAt(),state('loading',4).status?.eventAt,'UI does not discard the underlying request');
+activeRequest=true;indicator.tick({url,frame:3});
+assert.ok(owned(),'an unresolved restored request keeps its loading icon even when the send button is visible');
+activeRequest=false;composerIdle=false;indicator.tick({url,frame:3});
+assert.ok(owned(),'visible generation can render the retained loading state again');
 assert.equal(indicator.tick({url:'https://chatgpt.com/c/other',frame:2}),false);
 assert.equal(indicator.tick({url,frame:8}),false);
 const relWritesBeforeFrames=nativeRelWrites;

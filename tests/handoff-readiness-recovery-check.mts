@@ -13,7 +13,7 @@ async function fixture(options:any={}) {
   locks,()=> 'key',{
    storage:{local:{get:async()=>({key:structuredClone(current)}),set:async(v:any)=>{writes++;current=structuredClone(v.key);}}},
    tabs:{get:async()=>({url:route,status:options.status||'complete'})},
-   scripting:{executeScript:async()=>{nativeCalls++;return [{result:{ok:options.nativeOk!==false}}];}}
+   scripting:{executeScript:async(params:any)=>{nativeCalls++;const action=params.args[0].action;return [{result:{ok:options.nativeOk!==false&&(options.seeded?action==='inspect-resumable-handoff':action==='inspect-empty-handoff')}}];}}
   },async()=>({ok:true,events,storageError:options.storageError||''}),()=>{},
   {handoffPreparationReady:async()=>{goalCalls++;if(options.routeDuringGoal)route='https://chatgpt.com/c/new-manual';return {ok:options.goalOk!==false};}},async(e:any)=>events.push(e));
  const result=await fn(7,state);
@@ -25,6 +25,13 @@ assert.equal(ready.current.preparationRecoveries,1);
 assert.equal(ready.goalCalls,1);
 const uploadTimeout=await fixture({events:[{kind:'handoff.preparing',operationId:'handoff-fixture'},{kind:'attachment.status',status:'uploading',operationId:'handoff-fixture'}]});
 assert.equal(uploadTimeout.current.stage,'navigating','proven no-send upload timeout recovers through the same sender');
+const seeded=await fixture({seeded:true,record:{lastUserText:'доделай е2е',draft:''}});
+assert.equal(seeded.current.stage,'navigating','an exact native seed may recover');
+assert.equal(seeded.current.draft,'доделай е2е','the destination text is durably saved as a draft before recovery');
+const conflictingDraft=await fixture({seeded:true,record:{lastUserText:'доделай е2е',draft:'different saved draft'}});
+assert.equal(conflictingDraft.writes,0,'never overwrite a different saved draft');
+const unmatchedSeed=await fixture({seeded:true,nativeOk:false,record:{lastUserText:'доделай е2е'}});
+assert.equal(unmatchedSeed.writes,0,'unverified destination text cannot resume');
 await ready.fn(7,ready.state);
 assert.equal(ready.events.filter(e=>e.kind==='handoff.preparation_recovered').length,1,'repeat GET cannot reopen the operation');
 for(const kind of ['handoff.sending','handoff.sent','handoff.awaiting-confirmation','handoff.clicked','send.authorized','send.dispatched','send.not_clicked','request.started']) {

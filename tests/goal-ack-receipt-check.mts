@@ -49,7 +49,13 @@ for(const kind of ['duplicate-send','duplicate-request','other-tab','other-url',
  assert.equal((await store.report(args)).ok,false);
  const before=sent.length;assert.equal((await store.report({...args,nativeConfirmed:true})).ok,true);
  assert.equal(data['chatgpt-goal:'+url].phase,'waiting');assert.equal(data['chatgpt-goal:'+url].operation,null);
- assert.equal(sent.length,before);assert.equal((await store.report({...args,nativeConfirmed:true})).ok,false,'spent confirmation cannot increment budgets again');
+ assert.equal(sent.length,before);
+ const snapshot=structuredClone(data),eventCount=events.length;
+ const repeated=await store.report({...args,nativeConfirmed:true});
+ assert.equal(repeated.ok,true);assert.equal(repeated.alreadyConfirmed,true,'the exact spent operation receives an idempotent acknowledgement');
+ assert.deepEqual(data,snapshot);assert.equal(events.length,eventCount,'duplicate acknowledgement does not write history again');
+ for(const changed of [{id:'other-goal'},{operationId:'other-operation'},{tabId:8},{url:'https://chatgpt.com/c/other'}])
+  assert.equal((await store.report({...args,...changed,nativeConfirmed:true})).ok,false,'another operation, owner or chat cannot reuse confirmation');
 }
 console.log('Goal ACK receipts: immutable native serialization, unique operation/request/URL/tab evidence, bounded cache and guarded blocked confirmation passed.');
 {
@@ -65,4 +71,31 @@ for(const scenario of ['duplicate-grant','grant-before-operation','dispatch-befo
  if(scenario==='dispatch-before-grant')h.events[0].recordedAt=1500;
  if(scenario==='missing-time')delete h.events[2].recordedAt;
  assert.equal((await h.proof()).sendWindow,null,scenario);
+}
+
+// Both ACK sources may queue while clicked. Only the first confirmation may
+// commit and process the early final reply; the loser must still restore drafts.
+{
+ const data:V={},events:V[]=[],sent:V[]=[];let writes=0;
+ const ctx=createContext({URL,console});
+ for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),ctx);
+ ctx.dependencies={storage:{get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>{writes++;Object.assign(data,structuredClone(v));}},
+  tabs:{get:async()=>({id:7,url}),sendMessage:async(id:number,m:V)=>{sent.push(m);return {ok:true};}},
+  appendJournal:async(e:V)=>{events.push(e);return {ok:true};},now:()=>1000,uuid:()=> 'racing-goal'};
+ const store=runInContext('ChatGPTGoalStore.create(dependencies)',ctx);
+ await store.start({url,tabId:7,goal:'Synthetic race goal',maxContinuations:10,maxMinutes:1440});
+ const goal=data['chatgpt-goal:'+url],op=goal.operation,promptKey='/c/ack-receipt-fixture|accepted';
+ await store.intent({url,tabId:7,id:goal.id,operationId:op.id,text:op.text,baselineKey:'/c/ack-receipt-fixture|before'});
+ await store.report({url,tabId:7,id:goal.id,operationId:op.id,status:'clicked'});
+ await store.completion({url,tabId:7,promptKey,completionKey:promptKey+'|answer',response:'GOAL_COMPLETE',
+  nativeVerified:true,rawExact:true,userId:'native-user'});
+ const beforeWrites=writes,beforeSends=sent.length;
+ const ack={url,tabId:7,id:goal.id,operationId:op.id,status:'confirmed',newPromptKey:promptKey,nativeConfirmed:true};
+ const results=await Promise.all([store.report(ack),store.report(ack)]);
+ assert.equal(results.every(result=>result.ok),true,'both racing observers receive a successful ACK');
+ assert.equal(results.filter(result=>result.alreadyConfirmed).length,1);
+ assert.equal(events.filter(event=>event.kind==='goal.confirmed').length,1);
+ assert.equal(events.filter(event=>event.kind==='goal.answer_complete').length,1,'the staged answer is processed once');
+ assert.equal(writes-beforeWrites,2,'only confirmation and answer completion are persisted');
+ assert.equal(data['chatgpt-goal:'+url].phase,'completed');assert.equal(sent.length,beforeSends);
 }

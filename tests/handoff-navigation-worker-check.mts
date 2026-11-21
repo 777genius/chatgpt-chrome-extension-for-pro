@@ -34,6 +34,32 @@ async function fixture(o:V={}){
  assert.deepEqual(h.notices,[{type:'CHATGPT_HANDOFF_NAVIGATION_READY',id:h.record.id,url}]);
  assert.equal((await h.recover(7,h.record)).ok,false);assert.equal(h.notices.length,1);assert.equal(h.events.filter(e=>e.kind==='handoff.navigation_recovered').length,1);
 }
+{
+ const reason='Исходный чат или запрос изменился; переход отменён';
+ const h=await fixture({record:{reason}});
+ assert.equal(h.result.ok,true);assert.equal(h.current.id,h.record.id);
+ assert.equal(h.current.stage,'navigating');assert.equal(h.goalArgs[0].reason,reason);
+ assert.equal(h.notices.length,1);
+ const raced=await fixture({record:{reason},events:[{kind:'handoff.navigation_intent',operationId:'saved-navigation'}]});
+ assert.equal(raced.result.ok,false);assert.equal(raced.writes,0);
+}
+// The normal persisted-state read actually invokes the guarded recovery;
+// testing the helper alone would miss a disconnected recovery path.
+{
+ const reason='Исходный чат или запрос изменился; переход отменён';
+ const original={id:'saved-navigation',stage:'failed',reason,sourceUrl:url};
+ const prefix=source.slice(source.indexOf('async function handleHandoffMessage('),
+   source.indexOf('  const previous = (handoffWrites.get(tabId)',source.indexOf('async function handleHandoffMessage(')));
+ const end=prefix.lastIndexOf('  const previous = handoffWrites.get(tabId)');
+ const getBody=(end>=0?prefix.slice(0,end):prefix)+'\n}';
+ let calls=0;
+ const handler=new Function('handoffKey','handoffWrites','chrome','recoverHandoffNavigation','goalController',getBody+';return handleHandoffMessage;')(
+  ()=> 'key',new Map(),{storage:{local:{get:async()=>({key:original})}}},
+  async(_tab:number,saved:V)=>{calls++;assert.equal(saved.id,original.id);return {ok:true,record:{...saved,stage:'navigating'}};},
+  {handoffBegin:async()=>({ok:true}),get:async()=>null,handoffFailed:async()=>{},handoffConfirm:async()=>{}});
+ const result=await handler({type:'CHATGPT_HANDOFF_GET'},7);
+ assert.equal(calls,1);assert.equal(result.record.stage,'navigating');
+}
 for(const options of [
  {record:{sendReceipt:{clickedAt:101}}},{record:{navigationRecoveries:1}},{record:{reason:'Unknown failure'}},
  {events:[{kind:'handoff.navigation_intent',operationId:'saved-navigation'}]},
@@ -41,6 +67,7 @@ for(const options of [
  {events:[{kind:'handoff.sending',operationId:'saved-navigation'}]},
  {events:[{kind:'send.authorized',operationId:'saved-navigation'}]},
  {events:[{kind:'request.started',tabId:7,operationId:'other',recordedAt:102}]},
+ {events:[{kind:'request.started',tabId:8,sourceUrl:url,operationId:'other',recordedAt:102}]},
  {grant:true},{otherGrant:true},{retryPreparing:true},{url:'https://chatgpt.com/c/other'},{status:'loading'},
  {native:{generating:true}},{native:{hasError:false}},{native:{isReadOnly:true}},{native:{userText:'Changed sent message'}},
  {error:{action:'retry'}},{error:{incomplete:true}},{composer:{matches:false}},{composer:{effort:'medium'}},{composer:{model:'other'}},

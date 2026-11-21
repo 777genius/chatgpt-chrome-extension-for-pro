@@ -15,15 +15,16 @@ const source='https://chatgpt.com/c/inline-worker-source';
 const other='https://chatgpt.com/c/inline-worker-other';
 const calls:{kind:string,value:any}[]=[];
 const tabReads:number[]=[];
-let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='';
-const context=createContext({URL,
+let composerPhase='armed';
+let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='',tabClosed=false;
+const context=createContext({URL,setTimeout,
   chrome:{runtime:{onMessage:{addListener:(value:Listener)=>{listener=value;}}},tabs:{
-    get:async(id:number)=>{tabReads.push(id);return {id,url:currentUrl};},
+    get:async(id:number)=>{tabReads.push(id);if(tabClosed)throw Error('tab closed');return {id,url:currentUrl};},
     query:async()=>{activeQueries++;return [{id:99,url:other}];}
   }},
   bindNativeComposerGoal:async(tabId:number,url:string,armId:string)=>{calls.push({kind:'bind',value:{tabId,url,armId}});return {ok:true};},
   goalController:{
-    composerGet:async(value:any)=>{calls.push({kind:'composerGet',value});return {id:'armed',phase:'armed',url:composerUrlOverride||currentUrl};},
+    composerGet:async(value:any)=>{calls.push({kind:'composerGet',value});return {id:'armed',phase:composerPhase,url:composerUrlOverride||currentUrl};},
     composerArm:async(value:any)=>{calls.push({kind:'arm',value});return {ok:true,record:{id:'armed'}};},
     composerDisarm:async(value:any)=>{calls.push({kind:'disarm',value});return {ok:true,record:null};},
     composerIntent:async(value:any)=>{calls.push({kind:'intent',value});return {ok:true,record:{id:'armed',phase:'intent'}};},
@@ -43,6 +44,18 @@ const call=(message:any,from=sender())=>new Promise<any>((resolve,reject)=>{
 });
 const request=(action:string,extra:Record<string,unknown>={})=>({type:'CHATGPT_GOAL_INLINE',action,url:source,...extra});
 
+tabClosed=true;
+assert.equal((await call(request('disarm',{armId:'armed'}))).ok,true,'an explicit switch-off already in flight survives tab closure');
+assert.deepEqual(structuredClone(calls.at(-1)),{kind:'disarm',value:{tabId:7,armId:'armed'}});
+assert.equal((await call(request('disarm'))).ok,false,'closed-tab Stop requires the exact arm ID');
+assert.equal((await call(request('stop',{goalId:'saved-goal'}))).ok,true,'an in-flight Stop retains its exact Goal binding');
+assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action:'stop',url:source,tabId:7,id:'saved-goal'}});
+assert.equal((await call(request('stop'))).ok,false,'closed-tab Stop requires a Goal ID');
+assert.equal((await call(request('resume',{armId:'armed'}))).ok,false,'a closed tab cannot resume or dispatch');
+tabClosed=false;calls.length=0;tabReads.length=0;
+
+// A stuck page inspection must not hold up the state shown by the switch.
+context.reconcileBlockedManualHandoff=()=>new Promise(()=>{});
 const read=await call(request('get',{tabId:99}));
 assert.equal(read.ok,true);
 assert.equal(read.tabId,7);
@@ -61,6 +74,8 @@ for(const action of ['pause','resume','stop']) {
   assert.equal((await call(request(action))).ok,true);
   assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action,url:source,tabId:7}});
 }
+assert.equal((await call(request('stop',{goalId:'saved-goal'}))).ok,true);
+assert.deepEqual(structuredClone(calls.at(-1)),{kind:'control',value:{action:'stop',url:source,tabId:7,id:'saved-goal'}});
 assert.equal(activeQueries,0,'inline actions use the sending tab even when a different tab is active');
 assert.ok(tabReads.every(id=>id===7));
 for(const action of ['arm','disarm','intent','bind']) {
@@ -80,6 +95,25 @@ assert.equal((await call(request('intent',{url:composerUrlOverride,armId:'armed'
  'a root intent may arrive after the native page receives its canonical destination');
 assert.equal(calls.findLast(value=>value.kind==='intent')!.value.url,composerUrlOverride);
 composerUrlOverride='';
+
+const alias='https://chatgpt.com/c/local-chatgpt%3Aabc-123';
+currentUrl=alias;composerUrlOverride='https://chatgpt.com/';
+const rootIntent=request('intent',{url:composerUrlOverride,armId:'armed',eventAt:100000,text:'Sent root goal',baselineKey:''});
+assert.equal((await call(rootIntent,{tab:{id:7,url:alias},frameId:0})).ok,true,'temporary allocation accepts only the already-armed root intent');
+assert.equal((await call({...rootIntent,armId:'another'},{tab:{id:7,url:alias},frameId:0})).ok,false,'another arm cannot use the temporary allocation');
+assert.equal((await call({...rootIntent,action:'arm'},{tab:{id:7,url:alias},frameId:0})).ok,false,'temporary route cannot start another Goal');
+for(const phase of ['armed','intent']) {
+ composerPhase=phase;
+ assert.equal((await call({...rootIntent,action:'disarm'},{tab:{id:7,url:alias},frameId:0})).ok,true,'matching root arm disarms on its temporary allocation');
+}
+for(const [patch,from] of [
+ [{armId:'other'},{tab:{id:7,url:alias},frameId:0}],
+ [{url:source},{tab:{id:7,url:alias},frameId:0}],
+ [{},{tab:{id:7,url:'https://chatgpt.com/c/local-chatgpt%3Aother'},frameId:0}],
+ [{},{tab:{id:7,url:source},frameId:0}]
+] as [any,any][])assert.equal((await call({...rootIntent,...patch,action:'disarm'},from)).ok,false);
+composerPhase='bound';assert.equal((await call({...rootIntent,action:'disarm'},{tab:{id:7,url:alias},frameId:0})).ok,false);
+composerPhase='armed';currentUrl=source;composerUrlOverride='';
 
 const mutations=()=>calls.filter(value=>!['get','composerGet'].includes(value.kind));
 const accepted=mutations().length;

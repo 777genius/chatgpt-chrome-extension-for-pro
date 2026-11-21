@@ -2,7 +2,7 @@
 
 ## Name
 
-ChatGPT Prompt-Bound Completion Alert
+ChatGPT Goals, Notifications & Retries
 
 ## Short description
 

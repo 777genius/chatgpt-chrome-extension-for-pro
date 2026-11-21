@@ -14,7 +14,7 @@ Local extension storage contains operation intents and confirmations, request/re
 
 ## Where information goes
 
-The extension has no developer-operated server, analytics, advertising or tracking endpoint. It does not upload your journal or drafts to the developer. Extension state uses Chrome local storage and, for some temporary request/bootstrap records, Chrome session storage. It does not use Chrome storage sync.
+The extension has no developer-operated server, analytics, advertising or tracking endpoint. It does not upload your journal or drafts to the developer. Extension state uses Chrome local storage and, for some temporary request/bootstrap records, Chrome session storage. If Chrome's local storage temporarily rejects writes (for example a full disk), the same records are kept in this extension's own IndexedDB (`chatgpt-resilient-storage`) on your device until Chrome storage accepts writes again, then moved back and removed from it. It does not use Chrome storage sync.
 
 Automatic retries and conversation handoffs are enabled. The extension can send continuation instructions, create a new chat in the same tab, submit recent context as text or a generated text attachment, and rename the new conversation through ChatGPT's own interface. Goal mode sends further continuations after you explicitly enable/start it, subject to saved limits and pause/stop controls. These actions send information to OpenAI through your logged-in ChatGPT session, where OpenAI's policies and your account settings apply. They may use your ChatGPT plan allowance. The extension does not independently verify that the model's claimed task completion is correct.
 

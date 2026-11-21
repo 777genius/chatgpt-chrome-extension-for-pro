@@ -1,0 +1,8 @@
+import assert from 'node:assert/strict';import{readFileSync}from'node:fs';import{createContext,runInContext}from'node:vm';
+const source=readFileSync('extension/page-probe.js','utf8'),start=source.indexOf('async function inspectObservedStreamStatus('),end=source.indexOf('// Serialized into ChatGPT',start);assert.ok(start>0&&end>start);
+const url='https://chatgpt.com/c/fixture',path='https://chatgpt.com/backend-api/conversation/fixture/stream_status';let entries=[{name:path}],status='COMPLETE',http=200,calls=0;
+const ctx=createContext({URL,AbortSignal,location:{origin:'https://chatgpt.com',pathname:'/c/fixture'},performance:{getEntriesByType:()=>entries},fetch:async(u:string,o:any)=>{calls++;assert.equal(u,path);assert.equal(o.method,'GET');assert.equal(o.credentials,'same-origin');assert.equal(o.redirect,'error');return {ok:http===200,json:async()=>({status})}}});runInContext(source.slice(start,end),ctx);const check=()=>runInContext(`inspectObservedStreamStatus(${JSON.stringify(url)})`,ctx);
+assert.equal((await check()).ok,true);status='IN_PROGRESS';assert.equal((await check()).ok,false);status='COMPLETE';http=429;assert.equal((await check()).ok,false);http=200;
+entries=[{name:'https://evil.invalid/backend-api/conversation/fixture/stream_status'}];const previous=calls;assert.equal((await check()).ok,false);assert.equal(calls,previous,'unobserved or foreign route must never be fetched');
+entries=[{name:path}];ctx.location.pathname='/c/another';assert.equal((await check()).ok,false);
+console.log('Native stream status: only observed same-origin GET and exact COMPLETE authorize idle evidence.');

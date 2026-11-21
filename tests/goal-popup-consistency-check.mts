@@ -8,6 +8,7 @@ const source=readFileSync(new URL('../extension/popup.js',import.meta.url),'utf8
 const inline=readFileSync(new URL('../extension/goal-inline.js',import.meta.url),'utf8');
 const {document}=parseHTML(html);
 const chrome={
+  storage:{local:{get:async()=>({})}},
   runtime:{
     sendMessage:async (message:{type:string})=>message.type==='CHATGPT_GOAL_CONTROL'?
       {ok:true,tabId:1,url:'https://chatgpt.com/c/synthetic',record:null}:{ok:true,available:false},
@@ -16,6 +17,7 @@ const chrome={
   tabs:{create:()=>{}}
 };
 const ctx=createContext({document,chrome,URL,Blob,setTimeout,console});
+runInContext(readFileSync('extension/goal-policy.js','utf8'),ctx);
 runInContext(source,ctx);
 const objective=document.getElementById('goal-text') as HTMLTextAreaElement|null;
 assert.ok(objective,'popup has a goal textarea');
@@ -29,7 +31,7 @@ ctx.sample={goal:'Original goal',phase:'waiting',rules:'',continuations:0,maxCon
 runInContext('showGoal(sample)',ctx);
 assert.equal(objective.value,'Original goal','original objective must not be rewritten');
 assert.equal(followups.hidden,false);
-assert.equal(followups.textContent,'Дополнение 1:\nLine 1\nLine 2\n\nДополнение 2:\nSecond follow-up');
+assert.equal(followups.textContent,'Update 1:\nLine 1\nLine 2\n\nUpdate 2:\nSecond follow-up');
 runInContext('showGoal({...sample,supplements:[]})',ctx);
 assert.equal(followups.hidden,true,'no stale follow-ups on another goal');
 assert.equal(followups.textContent,'');
