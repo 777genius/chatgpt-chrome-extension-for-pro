@@ -182,7 +182,10 @@
     try {
       const turns = Array.from(pageRoot().querySelectorAll('[data-testid^="conversation-turn-"]'));
       if (turns.length > 0) return turns;
-      return Array.from(pageRoot().querySelectorAll('[data-chatgpt-search-unit-key*="fallback-turn-"]'));
+      // Native search units can use a server turn ID instead of the older
+      // fallback-turn prefix. Ignore retained hidden rows from other turns.
+      return Array.from(pageRoot().querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'))
+        .filter(node=>node.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
     } catch {
       return [];
     }
@@ -1418,9 +1421,11 @@
       scheduleErrorCheck(0);
       return;
     }
-    if (error.recovery && promptKey === sourcePath && !info?.recoveryBinding) {
-      // A bare route is not a user-message identity. Keep observing until a
-      // native user or assistant-only turn can be bound; do not guess idle.
+    if (error.recovery && promptKey === sourcePath && (!info?.recoveryBinding ||
+        info.action==='retry'&&info.recoveryBinding.kind!=='assistant-only')) {
+      // A bare route cannot identify a user message, even when the error
+      // probe has its native ID. Wait for the same rendered prompt that the
+      // shared Stop/send guards require, without consuming a retry.
       visibleErrors.delete(error.fingerprint);
       scheduleErrorCheck(5000);
       return;

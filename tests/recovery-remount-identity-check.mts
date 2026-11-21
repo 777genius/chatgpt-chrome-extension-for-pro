@@ -10,6 +10,7 @@ async function check(initial:string,rendered:string,binding:any,recovery=true,re
 }
 assert.deepEqual(await check('/c/test','/c/test|user',null),{audits:0,handled:0,scheduled:1,visible:false});
 assert.deepEqual(await check('/c/test','',null),{audits:0,handled:0,scheduled:1,visible:false});
+assert.deepEqual(await check('/c/test','',{kind:'user',entryId:'native-entry',userId:'native-user'}),{audits:0,handled:0,scheduled:1,visible:false},'native user identity alone cannot make a route-only key safe for Stop');
 assert.deepEqual(await check('/c/test|user','/c/test|user',null),{audits:1,handled:1,scheduled:0,visible:true});
 assert.deepEqual(await check('/c/test','',{kind:'assistant-only'}),{audits:1,handled:1,scheduled:0,visible:true});
 assert.deepEqual(await check('/c/test|user','/c/test|user',null,true,true),{audits:1,handled:0,scheduled:1,visible:false});

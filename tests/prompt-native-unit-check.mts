@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {createContext,runInContext} from 'node:vm';
+import {parseHTML} from 'linkedom';
+const {document,window}=parseHTML('<html><body><main data-app-shell-active-page="true"><div data-chatgpt-search-unit-key="turn-uuid:0:user">actual user</div><div data-chatgpt-search-unit-key="turn-uuid:2:assistant">actual answer</div><div hidden data-chatgpt-search-unit-key="fallback-turn-99:0:user">stale</div></main></body></html>');
+Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return this.hidden?[]:[{width:10,height:10}]},configurable:true});
+const source=readFileSync('extension/content-script.js','utf8');
+const start=source.indexOf('  function pageRoot() {'),end=source.indexOf('  function answerBoundToLatestPrompt()',start);
+assert.ok(start>0&&end>start);
+const c=createContext({document,location:{pathname:'/c/test'},normalize:(value:any)=>String(value||'').replace(/\s+/g,' ').trim()});
+runInContext(source.slice(start,end),c);
+let result=runInContext('latestPromptSnapshot()',c);
+assert.equal(result.promptKey,'/c/test|turn-uuid:0:user');assert.equal(result.assistantKey,'turn-uuid:2:assistant');assert.equal(result.response,'actual answer');
+document.querySelector('[data-chatgpt-search-unit-key="turn-uuid:0:user"]')!.setAttribute('data-chatgpt-search-unit-key','fallback-turn-0:0:user');
+result=runInContext('latestPromptSnapshot()',c);assert.equal(result.promptKey,'/c/test|fallback-turn-0:0:user');
+document.querySelector('[data-chatgpt-search-unit-key="fallback-turn-0:0:user"]')!.setAttribute('inert','');
+assert.equal(runInContext('latestPromptSnapshot()',c),null,'hidden or inert history cannot identify a current prompt');
+console.log('Prompt identity: visible server and fallback units, hidden and inert history passed.');
