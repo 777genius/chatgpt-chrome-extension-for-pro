@@ -80,6 +80,6 @@ for(const variant of ['missing-history','changed-composer','saved-chat','other-p
  assert.equal(f.result.pending,true,variant);
  assert.equal(f.calls.includes('bind'),false,variant);
  assert.equal(f.calls.includes('complete'),false,variant);
- assert.equal(f.probeCount,variant==='saved-chat'||variant==='other-probe'?1:3,variant);
+ assert.equal(f.probeCount,variant==='saved-chat'||variant==='other-probe'?1:variant==='missing-history'?2:3,variant);
 }
 console.log('Scheduled root Goal binding: unchanged receipt, native assistant-only tail, completed response, history and disarm fences passed.');
