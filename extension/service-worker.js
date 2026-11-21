@@ -1722,8 +1722,19 @@ async function reconcileQueuedGoalResume(tabId,url) {
   const receipt=await latestRequestReceipt(tabId),journal=await readJournal();
   const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
   const n=checked?.result,requests=journal?.events?.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===url&&e.requestId===receipt?.requestId&&e.eventAt===receipt?.startedAt)||[];
+  // Older entries may be unavailable. Recovery only needs an unbroken,
+  // ordered history from this exact request through the current journal tail.
+  // Missing or duplicated entries in that interval still make the outcome
+  // ambiguous and must never authorize a continuation.
+  const events=journal?.events,sequence=journal?.meta?.sequence,requestSequence=requests[0]?.sequence;
+  const suffix=Array.isArray(events)&&Number.isSafeInteger(requestSequence)
+    ?events.filter(e=>e.sequence>=requestSequence):[];
+  const completeSuffix=Number.isSafeInteger(sequence)&&Number.isSafeInteger(requestSequence)&&requestSequence>0&&
+    Array.isArray(events)&&events.every((e,i)=>Number.isSafeInteger(e.sequence)&&e.sequence<=sequence&&
+      (i===0||e.sequence>events[i-1].sequence))&&suffix.length===sequence-requestSequence+1&&
+    suffix.every((e,i)=>e.sequence===requestSequence+i);
   if(typeof receipt?.requestId!=='string'||!receipt.requestId||!Number.isFinite(receipt.startedAt)||
-      !journal?.ok||journal.storageError||journal.events.length!==journal.meta?.sequence||journal.events.some((e,i)=>e.sequence!==i+1)||
+      !journal?.ok||journal.storageError||!completeSuffix||
       requests.length!==1||journal.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence)||
       !n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.turnStatus!=='complete'||n.generating!==false||n.hasError||
       n.assistantCompleted!==true||n.assistantPhase!=='final_answer'||!n.assistantKey||!n.userId||!n.promptKey||
