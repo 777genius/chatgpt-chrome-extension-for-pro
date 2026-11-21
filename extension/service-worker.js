@@ -1773,7 +1773,46 @@ async function reconcileQueuedGoalResume(tabId,url) {
     return goalController.control({action:'resume',url,tabId,verifiedResumeRecord:goal});
   }
   if(!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(goal.reason))return pending();
-  if(n.promptKey!==goal.expectedPromptKey) {
+  if(n.promptKey!==goal.expectedPromptKey&&goal.reason==='Модель ответила точным маркером GOAL_BLOCKED') {
+    // The latest turn alone cannot prove that earlier manual additions were
+    // saved. Anchor at the exact blocked completion and witness the complete
+    // ordered suffix before adopting every later user turn atomically.
+    const anchors=journal.events.filter(e=>e.kind==='goal.answer_blocked'&&e.tabId===tabId&&e.goalId===goal.id&&
+      e.completionKey===goal.lastCompletionKey&&e.promptKey===goal.expectedPromptKey);
+    const anchor=anchors.length===1?anchors[0]:null;
+    const interval=anchor?journal.events.filter(e=>e.sequence>=anchor.sequence):[];
+    if(!anchor||interval.length!==journal.meta.sequence-anchor.sequence+1||
+        interval.some((e,i)=>e.sequence!==anchor.sequence+i))return pending();
+    const turns=interval.filter(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url));
+    if(!turns.length||turns.length>100||turns.at(-1).requestId!==receipt.requestId||
+        turns.some((e,i)=>e.tabId!==tabId||e.sourceUrl!==url||e.operationId||typeof e.requestId!=='string'||!e.requestId||
+          !Number.isFinite(e.eventAt)||i&&e.eventAt<=turns[i-1].eventAt||
+          interval.filter(x=>x.kind==='retry.preparation_superseded'&&x.tabId===tabId&&x.sourceUrl===url&&
+            x.requestId===e.requestId&&x.startedAt===e.eventAt).length!==1)||
+        new Set(turns.map(e=>e.requestId)).size!==turns.length)return pending();
+    const [history]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true,null,turns[0].eventAt]});
+    const h=history?.result,timeline=h?.recoveryTimeline,first=Array.isArray(timeline)?timeline.findIndex(x=>x.userId===h.userId):-1;
+    const tail=first>=0?timeline.slice(first):[];
+    if(!h?.ok||h.isReadOnly!==false||tail.length!==turns.length||tail.at(-1)?.userId!==n.userId||
+        tail.at(-1)?.promptKey!==n.promptKey||tail.at(-1)?.userText!==n.userText||tail.at(-1)?.userSentAtMs!==n.userSentAtMs||
+        tail.some((u,i)=>typeof u.userId!=='string'||!u.userId||typeof u.userText!=='string'||!u.userText.trim()||
+          !Number.isFinite(u.userSentAtMs)||Math.abs(u.userSentAtMs-turns[i].eventAt)>10000||
+          turns.filter(r=>Math.abs(r.eventAt-u.userSentAtMs)<=10000).length!==1))return pending();
+    const [again]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+    const currentJournal=await readJournal(),currentInterval=currentJournal?.events?.filter(e=>e.sequence>=anchor.sequence)||[];
+    if(!currentJournal?.ok||currentJournal.storageError||currentInterval.length!==currentJournal.meta?.sequence-anchor.sequence+1||
+        currentInterval.some((e,i)=>e.sequence!==anchor.sequence+i)||
+        currentInterval.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>turns.at(-1).sequence)||
+        JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
+        again?.result?.userId!==n.userId||again.result.promptKey!==n.promptKey||again.result.userText!==n.userText||
+        again.result.userSentAtMs!==n.userSentAtMs||again.result.assistantKey!==n.assistantKey||again.result.hasError||
+        again.result.goalResponse!==n.goalResponse||again.result.goalRawExact!==n.goalRawExact||
+        again.result.goalMarkerPending!==n.goalMarkerPending||again.result.turnStatus!=='complete'||again.result.generating!==false||
+        ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
+    const additions=tail.map((u,i)=>({...u,requestId:turns[i].requestId,startedAt:turns[i].eventAt}));
+    const adopted=await goalController.resumeWithSupplements({url,tabId,expectedRecord:goal,supplements:additions,nativeVerified:true});
+    if(!adopted?.ok)return pending();
+  } else if(n.promptKey!==goal.expectedPromptKey) {
     const superseded=journal.events.filter(e=>e.kind==='retry.preparation_superseded'&&e.tabId===tabId&&e.sourceUrl===url&&e.requestId===receipt.requestId&&e.startedAt===receipt.startedAt);
     if(requests[0].operationId||superseded.length!==1||typeof n.userText!=='string'||!n.userText.trim()||n.userText.length>10000)return pending();
     const staged=await goalController.manual({url,tabId,requestId:receipt.requestId,startedAt:receipt.startedAt,eventAt:receipt.startedAt,text:n.userText,baselineKey:goal.expectedPromptKey});

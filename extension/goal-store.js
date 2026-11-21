@@ -932,6 +932,38 @@
         await event('resumed',next,tabId);await save(next);return {ok:true,record:view(next)};
       });
     }
+    // Adopt a fully witnessed run of manual messages atomically. No send is
+    // granted here: completion still evaluates the latest native answer.
+    async function resumeWithSupplements({url,tabId,expectedRecord,supplements,nativeVerified}) {
+      const target=requireUrl(url);requireTab(tabId);
+      return serialize(async()=>{
+        const old=await read(target);
+        if(nativeVerified!==true||JSON.stringify(view(old))!==JSON.stringify(expectedRecord)||
+            old?.phase!=='blocked'||old.reason!=='Модель ответила точным маркером GOAL_BLOCKED'||
+            old.resumeRequested!==true||old.operation||old.manualPending||old.stopRequested||old.pauseRequested||
+            old.manualOverride||now()>=old.deadlineAt||!Array.isArray(supplements)||!supplements.length||supplements.length>100)return {ok:false};
+        const knownRequests=new Set((old.supplements||[]).map(x=>x.requestId));
+        const knownUsers=new Set((old.supplements||[]).map(x=>x.userId));
+        const added=[];let previous=old.manualStartedAt||old.startedAt||0;
+        for(const item of supplements) {
+          if(typeof item.requestId!=='string'||!item.requestId||knownRequests.has(item.requestId)||
+              typeof item.userId!=='string'||!item.userId||knownUsers.has(item.userId)||
+              !Number.isFinite(item.startedAt)||item.startedAt<=previous||!Number.isFinite(item.userSentAtMs)||
+              Math.abs(item.startedAt-item.userSentAtMs)>10000||typeof item.userText!=='string'||
+              !item.userText.trim()||item.userText.length>10000||typeof item.promptKey!=='string'||
+              !item.promptKey.startsWith(new URL(target).pathname+'|'))return {ok:false};
+          knownRequests.add(item.requestId);knownUsers.add(item.userId);previous=item.startedAt;
+          added.push({...item,tabId,text:item.userText,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
+        }
+        const last=added.at(-1),next={...old,phase:'waiting',reason:'',resumeRequested:false,
+          expectedPromptKey:last.promptKey,manualStartedAt:last.startedAt,manualSupplementBinding:last,
+          supplements:[...(old.supplements||[]),...added],manualPending:null,manualPendingQueue:[],
+          handoffPending:false,markerPending:null,pendingCompletion:null,pendingSendKind:null,
+          earlyCompletion:null,earlyCompletions:[],manualEarlyCompletion:null,manualEarlyCompletions:[]};
+        await event('manual_supplements_recovered',next,tabId,{requestIds:added.map(x=>x.requestId)});
+        await save(next);return {ok:true,record:view(next)};
+      });
+    }
     async function expireQueuedResume({url,tabId}) {
       const target=requireUrl(url);requireTab(tabId);
       return serialize(async()=>{const old=await read(target);
@@ -1166,7 +1198,7 @@
       // recovery if execution stops before this replay.
       if(early)await completion(early);
     }
-    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffAfterUnsent,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,handoffRetryBind,stageHandoffCompletion,
+    return Object.freeze({get,start,composerGet,composerObserveBlockedRequest,composerArm,composerDisarm,composerIntent,composerRequest,composerObserveOrigin,composerFollowup,composerBind,composerRestore,restoreBoundHandoff,recoverTab,control,resumeObserved,resumeWithSupplements,expireQueuedResume,rebindPrompt,retryPreparation,check,intent,authorize,report,recoverAcknowledgement,completion,manual,manualBind,retry,handoffBegin,handoffAfterUnsent,handoffFailed,handoffPreparationReady,handoffSourceCompleted,handoffConfirm,handoffRetryBind,stageHandoffCompletion,
       context:async url=>{const record=await getRaw(url);return record&&(!['moved','completed','stopped','blocked'].includes(record.phase)||retryBlockedForHandoff(record))?policy.handoffText(record):'';}});
   }
   const api=Object.freeze({create});

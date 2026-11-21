@@ -891,3 +891,17 @@ console.log('Blocked handoff submitted-message witness: durable, idempotent, no 
  assert.equal(state(env).phase,'preparing');assert.equal(state(env).goal,objective);
  assert.equal(state(env).deadlineAt,deadline);assert.equal(env.messages.length,2);
 }
+for(const scenario of ['valid','stale','duplicate','stopped','expired']) {
+ const env=fixture();await begin(env);await confirm(env);
+ await answer(env,{response:'GOAL_BLOCKED',rawExact:true});
+ await env.store.control({url:URL_A,tabId:7,action:'resume'});
+ const expectedRecord=await env.store.get(URL_A),t=Math.max(state(env).manualStartedAt||0,state(env).startedAt)+1000;
+ const additions=[{requestId:'manual-a',userId:'user-a',startedAt:t,userSentAtMs:t+1,promptKey:'/c/goal-fixture-a|manual-a',userText:'First'},
+   {requestId:scenario==='duplicate'?'manual-a':'manual-b',userId:'user-b',startedAt:t+20000,userSentAtMs:t+20001,promptKey:'/c/goal-fixture-a|manual-b',userText:'Second'}];
+ if(scenario==='stopped')await env.store.control({url:URL_A,tabId:7,action:'stop'});
+ if(scenario==='expired')env.time=state(env).deadlineAt;
+ const result=await env.store.resumeWithSupplements({url:URL_A,tabId:7,expectedRecord:scenario==='stale'?{...expectedRecord,id:'stale'}:expectedRecord,supplements:additions,nativeVerified:true});
+ assert.equal(result.ok,scenario==='valid',scenario);
+ assert.equal((state(env).supplements||[]).length,scenario==='valid'?2:0,scenario+' is atomic');
+ assert.equal(env.messages.length,1,'adopting supplements never dispatches');
+}
