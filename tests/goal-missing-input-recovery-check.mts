@@ -169,6 +169,43 @@ console.log('Goal restoration across handoff: exact operation lineage, explicit 
  assert.equal(g.sourceContexts.length,2);assert.equal(g.supplements.length,2);
  assert.equal(f.dispatched.length,0,'an active response is not interrupted or resent');
 }
+// Explicit recovery may cross a failed no-send handoff directly into the
+// owner's next manually allocated chat. Unknown sends, changed routes, or
+// mismatched handoff identity must still leave the original intent untouched.
+for(const scenario of ['valid','send-evidence','wrong-handoff','route-changed']) {
+ const f=await fixture(),source='https://chatgpt.com/c/source-fixture',
+   reason='Не удалось дождаться готовности нового чата';
+ f.events[1].changes.url=source;f.events[1].sourceUrl=source;
+ f.events.splice(2,0,
+   {kind:'handoff.navigating',tabId:7,sourceUrl:source,operationId:'failed-direct',text:'Retained recovery context'},
+   {kind:'handoff.failed',tabId:7,sourceUrl:source,operationId:'failed-direct',reason},
+   {kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'manual-direct',eventAt:2100},
+   {kind:'tab.updated',tabId:7,changes:{url}});
+ if(scenario==='send-evidence')f.events.splice(4,0,{kind:'send.dispatched',tabId:7,operationId:'failed-direct',text:'Uncertain historical send'});
+ f.events.forEach((event:V,i:number)=>{event.sequence=i+1;});
+ f.data['handoff:7']={id:scenario==='wrong-handoff'?'other-handoff':'failed-direct',
+   stage:'failed',sourceUrl:source,targetUrl:'https://chatgpt.com/',reason,
+   text:'Retained recovery context',draft:'Private owner draft'};
+ if(scenario==='route-changed')f.route('https://chatgpt.com/c/other');
+ if(scenario==='valid')assert.equal((await f.recover()).pending,true,'a manual bridge cannot grant automatic restore');
+ const result=await f.recover(true);
+ if(scenario==='valid') {
+   assert.equal(result.ok,true,'owner-authorized direct manual bridge consumes proven no-send failure');
+   const goal=f.data['chatgpt-goal:'+url],handoff=f.data['handoff:7'];
+   assert.equal(goal.goal,'Exact original objective');
+   assert.equal(goal.originUrl,source);
+   assert.deepEqual(goal.supplements.map((s:V)=>s.userText),f.users.map((s:V)=>s.userText));
+   assert.equal(handoff.stage,'superseded');
+   assert.equal(handoff.draft,'Private owner draft');
+   assert.equal(f.data['chatgpt-handoff-archive:failed-direct'].draft,'Private owner draft');
+   assert.equal(f.journal.filter((e:V)=>e.kind==='handoff.superseded').length,1);
+ } else {
+   assert.equal(result.pending,true,scenario);
+   assert.equal(f.data['chatgpt-goal:'+url],undefined,scenario);
+   assert.equal(f.data['handoff:7'].stage,'failed',scenario);
+ }
+ assert.equal(f.dispatched.length,0,'a manual bridge never replays an old handoff send');
+}
 {
  const f=await fixture(true);const origin=transfer(f,'sent');
  await f.store.composerObserveOrigin({tabId:7,armId:'root-arm',url:origin,requestId:'root-request',startedAt:1100,userId:'original-native-user',userText:'Exact original objective',userSentAtMs:1100,firstMessageVerified:true,nativeVerified:true});
