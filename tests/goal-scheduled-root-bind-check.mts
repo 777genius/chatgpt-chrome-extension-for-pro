@@ -5,6 +5,7 @@ import {createContext,runInContext} from 'node:vm';
 // Exercise the worker binder and its real scheduled root recovery, not merely
 // the isolated trace helper. A retained original request can be current while
 // assistant-only turns make the ordinary root probe return messages-missing.
+// Scheduled fallback supplies user identity only: it must not certify completion.
 const worker=readFileSync('extension/service-worker.js','utf8');
 const start=worker.indexOf('async function recoverNativeComposerGoal(');
 const end=worker.indexOf('async function inspectBoundNativeTurn(',start);
@@ -26,9 +27,7 @@ async function run(variant:Variant) {
    promptKey:'/c/scheduled-recovery|native-user'};
  const native:any={ok:true,url,isLatest:true,isReadOnly:false,...user,
    userVisibleText:user.userText,firstTurn:true,firstTurnMessageIds:[user.userId],
-   recoveryTimeline:[user],turnStatus:'complete',generating:false,hasError:false,
-   assistantCompleted:true,assistantPhase:'final_answer',assistantKey:'final-answer',
-   goalResponse:'GOAL_COMPLETE',goalRawExact:true};
+   recoveryTimeline:[user],firstTurn:false};
  if(variant==='missing-history')native.recoveryTimeline=[];
  const events:any[]=[
    {kind:'request.started',tabId:7,sourceUrl:rootIntent?root:url,
@@ -69,8 +68,8 @@ async function run(variant:Variant) {
 {
  const f=await run('scheduled');
  assert.equal(f.result.ok,true);
- assert.deepEqual(f.calls,['observe','bind','complete'],
-   'unchanged original receipt and final native answer bind and complete once');
+ assert.deepEqual(f.calls,['observe','bind'],
+   'unchanged receipt can bind the original user without completing an assistant-only tail');
  assert.deepEqual(f.scheduledFlags,[true,true],
    'both recovery probes inspect the exact scheduled native turn');
  assert.equal(f.probeCount,3,'ordinary probe fails before two scheduled recovery inspections');
@@ -82,4 +81,4 @@ for(const variant of ['missing-history','changed-composer','saved-chat','other-p
  assert.equal(f.calls.includes('complete'),false,variant);
  assert.equal(f.probeCount,variant==='saved-chat'||variant==='other-probe'?1:variant==='missing-history'?2:3,variant);
 }
-console.log('Scheduled root Goal binding: unchanged receipt, native assistant-only tail, completed response, history and disarm fences passed.');
+console.log('Scheduled root Goal binding: unchanged receipt, identity-only assistant tail, no false completion, history and disarm fences passed.');
