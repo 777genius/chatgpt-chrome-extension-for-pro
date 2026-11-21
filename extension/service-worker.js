@@ -1759,7 +1759,7 @@ async function reconcileQueuedGoalResume(tabId,url) {
   if(typeof receipt?.requestId!=='string'||!receipt.requestId||!Number.isFinite(receipt.startedAt)||
       !journal?.ok||journal.storageError||!completeSuffix||
       requests.length!==1||journal.events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence)||
-      !n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.turnStatus!=='complete'||n.generating!==false||n.hasError||
+      !n?.ok||n.isLatest!==true||n.isReadOnly!==false||n.turnStatus!=='complete'||n.generating!==false||n.hasError!==false||
       n.assistantCompleted!==true||n.assistantPhase!=='final_answer'||!n.assistantKey||!n.userId||!n.promptKey||
       !Number.isFinite(n.userSentAtMs)||Math.abs(n.userSentAtMs-receipt.startedAt)>10000||
       receipt.submittedUserId&&receipt.submittedUserId!==n.userId)return pending();
@@ -1767,7 +1767,7 @@ async function reconcileQueuedGoalResume(tabId,url) {
   if(JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
       fresh?.result?.userId!==n.userId||fresh.result.userText!==n.userText||fresh.result.userSentAtMs!==n.userSentAtMs||fresh.result.promptKey!==n.promptKey||fresh.result.assistantKey!==n.assistantKey||
       fresh.result.goalResponse!==n.goalResponse||fresh.result.goalRawExact!==n.goalRawExact||fresh.result.goalMarkerPending!==n.goalMarkerPending||
-      fresh.result.isLatest!==true||fresh.result.isReadOnly!==false||fresh.result.hasError||
+      fresh.result.isLatest!==true||fresh.result.isReadOnly!==false||fresh.result.hasError!==false||
       fresh.result.turnStatus!=='complete'||fresh.result.generating!==false||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
   if(goal.reason==='Модель ответила точным маркером GOAL_BLOCKED'&&n.promptKey===goal.expectedPromptKey&&
       goal.lastCompletionKey===n.promptKey+'|'+n.assistantKey) {
@@ -1813,7 +1813,7 @@ async function reconcileQueuedGoalResume(tabId,url) {
         JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
         again?.result?.ok!==true||again.result.isLatest!==true||again.result.isReadOnly!==false||
         again.result.userId!==n.userId||again.result.promptKey!==n.promptKey||again.result.userText!==n.userText||
-        again.result.userSentAtMs!==n.userSentAtMs||again.result.assistantKey!==n.assistantKey||again.result.hasError||
+        again.result.userSentAtMs!==n.userSentAtMs||again.result.assistantKey!==n.assistantKey||again.result.hasError!==false||
         again.result.goalResponse!==n.goalResponse||again.result.goalRawExact!==n.goalRawExact||
         again.result.goalMarkerPending!==n.goalMarkerPending||again.result.turnStatus!=='complete'||again.result.generating!==false||
         ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
@@ -1831,7 +1831,7 @@ async function reconcileQueuedGoalResume(tabId,url) {
   const [last]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
   if(last?.result?.userId!==n.userId||last.result.userText!==n.userText||last.result.userSentAtMs!==n.userSentAtMs||last.result.promptKey!==n.promptKey||last.result.assistantKey!==n.assistantKey||
       last.result.goalResponse!==n.goalResponse||last.result.goalRawExact!==n.goalRawExact||last.result.goalMarkerPending!==n.goalMarkerPending||
-      last.result.isLatest!==true||last.result.isReadOnly!==false||last.result.hasError||
+      last.result.isLatest!==true||last.result.isReadOnly!==false||last.result.hasError!==false||
       last.result.turnStatus!=='complete'||last.result.generating!==false||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
       ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
   const finalJournal=await readJournal(),finalSuffix=finalJournal?.events?.filter(e=>e.sequence>=requestSequence)||[];

@@ -20,7 +20,7 @@ for(const mutate of [
  (x:any)=>{x.journal.events[0].sequence=101;x.journal.events.push({kind:'request.started',tabId:7,sourceUrl:url,sequence:102});x.journal.meta.sequence=102}
 ]){const {x}=await run(mutate);assert.deepEqual(x.calls,[],'gaps, duplicates, missing tail and a newer request must not authorize recovery');}
 {const {x}=await run(x=>{x.goal.reason='Модель ответила точным маркером GOAL_BLOCKED';x.goal.lastCompletionKey=prompt+'|answer'});assert.deepEqual(x.calls,['control'],'explicit resume can continue after the same model-declared block');}
-for(const changes of [{isReadOnly:true},{isLatest:false},{hasError:true}]) {
+for(const changes of [{isReadOnly:true},{isLatest:false},{hasError:true},{hasError:undefined}]) {
  const {x}=await run(x=>{x.flipAt=2;x.flipChanges=changes});assert.deepEqual(x.calls,[],'changed fresh probe must not resume');
  const final=await run(x=>{x.flipAt=3;x.flipChanges=changes});assert.deepEqual(final.x.calls,['resumeObserved'],'changed final probe must not complete or send');
 }
