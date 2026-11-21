@@ -1804,7 +1804,8 @@ async function reconcileQueuedGoalResume(tabId,url) {
         currentInterval.some((e,i)=>e.sequence!==anchor.sequence+i)||
         currentInterval.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>turns.at(-1).sequence)||
         JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
-        again?.result?.userId!==n.userId||again.result.promptKey!==n.promptKey||again.result.userText!==n.userText||
+        again?.result?.ok!==true||again.result.isLatest!==true||again.result.isReadOnly!==false||
+        again.result.userId!==n.userId||again.result.promptKey!==n.promptKey||again.result.userText!==n.userText||
         again.result.userSentAtMs!==n.userSentAtMs||again.result.assistantKey!==n.assistantKey||again.result.hasError||
         again.result.goalResponse!==n.goalResponse||again.result.goalRawExact!==n.goalRawExact||
         again.result.goalMarkerPending!==n.goalMarkerPending||again.result.turnStatus!=='complete'||again.result.generating!==false||
