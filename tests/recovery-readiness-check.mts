@@ -4,12 +4,18 @@ import {createContext,runInContext} from 'node:vm';
 import {parseHTML} from 'linkedom';
 
 const source=['memory-maintenance.js','handoff-title.js','completion-state.js','content-script.js'].map(name=>readFileSync(`extension/${name}`,'utf8')).join('\n');
-type Mode='delayed'|'timeout'|'manual-edit'|'generation-resumed'|'missing-stop'|'selector-miss'|'assistant-idle';
+type Mode='delayed'|'timeout'|'manual-edit'|'generation-resumed'|'missing-stop'|'selector-miss'|'assistant-idle'|'server-unit';
 type Message=Record<string,any>;
 const originalDraft='Owner draft\n  exact whitespace';
 
 async function check(mode:Mode) {
   const {document,window}=parseHTML('<html><head><title>Recovery fixture</title></head><body><main><article data-testid="conversation-turn-source" data-turn="user">Request</article><article data-testid="conversation-turn-partial" data-turn="assistant"><div class="markdown">Partial answer before interrupted connection</div></article></main><form data-composer-body><div id="prompt-textarea" contenteditable="true"></div><button data-testid="send-button" type="button" disabled>Send</button><button data-testid="stop-button" type="button">Stop</button></form></body></html>');
+  if(mode==='server-unit') {
+    const user=document.querySelector('[data-turn="user"]')!,assistant=document.querySelector('[data-turn="assistant"]')!;
+    user.removeAttribute('data-testid');assistant.removeAttribute('data-testid');
+    user.setAttribute('data-chatgpt-search-unit-key','server-turn-uuid:0:user');
+    assistant.setAttribute('data-chatgpt-search-unit-key','server-turn-uuid:2:assistant');
+  }
   Object.defineProperty(window.Node,'DOCUMENT_POSITION_FOLLOWING',{value:4,configurable:true});
   Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value:()=>[{width:240,height:32}],configurable:true});
   Object.assign(document,{visibilityState:'hidden',createRange:()=>({selectNodeContents(){}}),execCommand:(_command:string,_show:boolean,text:string)=>{editor.textContent=text;return true;}});
@@ -34,9 +40,10 @@ async function check(mode:Mode) {
       if(message.type==='CHATGPT_RETRY_DRAFT_CLAIM'){context.draftClaim=message;return runInContext('claimRetryDraft(location.href,draftClaim.operationId,draftClaim.savedSequence,{id:7,url:location.href})',context);}
       if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
       if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);context.journalEvent=message.event;return runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);}
-      if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry',recoveryBinding:mode==='assistant-idle'?{kind:'assistant-only',url:'https://chatgpt.com/c/recovery-fixture',entryId:'conversation-turn-partial',assistantId:'assistant-id',userId:null}:null};
+      if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry',recoveryBinding:mode==='assistant-idle'?{kind:'assistant-only',url:'https://chatgpt.com/c/recovery-fixture',entryId:'conversation-turn-partial',assistantId:'assistant-id',userId:null}:mode==='server-unit'?{kind:'user',url:'https://chatgpt.com/c/recovery-fixture',entryId:'server-turn-uuid',userId:'server-user-id',assistantId:null}:null};
       if(message.type==='CHATGPT_STOP_RECOVERY'){
         stops++;assert.equal(editor.textContent,originalDraft,'native stop must precede changing the owner draft');
+        if(mode==='server-unit'){assert.equal(message.promptKey,'/c/recovery-fixture|server-turn-uuid:0:user');assert.equal(message.recoveryBinding?.userId,'server-user-id');}
         if(mode==='missing-stop')return {ok:false,stopped:false,reason:'Нативная кнопка остановки не найдена; автопродолжение отменено'};
         if(mode==='assistant-idle'){assert.equal(message.recoveryBinding?.assistantId,'assistant-id');stoppedAt=time;return {ok:true,stopped:false,idle:true,proof:'native-voice-idle'};}
         stoppedAt=time;editor.textContent='';document.querySelector('[data-testid="stop-button"]')!.remove();document.querySelector('[role="status"]')!.remove();
@@ -87,7 +94,7 @@ async function check(mode:Mode) {
     return;
   }
   assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.timeoutMs===60000),'a successful recovery stop grants one bounded 60-second readiness budget');
-  if(mode==='delayed'||mode==='selector-miss'||mode==='assistant-idle'){
+  if(mode==='delayed'||mode==='selector-miss'||mode==='assistant-idle'||mode==='server-unit'){
     assert.deepEqual(sends,['доделай е2е']);assert.ok(sendAt-stoppedAt>10000);assert.ok(nativeInspects>1);
     assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.phase==='send-button'));
     assert.ok(logs.some(event=>event.kind==='retry.readiness'&&event.phase==='native-ready'));
@@ -105,5 +112,5 @@ async function check(mode:Mode) {
   }
 }
 
-for(const mode of ['delayed','timeout','manual-edit','generation-resumed','missing-stop','selector-miss','assistant-idle'] as const)await check(mode);
-console.log('PASS: hidden recovery readiness beyond 10s, native model settling, one intent/click, bounded 60s failure, manual edit/generation cancellation, draft preservation and no partial-answer success');
+for(const mode of ['delayed','timeout','manual-edit','generation-resumed','missing-stop','selector-miss','assistant-idle','server-unit'] as const)await check(mode);
+console.log('PASS: hidden recovery readiness beyond 10s, native model settling, one intent/click, bounded 60s failure, manual edit/generation cancellation, draft preservation, server turn IDs and no partial-answer success');
