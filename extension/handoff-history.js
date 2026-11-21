@@ -4,7 +4,8 @@
 // and request; identical user-authored text is not enough to suppress it.
 globalThis.ChatGPTHandoffHistory = (() => {
   function select(messages, events, sourceUrl, limit=50) {
-    const eligible=events.filter(e=>e.sourceUrl===sourceUrl);
+    const canonical=globalThis.ChatGPTGoalPolicy.canonical(sourceUrl);
+    const eligible=canonical?events.filter(e=>globalThis.ChatGPTGoalPolicy.canonical(e.sourceUrl)===canonical):[];
     const automatic=[];
     for(const send of eligible.filter(e=>e.kind==='send.dispatched'&&e.operationId&&typeof e.text==='string'&&e.text)) {
       const same=eligible.filter(e=>e.operationId===send.operationId&&e.tabId===send.tabId);

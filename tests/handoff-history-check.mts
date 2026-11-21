@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';import{readFileSync}from'node:fs';import{createContext,runInContext}from'node:vm';import{parseHTML}from'linkedom';
-const ctx=createContext({});runInContext(readFileSync('extension/handoff-history.js','utf8'),ctx);const select=(m:any[],e:any[])=>JSON.parse(JSON.stringify(ctx.ChatGPTHandoffHistory.select(m,e,'https://chatgpt.com/c/source')));
+const ctx=createContext({URL});runInContext(readFileSync('extension/goal-policy.js','utf8'),ctx);runInContext(readFileSync('extension/handoff-history.js','utf8'),ctx);const select=(m:any[],e:any[])=>JSON.parse(JSON.stringify(ctx.ChatGPTHandoffHistory.select(m,e,'https://chatgpt.com/c/source')));
 const sourceUrl='https://chatgpt.com/c/source',op='automatic',tabId=1,events=[{kind:'retry.send_intent',operationId:op,sourceUrl,tabId},{kind:'send.authorized',operationId:op,sourceUrl,tabId},{kind:'send.dispatched',operationId:op,sourceUrl,tabId,text:'доделай е2е'},{kind:'request.started',operationId:op,sourceUrl,tabId,eventAt:100000}];
 const messages=[{role:'user',id:'manual',text:'доделай е2е',sentAtMs:50000},{role:'assistant',id:'a',text:'Detailed progress'}, {role:'user',id:'auto',text:'доделай е2е',sentAtMs:100050},{role:'assistant',id:'blocked',text:'GOAL_BLOCKED'}, {role:'assistant',id:'quoted',text:'The marker GOAL_BLOCKED appears in this explanation.'},{role:'user',id:'new',text:'Why?',sentAtMs:150000}];
 assert.deepEqual(select(messages,events).map((x:any)=>x.id),['manual','a','quoted','new'],'exclude only positively matched automatic send and exact marker');
@@ -62,3 +62,12 @@ agentButton.__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConver
 const agentCtx=createContext({document:agentDom.document,URL,location:{pathname:'/c/source'}});runInContext(readFileSync('extension/page-probe.js','utf8'),agentCtx);
 const agentHistory=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',agentCtx)));
 assert.deepEqual(agentHistory.messages.map((x:any)=>x.text),['Original task','Visible progress 1','Visible progress 2'],'include completed user-facing progress only, in original order');
+
+for(const variant of ['https://chatgpt.com/c/source?model=pro','https://chatgpt.com/c/source#latest','https://chatgpt.com/c/source/']) {
+ const equivalent=events.map(event=>({...event,sourceUrl:variant}));
+ assert.ok(!select(messages,equivalent).some((message:any)=>message.id==='auto'),'equivalent chat URLs retain exact automatic provenance');
+ const selected=JSON.parse(JSON.stringify(ctx.ChatGPTHandoffHistory.select(messages,events,variant)));
+ assert.ok(!selected.some((message:any)=>message.id==='auto'),'canonicalize the caller URL as well');
+ assert.ok(select(messages,equivalent.map(event=>({...event,sourceUrl:variant.replace('/source','/different')}))).some((message:any)=>message.id==='auto'),
+  'a different chat cannot suppress identical user text');
+}

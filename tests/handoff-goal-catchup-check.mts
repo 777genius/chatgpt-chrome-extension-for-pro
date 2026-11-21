@@ -100,3 +100,16 @@ for(const change of ['different-user','different-text','unconfirmed','ungranted'
  await h.run();assert.equal(h.messages.length,0,change);
 }
 console.log('Handoff retry: verified retry response resumes once; identity, state and request fences hold.');
+
+{
+ const h=retried();
+ h.journal.unshift({kind:'retry.planned',requestId:'old',retryUserId:'accepted-user',operationId:'cancelled',tabId:7,sourceUrl:url},
+  {kind:'retry.cancelled',operationId:'cancelled',tabId:7,sourceUrl:url});
+ h.journal.forEach((e,i)=>e.sequence=i+1);
+ await h.run();assert.equal(h.messages.length,1,'cancelled plan cannot hide the uniquely delivered replacement');
+ assert.equal(h.events.filter(e=>e.kind==='goal.handoff_retry_bound').length,1);
+}
+{
+ const h=retried();h.journal.unshift({...h.journal[0]});h.journal.forEach((e,i)=>e.sequence=i+1);
+ await h.run();assert.equal(h.messages.length,0,'ambiguous duplicate delivery candidates stay fenced');
+}

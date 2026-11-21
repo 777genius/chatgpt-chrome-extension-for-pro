@@ -62,7 +62,7 @@
       opened = new Promise((resolve, reject) => {
         let request;
         // A synchronous throw must not leave a rejected promise cached forever.
-        try { request = indexedDB.open(name, 1); } catch (error) { opened = null; reject(error); return; }
+        try { request = indexedDB.open(name, 1); } catch (error) { reject(error); return; }
         request.onupgradeneeded = () => request.result.createObjectStore(STORE, { keyPath: 'key' });
         request.onsuccess = () => {
           const db = request.result;
@@ -70,9 +70,9 @@
           db.onclose = () => { opened = null; };
           resolve(db);
         };
-        request.onerror = () => { opened = null; reject(request.error || new Error('IndexedDB overlay could not be opened')); };
-        request.onblocked = () => { opened = null; reject(new Error('IndexedDB overlay is blocked')); };
-      });
+        request.onerror = () => reject(request.error || new Error('IndexedDB overlay could not be opened'));
+        request.onblocked = () => reject(new Error('IndexedDB overlay is blocked'));
+      }).catch(error => { opened = null; throw error; });
       return opened;
     }
     async function transaction(mode, run) {

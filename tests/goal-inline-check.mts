@@ -398,14 +398,16 @@ for(const variant of ['same','different-intent','unrelated-error'] as const) {
   assert.match(f.panel().textContent!,/Previous send is unconfirmed/);f.instance.dispose();
 }
 
-// Explicitly stopped uncertain sends can arm a fresh manual goal without
-// dispatching or clearing the older operation.
+// Stopping an uncertain send keeps the chat fence and directs a new Goal to
+// another chat without reading or submitting the owner draft.
 for(const opStatus of ['intent','clicked']) {
   const f=fixture();await tick();
   f.setRecord({...goal(chat,'stopped'),reason:'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском',operation:{status:opStatus}});
-  await f.instance.refresh();assert.equal(f.toggle().disabled,false);
-  f.click(f.toggle());await tick();
-  assert.ok(f.calls.some(c=>c.action==='arm'));
+  await f.instance.refresh();assert.equal(f.toggle().disabled,true);
+  f.details().click();assert.match(f.panel().textContent!,/different chat in another tab/);
+  const draft=f.draft();f.click(f.toggle());await tick();
+  assert.ok(f.calls.every(c=>c.action==='get'),'the blocked toggle cannot create a replacement Goal');
+  assert.equal(f.draft(),draft);assert.equal(f.state.draftReads,0);
   assert.equal(f.state.nativeSends,0);
   f.instance.dispose();
 }

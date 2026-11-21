@@ -83,13 +83,23 @@
     const pattern=/\[([^\]\n]{1,500})\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
     const links=[...nativeText.matchAll(pattern)];
     if(nativeText.replace(pattern,'').includes(']('))return false;
-    const captured=[];
+    return capturedLinksMatch(intent,links,linkTargets);
+  }
+  function capturedLinksMatch(intent,links,linkTargets) {
+    // Automatic URL links are optional matches. Keep both possibilities when
+    // the same URL is also the target of a later, explicitly captured label.
+    let positions=new Set([0]);
     for(const match of links) {
       const target=match[2].replace(/\\([()\\])/g,'$1');
-      if(target===linkTargets[captured.length])captured.push(target);
-      else if(match[1]!==target||!intent.includes(target))return false;
+      const automatic=match[1]===target&&intent.includes(target),next=new Set();
+      for(const position of positions) {
+        if(automatic)next.add(position);
+        if(target===linkTargets[position])next.add(position+1);
+      }
+      if(!next.size)return false;
+      positions=next;
     }
-    return captured.length===linkTargets.length&&captured.every((target,index)=>target===linkTargets[index]);
+    return positions.has(linkTargets.length);
   }
   // A virtualized first turn may retain only ChatGPT's Markdown serialization.
   // Accept it for an explicit recovery only when all extra bytes consist of
@@ -99,20 +109,17 @@
         nativeText.length<intent.length||nativeText.length>100000||!Array.isArray(linkTargets)||
         !linkTargets.length||linkTargets.length>32||linkTargets.some(x=>typeof x!=='string'||
           x.length>2048||!/^https?:\/\//.test(x)))return false;
+    const pattern=/\[([^\]\n]{1,500})\]\((https?:\/\/(?:\\.|[^)\s])+)\)/g;
+    const links=[...nativeText.matchAll(pattern)];
+    if(nativeText.replace(pattern,'').includes('](')||!capturedLinksMatch(intent,links,linkTargets))return false;
+    // Remove destinations before the objective scan: punctuation in a URL
+    // belongs to the link and cannot stand in for punctuation in the task.
+    const labels=nativeText.replace(pattern,(_match,label)=>label);
     let i=0,j=0,added='';
-    while(i<intent.length&&j<nativeText.length) {
-      if(intent[i]===nativeText[j]){i++;j++;}else added+=nativeText[j++];
+    while(i<intent.length&&j<labels.length) {
+      if(intent[i]===labels[j]){i++;j++;}else added+=labels[j++];
     }
-    if(i!==intent.length)return false;
-    added=(added+nativeText.slice(j)).replace(/\\([()\\])/g,'$1');
-    const markdownOnly=value=>/^[\[\]()*`\\]*$/.test(value);
-    let cursor=0;
-    for(const target of linkTargets) {
-      const at=added.indexOf(target,cursor);
-      if(at<cursor||!markdownOnly(added.slice(cursor,at)))return false;
-      cursor=at+target.length;
-    }
-    return markdownOnly(added.slice(cursor));
+    return i===intent.length&&/^[\[\]()*`\\]*$/.test(added+labels.slice(j));
   }
   function exactMarker(response,rawExact,nativeVerified) {
     return nativeVerified===true&&rawExact===true&&response===MARKER;

@@ -216,3 +216,48 @@ console.log('Goal restoration across handoff: exact operation lineage, explicit 
  assert.equal((await f.successor(true)).ok,true);assert.equal(f.data['chatgpt-goal:'+url].supplements.length,2,'exact persisted supplements are not duplicated or reordered');
  assert.deepEqual(f.data['chatgpt-handoff-archive:handoff-id'],original,'original unknown-send snapshot stays immutable');assert.equal(f.dispatched.length,0);
 }
+
+function failedManualBridge(f:any) {
+ const source='https://chatgpt.com/c/source-fixture';f.events[1].changes.url=source;f.events[1].sourceUrl=source;
+ f.events.splice(2,0,{kind:'handoff.navigating',tabId:7,sourceUrl:source,operationId:'failed-bridge',text:'Retained source context'},
+  {kind:'handoff.failed',tabId:7,sourceUrl:source,operationId:'failed-bridge',reason:'Не удалось дождаться готовности нового чата'},
+  {kind:'request.started',tabId:7,sourceUrl:'https://chatgpt.com/',requestId:'manual-bridge',eventAt:8000},
+  {kind:'tab.updated',tabId:7,changes:{url}});
+ f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ f.history.recoveryTimeline.unshift({userId:'bridge-user',userText:'Manual destination message',userSentAtMs:8000,promptKey:prefix+'bridge'});
+ f.data['handoff:7']={id:'failed-bridge',stage:'failed',sourceUrl:source,targetUrl:'https://chatgpt.com/',reason:'Не удалось дождаться готовности нового чата',text:'Retained source context',draft:'Retained private draft'};
+}
+{
+ const f=await fixture();failedManualBridge(f);const original=structuredClone(f.data['handoff:7']);
+ assert.equal((await f.recover()).pending,true,'manual no-send bridge needs explicit owner restore');
+ assert.equal((await f.recover(true)).pending,undefined,'verified failed handoff needs no invented send receipt');
+ assert.equal(f.data['chatgpt-goal:'+url].goal,'Exact original objective');
+ assert.equal(f.data['chatgpt-goal:'+url].supplements.length,3);assert.equal(f.data['handoff:7'].stage,'superseded');
+ assert.deepEqual(f.data['chatgpt-handoff-archive:failed-bridge'],original);
+ assert.equal(f.data['handoff:7'].acceptance,undefined);assert.equal(f.dispatched.length,0);
+}
+for(const scenario of ['send-receipt','authorized','dispatched','request','wrong-record','wrong-source','wrong-reason','source-stop']) {
+ const f=await fixture();failedManualBridge(f);const h=f.data['handoff:7'];
+ if(scenario==='send-receipt')h.sendReceipt={operationId:h.id,clickedAt:14000};
+ if(['authorized','dispatched','request'].includes(scenario))f.events.push({tabId:7,sourceUrl:h.sourceUrl,operationId:h.id,kind:scenario==='request'?'request.started':'send.'+scenario});
+ if(scenario==='wrong-record')h.id='other';if(scenario==='wrong-source')h.sourceUrl=url;
+ if(scenario==='wrong-reason')h.reason='Unknown click';
+ if(scenario==='source-stop')f.data['chatgpt-goal:'+h.sourceUrl]={id:'other',phase:'paused'};
+ f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ assert.equal((await f.recover(true)).pending,true,scenario);assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.dispatched.length,0);
+}
+
+{
+ const f=await fixture();failedManualBridge(f);const user=f.history.recoveryTimeline[0];
+ f.events.splice(f.events.findIndex((e:V)=>e.requestId==='follow-request-0'));f.events.forEach((e:V,i:number)=>e.sequence=i+1);
+ Object.assign(f.native,user);Object.assign(f.history,user,{recoveryTimeline:[user]});
+ assert.equal((await f.recover(true)).pending,undefined,'first manual allocation alone is a valid explicitly restored successor');
+ assert.equal(f.data['chatgpt-goal:'+url].supplements.length,1);assert.equal(f.dispatched.length,0);
+}
+
+{
+ const f=await fixture();failedManualBridge(f);let probes=0;
+ f.after(()=>{if(++probes===4)f.events.push({sequence:f.events.length+1,kind:'send.authorized',operationId:'failed-bridge',tabId:7});});
+ assert.equal((await f.recover(true)).pending,true,'new grant evidence during final native inspection prevents no-send bridge retirement');
+ assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.dispatched.length,0);
+}

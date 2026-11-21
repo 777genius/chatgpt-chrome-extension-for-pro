@@ -1476,7 +1476,9 @@
                 (globalThis.__chatgptNotifierRequestId||null)!==requestId)return;
             const next=await runtimeMessage({type:'CHATGPT_INSPECT_ERROR',
               alertIndex:Array.from(document.querySelectorAll(ERROR_SELECTOR)).indexOf(alert),captureHistory:true});
-            if(!runtimeAvailable()||location.pathname!==sourcePath||!alert.isConnected||next?.action!=='new-chat')return;
+            if(!runtimeAvailable()||location.pathname!==sourcePath||!alert.isConnected||next?.action!=='new-chat'||
+                (globalThis.__chatgptNotifierAttemptId||'')!==attemptId||
+                (globalThis.__chatgptNotifierRequestId||null)!==requestId)return;
             if(next.incomplete||!next.messages?.length) {
               historyRetryTimer=setTimeout(()=>void recheck(),30000);
               return;

@@ -40,6 +40,33 @@ function fakeOverlay() {
 const sharedLock=()=>{let tail:Promise<unknown>=Promise.resolve();return (fn:()=>Promise<unknown>)=>{const run=tail.then(fn);tail=run.catch(()=>{});return run;};};
 const make=(primary:any,overlay:any,lock?:any)=>lib.create({primary,overlay,probeIntervalMs:0,...(lock?{lock}:{})});
 
+// A transient synchronous open failure must not poison the cached connection.
+// Until the overlay can be inspected, preserve the existing write fence.
+{
+  let opens=0;
+  const indexedDB={open(){
+    if(++opens===1)throw new Error('Synthetic IndexedDB temporarily unavailable');
+    const request:any={result:{transaction(){
+      const tx:any={objectStore:()=>({openKeyCursor(){
+        const cursor:any={};
+        queueMicrotask(()=>{cursor.onsuccess({target:{result:null}});tx.oncomplete();});
+        return cursor;
+      }})};
+      return tx;
+    }}};
+    queueMicrotask(()=>request.onsuccess());
+    return request;
+  }};
+  const primary=fakePrimary({intent:'previous operation'});
+  const overlay=lib.createIndexedDbOverlay({indexedDB}),store=make(primary,overlay);
+  assert.deepEqual(await store.get('intent'),{intent:'previous operation'});
+  assert.equal(store.status().unknown,true,'failed startup inspection keeps the overlay unknown');
+  await store.set({intent:'new persisted operation'});
+  assert.equal(opens,2,'the next write retries IndexedDB.open after its synchronous failure');
+  assert.equal(store.status().unknown,false);
+  assert.deepEqual(await store.get('intent'),{intent:'new persisted operation'});
+}
+
 assert.equal(lib.isStorageFault(new Error(IO_ERROR)),true,'the sticky LevelDB failure is classified');
 assert.equal(lib.isStorageFault(new Error('QUOTA_BYTES quota exceeded')),false,'quota and argument errors are not storage faults');
 {

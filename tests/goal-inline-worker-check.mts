@@ -15,6 +15,7 @@ const source='https://chatgpt.com/c/inline-worker-source';
 const other='https://chatgpt.com/c/inline-worker-other';
 const calls:{kind:string,value:any}[]=[];
 const tabReads:number[]=[];
+let composerPhase='armed';
 let currentUrl=source,activeQueries=0,controllerFailure=false,composerUrlOverride='',tabClosed=false;
 const context=createContext({URL,setTimeout,
   chrome:{runtime:{onMessage:{addListener:(value:Listener)=>{listener=value;}}},tabs:{
@@ -23,7 +24,7 @@ const context=createContext({URL,setTimeout,
   }},
   bindNativeComposerGoal:async(tabId:number,url:string,armId:string)=>{calls.push({kind:'bind',value:{tabId,url,armId}});return {ok:true};},
   goalController:{
-    composerGet:async(value:any)=>{calls.push({kind:'composerGet',value});return {id:'armed',phase:'armed',url:composerUrlOverride||currentUrl};},
+    composerGet:async(value:any)=>{calls.push({kind:'composerGet',value});return {id:'armed',phase:composerPhase,url:composerUrlOverride||currentUrl};},
     composerArm:async(value:any)=>{calls.push({kind:'arm',value});return {ok:true,record:{id:'armed'}};},
     composerDisarm:async(value:any)=>{calls.push({kind:'disarm',value});return {ok:true,record:null};},
     composerIntent:async(value:any)=>{calls.push({kind:'intent',value});return {ok:true,record:{id:'armed',phase:'intent'}};},
@@ -101,7 +102,18 @@ const rootIntent=request('intent',{url:composerUrlOverride,armId:'armed',eventAt
 assert.equal((await call(rootIntent,{tab:{id:7,url:alias},frameId:0})).ok,true,'temporary allocation accepts only the already-armed root intent');
 assert.equal((await call({...rootIntent,armId:'another'},{tab:{id:7,url:alias},frameId:0})).ok,false,'another arm cannot use the temporary allocation');
 assert.equal((await call({...rootIntent,action:'arm'},{tab:{id:7,url:alias},frameId:0})).ok,false,'temporary route cannot start another Goal');
-currentUrl=source;composerUrlOverride='';
+for(const phase of ['armed','intent']) {
+ composerPhase=phase;
+ assert.equal((await call({...rootIntent,action:'disarm'},{tab:{id:7,url:alias},frameId:0})).ok,true,'matching root arm disarms on its temporary allocation');
+}
+for(const [patch,from] of [
+ [{armId:'other'},{tab:{id:7,url:alias},frameId:0}],
+ [{url:source},{tab:{id:7,url:alias},frameId:0}],
+ [{},{tab:{id:7,url:'https://chatgpt.com/c/local-chatgpt%3Aother'},frameId:0}],
+ [{},{tab:{id:7,url:source},frameId:0}]
+] as [any,any][])assert.equal((await call({...rootIntent,...patch,action:'disarm'},from)).ok,false);
+composerPhase='bound';assert.equal((await call({...rootIntent,action:'disarm'},{tab:{id:7,url:alias},frameId:0})).ok,false);
+composerPhase='armed';currentUrl=source;composerUrlOverride='';
 
 const mutations=()=>calls.filter(value=>!['get','composerGet'].includes(value.kind));
 const accepted=mutations().length;

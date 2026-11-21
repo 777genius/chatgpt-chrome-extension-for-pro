@@ -102,3 +102,9 @@ for(const at of [1999,3001]) {
  assert.equal((await h.run({startedAt:20000})).ok,false,'an earlier repeated payload or a later send cannot borrow this click');
  assert.equal(h.reports.length,0);
 }
+
+{
+ const h=fixture();h.onProbe(()=>{h.record().phase='waiting';h.record().operation=null;h.record().lastConfirmedOperation={id:'operation',tabId:7};});
+ assert.equal((await h.run()).alreadyConfirmed,true,'observer ACK committed during sender inspection remains successful');
+ assert.equal(h.reports.length,0);assert.equal(h.completions.length,0,'duplicate sender does not process the answer again');
+}

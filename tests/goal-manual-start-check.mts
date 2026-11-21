@@ -41,8 +41,8 @@ function fixture() {
     failJournal:(next:boolean)=>{failJournal=next;},closeOldTab:()=>{oldTabOpen=false;},newTab:(open:boolean)=>{newTabOpen=open;}};
 }
 
-// A later, explicitly submitted manual goal may replace a stopped goal with
-// an unresolved intent or click, while retaining the old record and its fence.
+// A stopped Goal with an unknown send still owns the chat. Neither a new
+// arm nor a later verified manual message resolves that old operation.
 for (const status of ['intent','clicked']) {
   const env=fixture();
   const old={id:'old-goal',url:saved,phase:'stopped',
@@ -50,19 +50,27 @@ for (const status of ['intent','clicked']) {
     operation:{id:'old-op',status,createdAt:999000,tabId:7}};
   env.data[goalKey(saved)]=structuredClone(old);
   env.data[composerKey(7)]={id:'old-goal',phase:'bound',binding:{url:saved}};
-  const armId=await env.intent(7,saved);
-  const proof=env.proof(armId);
-  env.clock(1000300);
-  await assert.rejects(()=>env.store.composerBind(proof),/не подтверждена/);
+  const before=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerArm({tabId:7,url:saved}),/другой чат в другой вкладке/);
+  await assert.rejects(()=>env.store.composerArm({tabId:8,url:saved}),/другой чат в другой вкладке/);
+  assert.deepEqual(env.data,before,'a denied arm preserves the old goal and authorization');
+  assert.equal(env.events.length,0);
+  await assert.rejects(()=>env.store.composerArm({tabId:7,url:other}),/другой чат в другой вкладке/,
+    'the old owner tab also retains its send grant across navigation');
+  const armed=await env.store.composerArm({tabId:8,url:other});
+  assert.equal(armed.record.phase,'armed','an unrelated chat in another tab can still accept a manual goal');
   assert.deepEqual(env.data[goalKey(saved)],old);
-  await env.store.composerRequest({tabId:7,armId,requestId:proof.requestId,startedAt:proof.startedAt,url:saved,
+  assert.equal(env.messages.length,0);
+
+  // An arm already issued before the old state was observed must fail at bind.
+  const late=fixture(),armId=await late.intent(7,saved),proof=late.proof(armId);
+  await late.store.composerRequest({tabId:7,armId,requestId:proof.requestId,startedAt:proof.startedAt,url:saved,
     submission:{userId:proof.userId,userText:objective}});
-  const bound=await env.store.composerBind(proof);
-  assert.equal(bound.goal.id,armId);
-  assert.equal(bound.goal.phase,'waiting');
-  assert.deepEqual(env.data['chatgpt-goal-retired:old-goal'],old);
-  assert.equal(env.messages.length,0,'manual adoption never dispatches the old operation');
-  assert.equal((await env.store.check({url:saved,tabId:7,id:'old-goal',operationId:'old-op'})).ok,false);
+  late.data[goalKey(saved)]=structuredClone(old);
+  const pending=structuredClone(late.data);
+  await assert.rejects(()=>late.store.composerBind(proof),/другой чат в другой вкладке/);
+  assert.deepEqual(late.data,pending,'a verified later manual request cannot replace the unresolved goal');
+  assert.equal(late.events.length,0);assert.equal(late.messages.length,0);
 }
 
 // Arming and exact send intent are durable authorization only, with no draft

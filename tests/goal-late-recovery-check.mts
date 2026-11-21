@@ -5,7 +5,7 @@ const worker=readFileSync('extension/service-worker.js','utf8');
 const source=worker.slice(worker.indexOf('async function recoverNativeComposerGoal('),worker.indexOf('async function bindNativeComposerGoal('));
 const url='https://chatgpt.com/c/late-recovery-fixture';
 type V=Record<string,any>;
-async function fixture(){
+async function fixture(scheduled=false){
  const data:V={},events:V[]=[],messages:V[]=[];
  let journalError=false;
  let live=url,afterProbe:(()=>Promise<void>|void)|null=null,failSave=false;
@@ -16,9 +16,10 @@ async function fixture(){
   sourceUrl:i===0?'https://chatgpt.com/':url,operationId:null}));
  const original:V={ok:true,url,isReadOnly:false,isLatest:false,...users[0],userVisibleText:'Original objective\n',firstTurn:false,recoveryTimeline:users};
  const latest:V={ok:true,url,isReadOnly:false,isLatest:true,...users[2],turnStatus:'in_progress',generating:true,hasError:false};
- const ctx=createContext({URL,Date,console,latestRequestReceipt:async()=>({requestId:requests.at(-1)!.requestId,startedAt:requests.at(-1)!.eventAt,url}),readJournal:async()=>({ok:true,storageError:journalError?'Disk full':'',events:requests}),inspectCompletedTurn:function(){},
+ if(scheduled){users.splice(1);requests.splice(1);requests.push({kind:'tab.updated',tabId:7,changes:{url}});requests.forEach((e,i)=>e.sequence=i+1);Object.assign(latest,users[0],{generating:false});}
+ const ctx=createContext({URL,Date,console,latestRequestReceipt:async()=>({requestId:scheduled?requests[0].requestId:requests.at(-1)!.requestId,startedAt:scheduled?requests[0].eventAt:requests.at(-1)!.eventAt,url}),readJournal:async()=>({ok:true,storageError:journalError?'Disk full':'',events:requests}),inspectCompletedTurn:function(){},
   chrome:{tabs:{get:async()=>({id:7,url:live})},scripting:{executeScript:async({args}:V)=>{
-   const result=structuredClone(args.length>2?original:latest);await afterProbe?.();return [{result}];
+   const result=structuredClone(scheduled&&args.length===2?{ok:false,reason:'bound-messages-missing'}:args.length>2&&args[3]!==null?original:latest);await afterProbe?.();return [{result}];
   }}}});
  for(const file of ['goal-policy.js','goal-lineage.js','goal-store.js'])runInContext(readFileSync('extension/'+file,'utf8'),ctx);
  ctx.dependencies={storage:{get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>{if(failSave&&v['chatgpt-goal:'+url])throw Error('Synthetic disk failure');Object.assign(data,structuredClone(v));}},
@@ -32,6 +33,7 @@ async function fixture(){
  const historical=runInContext('ChatGPTGoalStore.create({...dependencies,now:()=>100010})',ctx);
  data['chatgpt-goal-composer:7'].armedAt=100000;
  await historical.composerIntent({tabId:7,url:'https://chatgpt.com/',armId:arm.record.id,eventAt:100010,text:'Original objective',baselineKey:''});
+ if(scheduled)data['chatgpt-goal-composer:7'].request={requestId:requests[0].requestId,startedAt:requests[0].eventAt,url:'https://chatgpt.com/'};
  const pending=structuredClone(data['chatgpt-goal-composer:7']);ctx.pending=pending;
  runInContext(source,ctx);
  runInContext(worker.slice(worker.indexOf('async function bindNativeComposerGoal('),worker.indexOf('// An initial native conversation')),ctx);
@@ -150,4 +152,10 @@ console.log('Late Goal recovery: atomic original+all supplements, original limit
  f.requests.push({kind:'send.dispatched',tabId:7,operationId:'retry-op',text:'different'});
  assert.equal((await f.recover()).pending,true,'an unproven intermediate retry never binds');
  assert.equal(f.data['chatgpt-goal:'+url],undefined);assert.equal(f.messages.length,0);
+}
+
+{
+ const f=await fixture(true);assert.equal((await f.bind()).ok,true,'original receipt still reaches scheduled root recovery');
+ const g=f.data['chatgpt-goal:'+url];assert.equal(g.goal,'Original objective');assert.equal(g.phase,'waiting');
+ assert.equal(g.expectedPromptKey,f.users[0].promptKey);assert.equal(f.messages.length,0,'assistant-only scheduled output cannot finalize or continue Goal');
 }

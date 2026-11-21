@@ -12,19 +12,19 @@ function fixture(){
  const journal:V[]=[{sequence:1,kind:'goal.blocked',operationId:'unspent-operation'},{sequence:2,kind:'goal.dispatch_failed',operationId:'unspent-operation'}];
  const native:V={ok:true,isLatest:true,isReadOnly:false,promptKey:'/c/preparation-recovery-fixture|previous',userId:'previous-user',turnStatus:'complete',generating:false,hasError:false,assistantCompleted:true,assistantPhase:'final_answer'};
  const editor:V={ok:true};function inspectCompletedTurn(){}function controlChatComposer(){}
- let idle=true,live=url,after:(()=>void)|null=null;
- const storage={get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>Object.assign(data,structuredClone(v))};
+ let idle=true,live=url,after:(()=>void)|null=null,failReplacement=false;
+ const storage={get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>{if(failReplacement&&v['chatgpt-goal:'+url]?.phase==='preparing'){failReplacement=false;throw Error('Replacement write failed');}return Object.assign(data,structuredClone(v));}};
  const tabs={get:async()=>({id:7,url:live}),sendMessage:async(id:number,m:V)=>{
   if(m.type==='CHATGPT_GOAL_READINESS'){after?.();return {ok:true,idle};}
   messages.push(m);return {ok:true};
  }};
  const ctx=createContext({URL,console,inspectCompletedTurn,controlChatComposer,readJournal:async()=>({ok:true,meta:{...structuredClone(data['chatgpt-journal:meta']),sequence:journal.length},events:structuredClone(journal)}),JOURNAL_META:'chatgpt-journal:meta',chrome:{storage:{local:storage},tabs,scripting:{executeScript:async({func}:V)=>[{result:structuredClone(func===inspectCompletedTurn?native:editor)}]}}});
  for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),ctx);
- ctx.appendJournal=async(e:V)=>{events.push(e);delete data['chatgpt-journal:meta'].active[7];return {ok:true};};
+ ctx.appendJournal=async(e:V)=>{events.push(e);journal.push({...e,tabId:7,sequence:journal.length+1});delete data['chatgpt-journal:meta'].active[7];return {ok:true};};
  ctx.deps={storage,tabs,appendJournal:async(e:V)=>{events.push(e);return {ok:true};},now:()=>1000,uuid:()=> 'unused'};
  ctx.goalController=runInContext('ChatGPTGoalStore.create(deps)',ctx);
  runInContext(helper,ctx);
- return {goal,data,messages,events,journal,native,editor,run:()=>runInContext(`reconcileGoalPreparation(7,'${url}')`,ctx),idle:(v:boolean)=>{idle=v;},route:(v:string)=>{live=v;},after:(f:()=>void)=>{after=f;}};
+ return {goal,data,messages,events,journal,native,editor,failReplacement:()=>{failReplacement=true;},run:()=>runInContext(`reconcileGoalPreparation(7,'${url}')`,ctx),idle:(v:boolean)=>{idle=v;},route:(v:string)=>{live=v;},after:(f:()=>void)=>{after=f;}};
 }
 {
  const f=fixture();f.idle(false);await f.run();assert.equal(f.messages.length,0);
@@ -115,3 +115,29 @@ for(const scenario of ['draft-saved','draft-replaced','clicked','authorized','di
  await f.run();assert.equal(f.messages.length,0,scenario);
 }
 console.log('Restarted unconsumed intent: exact completed previous turn and untouched empty editor recover once; uncertain sends and drafts remain fenced.');
+
+{
+ const f=restartedIntent();f.journal.splice(f.journal.findIndex(e=>e.kind==='goal.dispatch_failed'),1);f.journal.forEach((e,i)=>e.sequence=i+1);
+ await f.run();assert.equal(f.messages.length,1,'pre-grant restart has no dispatch callback to depend on');
+}
+{
+ const f=restartedIntent();f.failReplacement();await assert.rejects(()=>f.run(),/Replacement write failed/);
+ assert.equal(f.data['chatgpt-journal:meta'].active[7],undefined);assert.equal(f.messages.length,0);
+ await f.run();assert.equal(f.messages.length,1,'committed release survives failed replacement write');
+ assert.equal(f.events.filter(e=>e.kind==='goal.unsent_release').length,1,'recovery never writes the consumed release twice');
+}
+for(const scenario of ['wrong-goal','wrong-tab','wrong-url','duplicate','later-send','foreign-grant']) {
+ const f=restartedIntent();f.failReplacement();await assert.rejects(()=>f.run(),/Replacement write failed/);
+ const release=f.journal.find(e=>e.kind==='goal.unsent_release')!;
+ if(scenario==='wrong-goal')release.goalId='other';
+ if(scenario==='wrong-tab')release.tabId=8;
+ if(scenario==='wrong-url')release.sourceUrl='https://chatgpt.com/c/other';
+ if(scenario==='duplicate')f.journal.push({...release,sequence:f.journal.length+1});
+ if(scenario==='later-send')f.journal.push({kind:'request.started',sourceUrl:url,eventAt:300,sequence:f.journal.length+1});
+ if(scenario==='foreign-grant')f.data['chatgpt-journal:meta'].active[8]={operationId:'other',chatUrl:url};
+ await f.run();assert.equal(f.messages.length,0,scenario+' cannot consume a released preparation');
+}
+
+{
+ const f=fixture();f.journal.pop();await f.run();assert.equal(f.messages.length,0,'ordinary no-click preparation still needs dispatch-failure evidence');
+}

@@ -63,3 +63,21 @@ console.log('Goal rich-link consent: captured href preserved through start and f
  assert.equal(policy.submittedTextMatches(visible,native,visible,['https://example.com/issues/8']),true);
  assert.equal(policy.submittedTextMatches(visible,native.replace('issues/8','issues/9'),visible,['https://example.com/issues/8']),false);
 }
+
+{
+ const visible='https://example.com docs';
+ const native='[https://example.com](https://example.com) [docs](https://example.com)';
+ assert.equal(policy.submittedTextMatches(visible,native,visible,['https://example.com']),true,
+  'an automatic URL must not consume the captured target needed by a later label');
+ assert.equal(policy.submittedTextMatches(visible,native.replace('[docs](https://example.com)','[docs](https://other.example)'),visible,['https://example.com']),false);
+ const ordered='[https://example.com](https://example.com) [docs](https://example.com) [other](https://other.example)';
+ assert.equal(policy.submittedTextMatches(visible+' other',ordered,visible+' other',['https://example.com','https://other.example']),true);
+ assert.equal(policy.submittedTextMatches(visible+' other',ordered,visible+' other',['https://other.example','https://example.com']),false,
+  'optional automatic links cannot reorder captured destinations');
+}
+{
+ assert.equal(policy.richGoalHistoryMatches('Read docs.','Read [docs](https://example.com).',['https://example.com']),true,
+  'objective punctuation must match outside a link destination');
+ assert.equal(policy.richGoalHistoryMatches('Read docs.','Read [docs](https://other.example).',['https://example.com']),false);
+ assert.equal(policy.richGoalHistoryMatches('Read docs.','Read [docs](https://example.com). Extra',['https://example.com']),false);
+}

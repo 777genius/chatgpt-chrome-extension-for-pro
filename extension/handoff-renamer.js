@@ -215,10 +215,6 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
         await wait(1000);
       }
       if(!snapshot?.ready)throw notReady('Новый чат ещё не готов к переименованию');
-      // Once the native menu is ready, preserve the normal save/ACK window;
-      // a short probe deadline must never turn a slow acknowledged save into
-      // an ambiguous retry.
-      if(goalOperationId)deadline=Date.now()+60000;
       if(snapshot.title===pending.title)throw new Error('Название уже изменено без подтверждения журнала');
       const previousTitle=snapshot.title;
       for(const action of ['open','select','fill']) {
@@ -230,6 +226,9 @@ function renameSavedHandoff(tabId,id,{recoverTemporaryTarget=false,goalOperation
       }
       // Durable intent before one click. A lost reply never causes a second save.
       if(Date.now()>=deadline)throw notReady('Истекло время подготовки переименования');
+      // Menu and form preparation share the short Goal delivery deadline.
+      // Once prepared, a native save and its ACK retain their full window.
+      if(goalOperationId)deadline=Date.now()+60000;
       await update('saving',{previousTitle,titleSaveStartedAt:Date.now()});
       pendingTitles.set(tabId,pending);
       let saved;

@@ -8,7 +8,7 @@ type Completion = { tabId: number; url: string; requestId: string; statusCode: n
 type ProbeOptions = { action: string; url: string; operationId: string; title: string; previousTitle?: string };
 type Result = {ok: boolean; reason?: string; clicked?: boolean; ready?: boolean; waiting?:boolean;retryable?:boolean; streaming?:boolean; title?: string; conversationId?: string};
 type Stored = {id: string; stage: string; sourceUrl: string; targetUrl: string; sentAt: number; naming: unknown; titleStatus?: string; titleReason?: string; previousTitle?: string; titleSaveStartedAt?: number; titlePreviousTargetUrl?: string; titleTargetAlias?: string; titleRetryable?:boolean;titleRetryAfter?:number;titlePrepareAttempts?:number;titlePreparationVersion?:number;titlePreparationTitle?:string;titleRefusalRetries?:number};
-type Mode = 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'no-header' | 'sidebar-no-header' | 'sidebar-hidden-no-header' | 'sidebar-outside-header' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
+type Mode = 'late-ack' | 'success' | 'no-ack' | 'failed-ack' | 'wrong-request' | 'wrong-path' | 'split-utf8' | 'wrong-cache' | 'missing-cache' | 'error-cache' | 'unsaved' | 'navigate' | 'deadline' | 'optimistic' | 'temporary-to-server' | 'wrong-alias' | 'query-normalization' | 'plural' | 'plural-post' | 'plural-wrong-id' | 'plural-wrong-title' | 'plural-failed-ack' | 'plural-get' | 'plural-wrong-tab' | 'native' | 'native-wrong-id' | 'native-wrong-title' | 'native-patch' | 'native-failed-ack' | 'native-wrong-tab' | 'streaming' | 'late-menu' | 'no-header' | 'sidebar-no-header' | 'sidebar-hidden-no-header' | 'sidebar-outside-header' | 'sidebar-menu' | 'sidebar-hidden' | 'sidebar-wrong-chat' | 'sidebar-hidden-delayed-cancel' | 'sidebar-modal' | 'sidebar-native-title' | 'sidebar-stale-visible' | 'sidebar-stale-title' | 'sidebar-stale-no-ack' | 'sidebar-stale-failed-ack';
 const sourceUrl = 'https://chatgpt.com/c/source';
 const targetUrl = 'https://chatgpt.com/c/target';
 const temporaryUrl='https://chatgpt.com/c/local-chatgpt%3Alocal-target-id';
@@ -28,6 +28,7 @@ function harness(mode: Mode = 'success') {
   const storageWrites: Record<string,unknown>[] = [];
   let opened = 0, selected = 0, saved = 0, sent = 0, cancels = 0;
   let clickAt = 0;
+  let delayedCompletion:(()=>void)|null=null;
   let menuReady=mode!=='late-menu'&&!mode.startsWith('sidebar-');
   const sourceTitle=mode==='split-utf8'?'Задача 🦊':'Original';
   const before: ((value: Request)=>void)[] = [], complete: ((value: Completion)=>void)[] = [];
@@ -79,7 +80,8 @@ function harness(mode: Mode = 'success') {
         const pathname=mode.startsWith('native')?`conversation/id/${id}/rename`:`${path}/${id}`;
         const request:Request={tabId:mode.endsWith('-wrong-tab')?8:7,method:mode==='native-patch'?'PATCH':mode.startsWith('native')||mode==='plural-post'?'POST':mode==='plural-get'?'GET':'PATCH',url:`https://chatgpt.com/backend-api/${pathname}`,requestId:'rename-1',requestBody:{raw}};
         before.forEach(fn=>fn(request));
-        complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'||mode.endsWith('-failed-ack')?503:200}));
+        const acknowledge=()=>complete.forEach(fn=>fn({tabId:7,url:request.url,requestId:request.requestId,statusCode:mode==='failed-ack'||mode.endsWith('-failed-ack')?503:200}));
+        if(mode==='late-ack')delayedCompletion=acknowledge;else acknowledge();
       });
     });
     document.body.append(menu);
@@ -108,7 +110,7 @@ function harness(mode: Mode = 'success') {
   }
   document.querySelector('main button')!.addEventListener('click',()=>sent++);
   const ctx=createContext({URL,TextDecoder,document,location,PointerEvent:window.Event,Event:window.Event,KeyboardEvent:class extends window.Event{constructor(type:string,options:{key:string}){super(type);Object.defineProperty(this,'key',{value:options.key});}},HTMLInputElement:window.HTMLInputElement,
-    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
+    Date:class extends Date{static now(){return time;}},setTimeout:(fn:()=>void,ms:number)=>{time+=ms;if(delayedCompletion&&time>=clickAt+59000){delayedCompletion();delayedCompletion=null;}if(mode==='temporary-to-server'&&time>=10100)location.href=targetUrl;queueMicrotask(fn);},
     handoffKey:(id:number)=>`handoff:${id}`,
     journalChatId:(url:string)=>new URL(url).pathname.split('/').at(-1),
     appendJournal:async(event:Record<string,unknown>)=>events.push(structuredClone(event)),
@@ -544,4 +546,24 @@ for(const mode of ['sidebar-stale-no-ack','sidebar-stale-failed-ack'] as const){
  const input=h.document.querySelector('[role="dialog"] input')!;
  (input as any).__reactProps$test={value:evidence.title};
  h.probe({...options,action:'cancel'});assert.equal(input.isConnected,false,'owned unchanged form cleanup tolerates lagging native props');
+}
+
+{
+ const h=harness('late-menu');h.advance(11000);
+ h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-menu-probe'}};
+ const before=h.time,result=await h.rename({goalOperationId:'goal-menu-probe'});
+ assert.equal(result.waiting,true);assert.equal(result.retryable,true);
+ assert.ok(h.time-before<5000,'ready chat with unavailable rename menu cannot hold the Goal delivery barrier for a minute');
+ assert.equal(h.saved,0);assert.equal(h.record.titleStatus,'waiting');assert.equal(h.record.titlePrepareAttempts,0);
+ assert.equal(h.record.titleSaveStartedAt,undefined,'expired preparation never persists a save intent');
+ assert.equal(h.document.querySelector('[role="menu"]'),null,'owned preparation menu is closed before Goal delivery');
+ await h.rename({goalOperationId:'goal-menu-probe'});assert.equal(h.saved,0,'same Goal operation cannot restart menu preparation');
+}
+{
+ const h=harness('late-ack');h.advance(11000);
+ h.storage['chatgpt-goal:'+targetUrl]={phase:'preparing',operation:{status:'reserved',id:'goal-slow-ack'}};
+ const result=await h.rename({goalOperationId:'goal-slow-ack'});
+ assert.equal(result.ok,true,result.reason||'slow native save acknowledgement retains the complete save window');
+ assert.equal(h.record.titleStatus,'confirmed');assert.equal(h.saved,1);assert.ok(h.time-h.clickAt>=59000);
+ await h.rename({goalOperationId:'goal-slow-ack'});assert.equal(h.saved,1,'late accepted save is never replayed');
 }
