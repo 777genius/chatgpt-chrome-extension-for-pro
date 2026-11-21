@@ -31,6 +31,18 @@ const nativeCtx=createContext({document:dom.document,URL,location:{pathname:'/c/
 runInContext(readFileSync('extension/page-probe.js','utf8'),nativeCtx);
 const captured=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',nativeCtx)));
 assert.equal(captured.action,'new-chat');assert.equal(captured.incomplete,false);
+// A recovery banner can retain a native latest-turn binding while the
+// rendered user row is virtualized. History capture must carry that binding.
+const recoveryDom=parseHTML('<div data-content-search-turn-key="last-turn"><div role="status"><span class="text-chatgpt-recovery">Interrupted</span><button>New chat</button></div></div>');
+const recoveryButton=recoveryDom.document.querySelector('button')! as any;
+const latest={id:'last-turn',isMostRecentTurn:true,isReadOnly:false,turn:{items:[{type:'user-message',messageId:'last-user',message:'Latest task'}]}};
+recoveryButton.__reactFiber$test={memoizedProps:{children:{props:{id:'chatgptConversations.responseError.startNewChat'}}},return:{memoizedProps:{entries:[latest],isChatConversation:true,conversationId:'source',isConversationFetching:false,isConversationLoading:false,hasLoadError:false},return:null}};
+const recoveryCtx=createContext({document:recoveryDom.document,URL,location:{pathname:'/c/source',origin:'https://chatgpt.com'}});
+runInContext(readFileSync('extension/page-probe.js','utf8'),recoveryCtx);
+const bound=JSON.parse(JSON.stringify(runInContext('inspectChatError(0,true)',recoveryCtx)));
+assert.equal(bound.action,'new-chat');assert.equal(bound.recoveryBinding?.userId,'last-user');assert.equal(bound.recoveryBinding?.entryId,'last-turn');
+latest.isReadOnly=true;
+assert.equal(runInContext('inspectChatError(0,true)',recoveryCtx).recoveryBinding,null,'a read-only turn cannot provide a recovery binding');
 const autoEvents=[...events,{kind:'retry.confirmed',operationId:op,sourceUrl,tabId,userId:'native-auto'}];
 const initialOp='initial-goal',initialEvents2=[{kind:'goal.started',operationId:initialOp,sourceUrl,tabId},
  {kind:'goal.send_intent',operationId:initialOp,sourceUrl,tabId},{kind:'send.authorized',operationId:initialOp,sourceUrl,tabId},

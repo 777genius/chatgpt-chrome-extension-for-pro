@@ -156,7 +156,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   }
   if (!captureHistory || action !== 'new-chat'&&!(captureRetryHistory&&action==='retry')) return { action, messages: [], recoveryBinding,
     deliveryUserSentAtMs:inputDeliveryError?recoveryEntry?.timestampTurns?.filter(item=>item.role==='user').at(-1)?.sentAtMs:null };
-  if (!entries||!historyBound) return { action, messages: [], incomplete: true };
+  if (!entries||!historyBound) return { action, messages: [], incomplete: true, recoveryBinding };
   function messageText(item) {
     if (item.type === 'user-message') return typeof item.message === 'string' ? item.message : '';
     const fallbacks = (item.contentReferences || []).map((ref) => ref.model_dil_v2?.fallbackMarkdown).filter((text) => typeof text === 'string' && text.trim());
@@ -199,7 +199,7 @@ function inspectChatError(alertIndex = 0, captureHistory = false, recoveryAction
   const messages = all.filter((_, index) => selected.has(index));
   const shortHistory = messages.filter((item) => item.role === 'user').length < 50 ||
     messages.filter((item) => item.role === 'assistant').length < 50;
-  return { action, messages, historyLoaded:historyReady===true, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
+  return { action, messages, recoveryBinding, historyLoaded:historyReady===true, incomplete: historyReady === false || !messages.some((item) => item.role === 'user') ||
     messages.some((item) => !item.text.trim()) || shortHistory && historyReady !== true };
 
 }

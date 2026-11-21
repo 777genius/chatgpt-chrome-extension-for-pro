@@ -776,13 +776,14 @@
         await save(next);return {ok:true,record:view(next)};
       });
     }
-    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false}) {
+    async function completion({url,tabId,completionKey,promptKey,response,nativeVerified,rawExact,userId,nativeMarkerPending=false,verifiedQueuedResumeFence=null}) {
       const target=canonical(url);
       if(!target||typeof completionKey!=='string'||!completionKey||typeof promptKey!=='string'||
           !completionKey.startsWith(promptKey+'|')||typeof response!=='string')return {ok:false};
       const result=await serialize(async()=>{
         const record=await read(target);
         if(!record||record.lastCompletionKey===completionKey)return {ok:false};
+        if(record.queuedResumeFence&&JSON.stringify(record.queuedResumeFence)!==JSON.stringify(verifiedQueuedResumeFence))return {ok:false};
         if(record?.manualPending) {
           const pending=record.manualPending;
           if(nativeVerified!==true||pending.tabId!==tabId||promptKey===pending.baselineKey||!promptKey.startsWith(new URL(target).pathname+'|')||!userId)return {ok:false};
@@ -821,7 +822,7 @@
           return {ok:false,pendingMarker:true};
         }
         const outcome=policy.decision(record,response,rawExact,nativeVerified,now());
-        let next={...record,markerPending:null,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
+        let next={...record,queuedResumeFence:null,markerPending:null,lastCompletionKey:completionKey,expectedPromptKey:promptKey,
           handoffPending:false,earlyCompletion:null,earlyCompletions:[]};
         if(outcome==='unverified')next={...next,phase:'blocked',reason:'Нативная целостность финального ответа не подтверждена'};
         else if(outcome==='blocked')next={...next,phase:'blocked',reason:'Модель ответила точным маркером GOAL_BLOCKED',pendingCompletion:null};
@@ -875,7 +876,7 @@
           const inFlight=['sending','clicked'].includes(record.phase),paused=record.phase==='paused'||record.pauseRequested;
           const pending=[...pendingManuals(record),{tabId,requestId,startedAt,eventAt,text,baselineKey,
             ...(linkTargets!==undefined?{linkTargets}: {})}];
-          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,resumeRequested:false,
+          const next={...record,phase:inFlight?record.phase:paused?'paused':'waiting',manualStartedAt:startedAt,resumeRequested:false,queuedResumeFence:null,
             manualPending:pending[0],manualPendingQueue:pending,manualOverride:false,markerPending:null,
             pendingCompletion:null,pendingSendKind:null,earlyCompletion:null,earlyCompletions:[],
             ...(!inFlight?{operation:null}:{}),reason:'Подтверждается отправленное дополнение к цели'};
@@ -893,7 +894,7 @@
         await event('manual_pause',next,tabId);await save(next);return {ok:true};
       });
     }
-    async function manualBind({url,tabId,id,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,nativeVerified}) {
+    async function manualBind({url,tabId,id,requestId,startedAt,promptKey,userId,userText,userVisibleText,userSentAtMs,nativeVerified,queuedResumeFence}) {
       const target=requireUrl(url);
       const result=await serialize(async()=>{
         const old=await read(target),pending=old?.manualPending,prior=old?.manualSupplementBinding;
@@ -909,12 +910,14 @@
             !policy.submittedTextMatches(pending.text,userText,userVisibleText,pending.linkTargets)||typeof promptKey!=='string'||promptKey===pending.baselineKey||
             !promptKey.startsWith(new URL(target).pathname+'|')||!Number.isFinite(userSentAtMs)||Math.abs(userSentAtMs-startedAt)>10000)
           return {ok:false};
+        if(queuedResumeFence&&(queuedResumeFence.requestId!==requestId||queuedResumeFence.startedAt!==startedAt||
+            queuedResumeFence.userId!==userId||!Number.isSafeInteger(queuedResumeFence.requestSequence)||queuedResumeFence.requestSequence<1))return {ok:false};
         if((old.supplements||[]).some(item=>item.userId===userId||item.requestId===requestId))return {ok:false};
         const supplement={...binding,text:pending.text,eventAt:pending.eventAt,baselineKey:pending.baselineKey};
         const remaining=pendingManuals(old).slice(1);
         const early=remaining.length?null:buffered(old,'manualEarlyCompletions','manualEarlyCompletion').find(item=>item.userId===userId&&item.promptKey===promptKey)||null;
         const fenced=!!old.operation||old.phase==='blocked',paused=old.phase==='paused'||old.pauseRequested;
-        const next={...old,supplements:[...(old.supplements||[]),supplement],manualPending:remaining[0]||null,manualPendingQueue:remaining,manualSupplementBinding:supplement,
+        const next={...old,...(queuedResumeFence?{queuedResumeFence}:{}),supplements:[...(old.supplements||[]),supplement],manualPending:remaining[0]||null,manualPendingQueue:remaining,manualSupplementBinding:supplement,
           expectedPromptKey:promptKey,handoffPending:false,manualEarlyCompletion:null,
           manualEarlyCompletions:remaining.length?buffered(old,'manualEarlyCompletions','manualEarlyCompletion'):[],
           earlyCompletion:early,phase:fenced?old.phase:paused?'paused':'waiting',
@@ -925,7 +928,7 @@
       if(result.replay)await completion(result.replay);
       return {ok:result.ok,record:result.replay?await get(target):result.record};
     }
-    async function resumeObserved({url,tabId,expectedRecord,promptKey,nativeVerified}) {
+    async function resumeObserved({url,tabId,expectedRecord,promptKey,nativeVerified,queuedResumeFence}) {
       const target=requireUrl(url);requireTab(tabId);
       return serialize(async()=>{
         const old=await read(target);
@@ -933,13 +936,13 @@
             old?.phase!=='blocked'||!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(old.reason)||
             old.resumeRequested!==true||old.operation||old.manualPending||old.stopRequested||old.pauseRequested||
             old.manualOverride||now()>=old.deadlineAt||old.expectedPromptKey!==promptKey)return {ok:false};
-        const next={...old,phase:'waiting',reason:'',resumeRequested:false};
+        const next={...old,phase:'waiting',reason:'',resumeRequested:false,queuedResumeFence:queuedResumeFence||null};
         await event('resumed',next,tabId);await save(next);return {ok:true,record:view(next)};
       });
     }
     // Adopt a fully witnessed run of manual messages atomically. No send is
     // granted here: completion still evaluates the latest native answer.
-    async function resumeWithSupplements({url,tabId,expectedRecord,supplements,nativeVerified}) {
+    async function resumeWithSupplements({url,tabId,expectedRecord,supplements,nativeVerified,queuedResumeFence}) {
       const target=requireUrl(url);requireTab(tabId);
       return serialize(async()=>{
         const old=await read(target);
@@ -960,7 +963,7 @@
           knownRequests.add(item.requestId);knownUsers.add(item.userId);previous=item.startedAt;
           added.push({...item,tabId,text:item.userText,eventAt:Math.min(item.startedAt,item.userSentAtMs)});
         }
-        const last=added.at(-1),next={...old,phase:'waiting',reason:'',resumeRequested:false,
+        const last=added.at(-1),next={...old,phase:'waiting',reason:'',resumeRequested:false,queuedResumeFence:queuedResumeFence||null,
           expectedPromptKey:last.promptKey,manualStartedAt:last.startedAt,manualSupplementBinding:last,
           supplements:[...(old.supplements||[]),...added],manualPending:null,manualPendingQueue:[],
           handoffPending:false,markerPending:null,pendingCompletion:null,pendingSendKind:null,
