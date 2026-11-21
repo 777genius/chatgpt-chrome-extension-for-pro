@@ -185,7 +185,11 @@
       // Native search units can use a server turn ID instead of the older
       // fallback-turn prefix. Ignore retained hidden rows from other turns.
       return Array.from(pageRoot().querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'))
-        .filter(node=>node.isConnected&&node.getClientRects().length&&!node.closest('[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'));
+        .filter(node=>{
+          if(!node.isConnected||!node.getClientRects().length||node.closest('[hidden],[inert],[aria-hidden="true"],[data-app-shell-active-page="false"]'))return false;
+          const style=document.defaultView?.getComputedStyle?.(node);
+          return style?.display!=='none'&&!['hidden','collapse'].includes(style?.visibility);
+        });
     } catch {
       return [];
     }
