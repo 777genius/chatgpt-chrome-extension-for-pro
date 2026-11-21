@@ -1770,7 +1770,7 @@ async function reconcileQueuedGoalResume(tabId,url) {
       fresh.result.turnStatus!=='complete'||fresh.result.generating!==false||ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return pending();
   if(goal.reason==='Модель ответила точным маркером GOAL_BLOCKED'&&n.promptKey===goal.expectedPromptKey&&
       goal.lastCompletionKey===n.promptKey+'|'+n.assistantKey) {
-    return goalController.control({action:'resume',url,tabId});
+    return goalController.control({action:'resume',url,tabId,verifiedResumeRecord:goal});
   }
   if(!['Восстановление запроса завершилось ошибкой','Модель ответила точным маркером GOAL_BLOCKED'].includes(goal.reason))return pending();
   if(n.promptKey!==goal.expectedPromptKey) {

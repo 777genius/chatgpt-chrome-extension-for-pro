@@ -547,7 +547,7 @@
       await deliver(record);
       return {ok:true};
     }
-    async function control({action,url,tabId,id}) {
+    async function control({action,url,tabId,id,verifiedResumeRecord}) {
       const target=requireUrl(url);
       const outcome=await serialize(async()=>{
         const old=await read(target);
@@ -587,7 +587,11 @@
           if((old.phase!=='paused'&&!recoveryBlocked)||old.operation)
             throw Error('Нельзя безопасно возобновить неподтверждённую отправку. Остановите цель и разберите журнал');
           if(now()>=old.deadlineAt)throw Error('Временной лимит Goal исчерпан');
-          if(recoveryBlocked&&old.reason==='Восстановление запроса завершилось ошибкой') {
+          // A blocked Goal may have a newer manual turn even when the editor
+          // is already idle. Queue every unverified resume so the worker can
+          // bind that turn before granting a continuation.
+          if(recoveryBlocked&&(!verifiedResumeRecord||old.reason!=='Модель ответила точным маркером GOAL_BLOCKED'||
+              old.resumeRequested!==true||JSON.stringify(view(old))!==JSON.stringify(verifiedResumeRecord))) {
             const record={...old,resumeRequested:true};
             await event('resume_queued',record,tabId);await save(record);
             return {record,queued:true};

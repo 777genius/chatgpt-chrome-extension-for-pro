@@ -883,6 +883,11 @@ console.log('Blocked handoff submitted-message witness: durable, idempotent, no 
  env.busy=true;await env.store.control({url:URL_A,tabId:7,action:'resume'});
  assert.equal(state(env).phase,'blocked');assert.equal(state(env).resumeRequested,true);assert.equal(env.messages.length,1,'busy chat queues without sending');
  env.busy=false;await env.store.control({url:URL_A,tabId:7,action:'resume'});
+ assert.equal(state(env).phase,'blocked');assert.equal(env.messages.length,1,'idle alone cannot authorize a blocked Goal');
+ const verifiedResumeRecord=await env.store.get(URL_A);
+ await env.store.control({url:URL_A,tabId:7,action:'resume',verifiedResumeRecord:{...verifiedResumeRecord,id:'stale'}});
+ assert.equal(state(env).phase,'blocked');assert.equal(env.messages.length,1,'stale native proof cannot release the Goal');
+ await env.store.control({url:URL_A,tabId:7,action:'resume',verifiedResumeRecord});
  assert.equal(state(env).phase,'preparing');assert.equal(state(env).goal,objective);
  assert.equal(state(env).deadlineAt,deadline);assert.equal(env.messages.length,2);
 }
