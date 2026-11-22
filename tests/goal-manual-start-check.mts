@@ -593,7 +593,9 @@ for(const scenario of ['missing','body','wire-route','arm-id','intent-route','em
  if(scenario==='earlier-request')assert.equal((await env.store.composerGet({tabId:7})).requestCandidate?.requestId,wire.requestId,
   'pre-event request is durably stored after Arm and must be rejected by intent time gate');
  if(scenario==='wrong-phase')env.data[composerKey(7)].phase='cancelled';
- env.clock(1060000);
+ // Keep the earlier-request case inside the ordinary freshness window, so
+ // only the stored request's startedAt < eventAt rule can reject it.
+ env.clock(scenario==='earlier-request'?1000300:1060000);
  const intent={tabId:7,url:root,armId:armed.record.id,eventAt:scenario==='earlier-request'?1000200:1000000,text:objective,baselineKey:''};
  if(scenario==='arm-id')intent.armId='wrong-arm';
  if(scenario==='intent-route')intent.url=other;
