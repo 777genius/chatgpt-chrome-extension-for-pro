@@ -111,6 +111,26 @@ for(const failure of ['get','set']) {
  assert.equal(failed.timers.size,0,'persistent metadata failure has a finite retry budget');assert.equal(failed.initializations,0);
 }
 
+// A Stop fences the request it preceded, not a distinct manual send
+// observed afterwards in the same chat.
+for(const [stopAt,expected] of [[100000,true],[100001,false],[100002,false]] as const) {
+ const h=await fixture({},true,{goal:{id:'stopped-goal',phase:'stopped',stoppedAt:stopAt}});
+ await h.signal(start);
+ assert.equal(h.messages.length,expected?1:0,'Stop timestamp must distinguish a later manual request from its replay');
+ if(expected)assert.deepEqual(h.messages[0],{tabId:7,message:expectedStart});
+}
+{
+ const h=await fixture({},true,{goal:{id:'stopping-goal',phase:'waiting',stopRequested:true,stoppedAt:100000}});
+ await h.signal(start);assert.equal(h.messages.length,1,'a distinct later manual send survives pending Stop');
+}
+{
+ const h=await fixture({},true);
+ h.failGet();
+ await h.signal({type:'CHATGPT_CONVERSATION_REQUEST_COMPLETED',startedAt:start.startedAt,requestId:start.requestId});
+ assert.equal(h.messages.length,1,'a failed pending-start read cannot swallow the terminal observation');
+ assert.equal(h.messages[0].message.type,'CHATGPT_CONVERSATION_REQUEST_COMPLETED');
+ assert.ok(h.timers.size,'pending-start storage is retried independently of the terminal signal');
+}
 const root='https://chatgpt.com/',allocatedPrompt='/c/startup-request-fixture|first-native-user';
 const rootRequest={sequence:1,kind:'request.started',tabId:7,sourceUrl:root,requestId:start.requestId,eventAt:start.startedAt,operationId:null};
 const allocation={sequence:2,kind:'completion.url_allocated',tabId:7,sourceUrl:url,requestId:start.requestId,attemptId:String(start.startedAt),promptKey:allocatedPrompt};
