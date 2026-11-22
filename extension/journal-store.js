@@ -11,14 +11,14 @@ let journalFailure = '';
 // Observe ingress synchronously, scoped both to the exact tab and canonical
 // conversation. An unidentifiable source may belong to any conversation.
 const journalIngressByTab = new Map(), journalIngressByChat = new Map(), journalIngressRoutes = new Map();
-let journalUnknownIngress = 0;
+let journalUnknownIngress = 0, journalIngressSerial = 0;
 function recordJournalIngress(event,tab) {
   const tabId=tab?.id??event?.tabId,source=retryDraftUrl(event?.sourceUrl||event?.url||''),
     observed=retryDraftUrl(tab?.url||''),chat=source||observed;
   // A network request can name chat B while the durable tab snapshot still
   // observes chat A. Retain both identities until protected writes finish.
   const route=JSON.stringify([Number.isInteger(tabId)?tabId:null,source,observed]);
-  journalIngressRoutes.set(route,(journalIngressRoutes.get(route)||0)+1);
+  journalIngressRoutes.set(route,++journalIngressSerial);
   if(Number.isInteger(tabId)&&tabId>=0)journalIngressByTab.set(tabId,(journalIngressByTab.get(tabId)||0)+1);
   else journalUnknownIngress++;
   if(chat)journalIngressByChat.set(chat,(journalIngressByChat.get(chat)||0)+1);
@@ -26,14 +26,14 @@ function recordJournalIngress(event,tab) {
 }
 function journalIngressSnapshot(tabId,url) {
   return {tabId,url,tab:journalIngressByTab.get(tabId)||0,chat:journalIngressByChat.get(url)||0,
-    unknown:journalUnknownIngress,tabs:new Map(journalIngressByTab),routes:new Map(journalIngressRoutes)};
+    unknown:journalUnknownIngress,tabs:new Map(journalIngressByTab),serial:journalIngressSerial};
 }
 function journalIngressChanged(snapshot,tabId,url,knownTabs) {
   if(!snapshot||snapshot.tabId!==tabId||snapshot.url!==url||snapshot.tab!==(journalIngressByTab.get(tabId)||0)||
       snapshot.chat!==(journalIngressByChat.get(url)||0)||snapshot.unknown!==journalUnknownIngress)return true;
-  if(!url)return false;
-  for(const [route,count] of journalIngressRoutes) {
-    if(count===(snapshot.routes?.get(route)||0))continue;
+  if(!url||snapshot.serial===journalIngressSerial)return false;
+  for(const [route,lastIngress] of journalIngressRoutes) {
+    if(lastIngress<=snapshot.serial)continue;
     const [owner,source,observed]=JSON.parse(route),saved=retryDraftUrl(knownTabs?.[owner]?.url||'');
     // Only two positively different chat routes may leave this grant intact.
     // An absent observed route is ambiguous, not evidence for another chat.
