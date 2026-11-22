@@ -55,7 +55,7 @@ function message(tabId:number,value:Value) {
 function send(tabId:number,operationId:string,extra:Value={}) {
   return message(tabId,{type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:pages.get(tabId)!.url,text:'доделай е2е',operationId,...extra}});
 }
-const intent=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>append(tabId,'retry.send_intent',id,{promptKey});
+const intent=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>append(tabId,'retry.send_intent',id,{promptKey,retryUserId:'fixture-user:'+promptKey});
 const plan=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>message(tabId,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.planned',operationId:id,sourceUrl:pages.get(tabId)!.url,promptKey}});
 
 addPage(7);addPage(8,sourceUrl+'/?model=fixture');boot();
@@ -174,10 +174,8 @@ addPage(15,legacyUrl);boot();
 assert.equal((await plan(15,'new-operation-old-failure','/c/legacy-retry|old-turn')).duplicate,true,'upgrade blocks a new tab/new operation for a historically authorized unknown send');
 assert.equal(storage['chatgpt-journal:meta'].retrySendClaimSchema,2);
 assert.deepEqual(Object.fromEntries(Object.entries(storage).filter(([key])=>key.startsWith('chatgpt-journal:event:'))),legacyEvents,'retry claim migration never changes immutable events');
-assert.equal((await plan(15,'new-distinct-failure','/c/legacy-retry|new-turn')).ok,true,'historical consumed claim does not lock a distinct failed user turn');
-await append(15,'retry.finished','new-distinct-failure',{clicked:false,confirmed:false});
-assert.equal((await plan(15,'new-after-proven-refusal','/c/legacy-retry|refused-turn')).ok,true,'historical explicit no-click proof releases only that failed-turn claim');
-await append(15,'retry.finished','new-after-proven-refusal',{clicked:false,confirmed:false});
+assert.equal((await plan(15,'new-distinct-failure','/c/legacy-retry|new-turn')).duplicate,true,'a changed key without a verified new user cannot bypass an unknown legacy send');
+assert.equal((await plan(15,'new-after-proven-refusal','/c/legacy-retry|refused-turn')).duplicate,true,'a separate unknown send still fences a failed-turn key after a no-click refusal');
 assert.equal((await plan(15,'legacy-no-click','/c/legacy-retry|refused-turn')).duplicate,true,'historical no-click proof never rearms its consumed operation ID');
 for(const key of Object.keys(storage))delete storage[key];
 const initializedSource='https://chatgpt.com/c/initialized-legacy';

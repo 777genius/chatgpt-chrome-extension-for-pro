@@ -62,7 +62,8 @@ function fixture() {
       newPromptKey:'/c/manual-retry-fence|goal-'+record.id}});
   };
   const retryIntent=async(operationId:string,attemptId:string,promptKey:string,tabId=7)=>{
-    const event={operationId,attemptId,promptKey};
+    // These synthetic turns have distinct worker-verified native user IDs.
+    const event={operationId,attemptId,promptKey,retryUserId:'fixture-user:'+promptKey};
     await append({kind:'retry.planned',...event},tabId);
     await append({kind:'retry.send_intent',...event},tabId);
     await append({kind:'send.authorized',operationId},tabId);
@@ -83,7 +84,7 @@ function fixture() {
   assert.equal((await env.manual(1000020)).ok,true);
   assert.equal(env.data[meta].active[7],undefined);
   assert.ok(env.data[meta].retryConsumedOperations['old-retry']);
-  assert.equal(env.data[meta].retrySendClaims[JSON.stringify([url,oldPrompt])].phase,'consumed');
+  assert.equal(env.data[meta].retrySendClaims[JSON.stringify([url,'native-user:fixture-user:'+oldPrompt])].phase,'consumed');
   env.boot();
   await assert.rejects(()=>env.append({kind:'send.authorized',operationId:'old-retry'}));
   await assert.rejects(()=>env.append({kind:'retry.send_intent',operationId:'old-retry',
@@ -225,6 +226,42 @@ function fixture() {
  env.data[goalKey]={...env.data[goalKey],phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',operation:{id:'unknown-click'}};
  await env.evaluate('goalController.retry(confirmed)',{confirmed});
  assert.equal(env.data[goalKey].phase,'blocked','unresolved send retains its fence');
+}
+
+// Waiting Goals need periodic observation even when no final answer was
+// available during startup; Pause/Stop and outstanding sends stay fenced.
+for(const scenario of ['waiting','paused','stopped','operation','manual','expired']) {
+ let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
+ const goal:Value={phase:scenario==='paused'?'paused':scenario==='stopped'?'stopped':'waiting',
+  deadlineAt:scenario==='expired'?Date.now()-1:Date.now()+60000,
+  operation:scenario==='operation'?{id:'unknown'}:null,manualPending:scenario==='manual'?{id:'user'}:null};
+ const context=createContext({chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
+  ChatGPTGoalPolicy:{canonical:(value:string)=>value},reconcileGoalMarker:async()=>null,reconcileWaitingGoalAnswer:async()=>null,
+  bindNativeManualSupplement:async()=>({ok:true}),reconcileGoalPromptBinding:async()=>({ok:false}),
+  goalController:{composerGet:async()=>null,get:async()=>goal,recoverTab:async()=>({ok:false})}});
+ runInContext(listenerSource,context);
+ const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
+ assert.equal(result.pending===true,scenario==='waiting',scenario);
+ assert.equal(result.canRetry===true,scenario==='waiting',scenario);
+}
+for(const phase of ['paused','stopped']) {
+ let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
+ const context=createContext({chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
+  ChatGPTGoalPolicy:{canonical:(value:string)=>value},reconcileGoalMarker:async()=>({ok:true,pending:true,canRetry:true}),
+  goalController:{composerGet:async()=>null,get:async()=>({phase})}});
+ runInContext(listenerSource,context);
+ const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
+ assert.equal(result.pending,false,phase+' cancels marker observation');assert.equal(result.canRetry,false);
+}
+for(const phase of ['waiting','paused']) {
+ let listener!:(message:Value,sender:Value,respond:(result:Value)=>void)=>unknown;
+ const context=createContext({chrome:{runtime:{onMessage:{addListener:(fn:typeof listener)=>{listener=fn;}}},tabs:{get:async()=>({url})}},
+  ChatGPTGoalPolicy:{canonical:(value:string)=>value},reconcileGoalMarker:async()=>null,
+  reconcileWaitingGoalAnswer:async()=>{throw Error('native probe unavailable');},
+  goalController:{composerGet:async()=>null,get:async()=>({phase,deadlineAt:Date.now()+60000})}});
+ runInContext(listenerSource,context);
+ const result=await new Promise<Value>(resolve=>listener({type:'CHATGPT_GOAL_RECOVER',url},{tab:{id:7,url},frameId:0},resolve));
+ assert.equal(result.pending===true,phase==='waiting','probe errors retry only an active waiting Goal');
 }
 
 // A transient native probe failure must not hide the existing durable Goal.

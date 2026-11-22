@@ -65,7 +65,11 @@ async function domCheck() {
           if(message.options.action==='send'){context.sendAuthorization={kind:'send.authorized',operationId:message.options.operationId,sourceUrl:context.location.href};await runInContext('appendJournal(sendAuthorization,{id:7,url:location.href})',context);document.querySelector('button[data-testid=send-button]')?.dispatchEvent(new window.Event('click'));return {ok:true,clicked:true};}
           return {ok:true,matches:true,ready:true};
         }
-        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(message.event.kind==='retry.planned'&&delayedPlanMs){const delay=delayedPlanMs;delayedPlanMs=0;await new Promise(resolve=>setTimeout(resolve,delay));}if(message.event.kind==='retry.readiness'&&message.event.phase==='settling')now+=readinessClockDelay;if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};context.journalEvent=message.event;const result=await runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);if(result?.ok)committedLogs.push(structuredClone(message.event));return result;}
+        if(message.type==='CHATGPT_LOG_EVENT'){logs.push(message.event);if(message.event.kind==='retry.planned'&&delayedPlanMs){const delay=delayedPlanMs;delayedPlanMs=0;await new Promise(resolve=>setTimeout(resolve,delay));}if(message.event.kind==='retry.readiness'&&message.event.phase==='settling')now+=readinessClockDelay;if(duplicatePlan&&message.event.kind==='retry.planned')return {ok:false,duplicate:true};if(failJournal)return {ok:false};
+          // This content-only fixture emulates the worker's verified native
+          // user identity for the synthetic turns it creates after each click.
+          context.journalEvent=message.event.kind==='retry.planned'?{...message.event,retryUserId:'fixture-user-'+sequence}:message.event;
+          const result=await runInContext('appendJournal(journalEvent,{id:7,url:location.href})',context);if(result?.ok)committedLogs.push(structuredClone(message.event));return result;}
         if(message.type==='CHATGPT_INSPECT_ERROR')return {ok:true,action:'retry'};
         if(message.type==='CHATGPT_HANDOFF_GET')return {ok:true,record:null};
         messages.push(message);

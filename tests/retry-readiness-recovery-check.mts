@@ -7,7 +7,7 @@ const url='https://chatgpt.com/c/retry-readiness-fixture',promptKey='/c/retry-re
 const baseState={reason:'native-not-ready',blocked:true,blockedAttemptId:attemptId,lastAttemptId:attemptId,lastPromptKey:promptKey,failures:[999999],recentErrors:[{at:999999}],sameErrorCount:1};
 async function fixture(extra:any={}) {
  let state:any={...structuredClone(baseState),...extra.state},writes=0,calls=0,goalCalls=0,goalPrompt='';
- const events:any[]=[...(extra.rebound?[{kind:'request.started',operationId:'handoff',tabId:7,requestId:'request',eventAt:1000000,recordedAt:1000000},{kind:'send.dispatched',operationId:'handoff',tabId:7,text:'Synthetic handoff'}]:[]),{kind:'retry.planned',operationId:'op',sourceUrl:url,tabId:7,retryUserId:'user',promptKey:extra.rebound?'/c/retry-readiness-fixture':promptKey,attemptId,requestId:'request',recordedAt:1000100},
+ const events:any[]=[...(extra.rebound?[{kind:'request.started',operationId:'handoff',tabId:7,requestId:'request',eventAt:1000000,recordedAt:1000000},{kind:'send.dispatched',operationId:'handoff',tabId:7,text:'Synthetic handoff'}]:[]),...(extra.legacy?[{kind:'request.started',operationId:null,sourceUrl:url,tabId:7,requestId:'request',eventAt:1000000,recordedAt:1000000},{kind:'request.failed',sourceUrl:url,tabId:7,requestId:'request',eventAt:1000050,recordedAt:1000050}]:[]),{kind:'retry.planned',operationId:'op',sourceUrl:url,tabId:7,retryUserId:'user',promptKey:extra.rebound||extra.legacy?'/c/retry-readiness-fixture':promptKey,attemptId,requestId:'request',recordedAt:1000100},
   ...(extra.cleanupOnly?[]:[{kind:'retry.send_intent',operationId:'op'},{kind:'send.authorized',operationId:'op'}]),
   ...(extra.noRefusal?[]:[{kind:'send.not_clicked',operationId:'op'}]),
   {kind:extra.cleanupOnly?'draft.restore_failed':'retry.failed',sourceUrl:url,tabId:7,operationId:'op',attemptId,error:'native-not-ready',clicked:extra.cleanupOnly?undefined:extra.clicked??false},
@@ -26,14 +26,18 @@ async function fixture(extra:any={}) {
  }}};
  function inspectCompletedTurn(){}function inspectChatError(){}function controlChatComposer(){}
  const identity=source.slice(source.indexOf('function proveHandoffRetryIdentity('),source.indexOf('const retryReadinessRecoveries='));
- const prove=new Function(identity+';return proveHandoffRetryIdentity;')();
- const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn','handoffKey','proveHandoffRetryIdentity',
+ const [prove,proveLegacy]=new Function(identity+';return [proveHandoffRetryIdentity,proveLegacyNoClickRoute];')();
+ const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn','handoffKey','proveHandoffRetryIdentity','proveLegacyNoClickRoute','latestRequestReceipt','ChatGPTGoalPolicy',
   code+';return recoverNoClickRetry;')(
   async()=>structuredClone(state),async()=>extra.draftRecord|| (extra.draft?{draft:'owner'}:null),async()=>({ok:true,storageError:'',meta:{sequence:events.length},events}),chrome,
-  {get:async()=>extra.goal||null,retry:async(e:any)=>{goalCalls++;goalPrompt=e.promptKey;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url:extra.rebound?'https://chatgpt.com/':url,promptKey:extra.rebound?'':promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false}),async()=>native,()=> 'handoff',prove);
+  {get:async()=>extra.goal||null,retry:async(e:any)=>{goalCalls++;goalPrompt=e.promptKey;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url:extra.rebound?'https://chatgpt.com/':url,promptKey:extra.rebound?'':promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false}),async()=>native,()=> 'handoff',prove,proveLegacy,async()=>extra.legacy?{url,requestId:'request',startedAt:1000000,submittedUserId:'user'}:null,{canonical:(u:string)=>u});
  const result=await fn(7,url);return {result,writes,calls,goalCalls,goalPrompt,fn};
 }
 const safe=await fixture();assert.equal(safe.writes,1);assert.equal(safe.result.blocked,false);
+const legacy=await fixture({legacy:true,state:{lastPromptKey:'/c/retry-readiness-fixture'},deliveryTime:999990,native:{generating:false},goal:{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',expectedPromptKey:promptKey,deadlineAt:Date.now()+60000}});
+assert.equal(legacy.writes,1,'an exact no-click route-only failure may recover with native and request proof');
+assert.equal(legacy.goalPrompt,promptKey,'recovery rebinds the proven native user instead of sending a route-only retry');
+assert.equal((await fixture({legacy:true,state:{lastPromptKey:'/c/retry-readiness-fixture'},deliveryTime:999980,native:{generating:false},goal:{phase:'blocked',reason:'Восстановление запроса завершилось ошибкой',expectedPromptKey:promptKey,deadlineAt:Date.now()+60000}})).writes,0,'unmatched delivery error cannot recover');
 const rebound=await fixture({rebound:true,runtimeEmpty:true,deliveryTime:999990,goal:{phase:'waiting',expectedPromptKey:null,deadlineAt:Date.now()+60000}});
 assert.equal(rebound.writes,1,'accepted handoff, failed root request and current message restore the no-click retry');
 assert.equal(rebound.result.blocked,false);

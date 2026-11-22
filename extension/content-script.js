@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.155';
+  const SCRIPT_VERSION = '1.8.156';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -46,9 +46,27 @@
       const result=await runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
       if(!runtimeAvailable())return;
       if(location.pathname!==path){goalRecoveryAgain=true;return;}
-      if(result?.pending===true&&result.canRetry===true||result==null&&retrying)
-        goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},Date.now()-goalRecoveryFirstAt<30000?5000:30000);
-      else goalRecoveryFirstAt=0;
+      if(result?.pending===true&&result.canRetry===true||result==null&&retrying) {
+        const delay=Date.now()-goalRecoveryFirstAt<30000?5000:30000;
+        if(typeof document!=='undefined'&&document.visibilityState==='hidden') {
+          // One cancellable worker-backed wait at a time. Content timers in a
+          // hidden tab can be batched, delaying Goal until the user switches.
+          const token={};goalRecoveryTimer=token;
+          void (async()=>{
+            let remaining=delay;
+            while(remaining>0&&goalRecoveryTimer===token&&runtimeAvailable()&&location.pathname===path) {
+              const slice=Math.min(3000,remaining),waited=await runtimeMessage({type:'CHATGPT_WAIT',delayMs:slice});
+              if(goalRecoveryTimer!==token)return;
+              if(!waited?.ok) {
+                goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},delay);
+                return;
+              }
+              remaining-=slice;
+            }
+            if(goalRecoveryTimer===token){goalRecoveryTimer=null;void recoverGoalState(true);}
+          })();
+        } else goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},delay);
+      } else goalRecoveryFirstAt=0;
     }catch{}finally{
       goalRecoveryBusy=false;
       if(goalRecoveryAgain&&runtimeAvailable()){goalRecoveryAgain=false;void recoverGoalState();}
@@ -1693,6 +1711,7 @@
       let pollId = null;
       let throttleId = null;
       let frameId = null;
+      let hiddenPoll = null;
       let lastCheckAt = 0;
       let stableText = '';
       let stableSince = 0;
@@ -1715,6 +1734,8 @@
       const finish = (text) => {
         if (settled) return;
         settled = true;
+        hiddenPoll = null;
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         if (observer) observer.disconnect();
         observer = null;
         if (watchdogId !== null) clearInterval(watchdogId);
@@ -1861,6 +1882,28 @@
         }, delay);
       };
 
+      // Timers in an inactive Chrome tab can be batched for a minute. Keep
+      // one worker-backed wait outstanding while hidden so an otherwise idle
+      // final answer can be observed without requiring a focus event. The
+      // existing interval remains a fallback if messaging is unavailable.
+      const scheduleHiddenPoll = () => {
+        if (settled || hiddenPoll || document.visibilityState !== 'hidden' || !runtimeAvailable() || !isCurrent()) return;
+        const token = {};
+        hiddenPoll = token;
+        void runtimeMessage({type:'CHATGPT_WAIT',delayMs:3000}).then(result=>{
+          if (hiddenPoll !== token) return;
+          hiddenPoll = null;
+          if (settled || !runtimeAvailable() || !isCurrent() || document.visibilityState !== 'hidden' || !result?.ok) return;
+          check();
+          scheduleHiddenPoll();
+        });
+      };
+      const onVisibilityChange = () => {
+        if (document.visibilityState === 'hidden') scheduleHiddenPoll();
+        else hiddenPoll = null;
+      };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+
       const root = conversationObserverRoot();
       if (root && typeof MutationObserver === 'function') {
         observer = new MutationObserver(scheduleCheck);
@@ -1886,6 +1929,7 @@
       }, STREAM_POLL_MS);
 
       check();
+      scheduleHiddenPoll();
     });
   }
 

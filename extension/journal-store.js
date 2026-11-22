@@ -105,6 +105,7 @@ function reduceRetrySummary(retryByChat, event) {
         state.lastPromptKey!==event.promptKey||(state.preparationRecoveries||0)>=2||
         state.remainingRetries===0)return retryByChat;
     return {...retryByChat,[chatId]:{...state,blocked:false,reason:'',
+      ...(event.legacyNoClick?{lastPromptKey:event.legacyNoClick.newPromptKey}:{}),
       preparationRecovered:true,preparationRecoveries:(state.preparationRecoveries||0)+1,
       preparationDraftOperationId:event.preparationDraftOperationId||null,preparationDraftSequence:event.preparationDraftSequence||null}};
   }
@@ -250,7 +251,31 @@ function appendJournal(event, tab = {}) {
     const staleDraftSave=event.kind==='draft.saved'&&(superseded||Boolean(operationId&&Object.hasOwn(retryReleasedOperations,operationId)));
     const owns=claim=>claim?.operationId===operationId&&claim.tabId===tabId;
     const duplicate=()=>Object.assign(new Error('Автоповтор этого запроса уже запускался в другой вкладке или ранее'),{journalPolicy:true,code:'RETRY_DUPLICATE'});
-    function reserveRetry() {
+    async function proveManualAfterLegacyRoute(prior,proof,retryUserId,binding=event) {
+      if(!proof||!retryUserId||proof.userId!==retryUserId||typeof proof.requestId!=='string'||!proof.requestId||
+          proof.requestId!==binding.requestId||!Number.isFinite(proof.startedAt)||String(proof.startedAt)!==String(binding.attemptId)||
+          !Number.isFinite(prior.at)||proof.startedAt<=prior.at||!Number.isSafeInteger(proof.requestSequence)||
+          proof.requestSequence<1||proof.requestSequence>meta.sequence)return false;
+      let seenSuperseded=0;
+      for(let first=proof.requestSequence;first<=meta.sequence;first+=RETRY_MIGRATION_BATCH_SIZE) {
+        const keys=[];
+        for(let n=first;n<=Math.min(meta.sequence,first+RETRY_MIGRATION_BATCH_SIZE-1);n++)
+          keys.push(`${JOURNAL_PREFIX}${String(n).padStart(12,'0')}`);
+        const batch=await chrome.storage.local.get(keys);
+        for(let i=0;i<keys.length;i++) {
+          const entry=batch[keys[i]],seq=first+i;
+          if(!entry||entry.sequence!==seq)return false;
+          if(seq===proof.requestSequence) {
+            if(entry.kind!=='request.started'||entry.tabId!==tabId||retryDraftUrl(entry.sourceUrl)!==retrySource||
+                entry.requestId!==proof.requestId||entry.eventAt!==proof.startedAt||entry.operationId||entry.automatic===true)return false;
+          } else if(entry.kind==='request.started'&&(entry.tabId===tabId||retryDraftUrl(entry.sourceUrl)===retrySource))return false;
+          if(entry.kind==='retry.preparation_superseded'&&entry.tabId===tabId&&retryDraftUrl(entry.sourceUrl)===retrySource&&
+              entry.requestId===proof.requestId&&entry.startedAt===proof.startedAt)seenSuperseded++;
+        }
+      }
+      return seenSuperseded===1;
+    }
+    async function reserveRetry() {
       // Unbound historical log entries remain readable, but cannot authorize a
       // send. Real retry.planned carries this binding before any editor effect.
       if(!retrySource||!operationId||typeof event.promptKey!=='string'||!event.promptKey)return;
@@ -268,6 +293,15 @@ function appendJournal(event, tab = {}) {
       const retryUserId=event.retryUserId||preparing?.retryUserId||null;
       for(const prior of Object.values(retrySendClaims)) {
         if(prior.phase!=='consumed'||prior.sourceUrl!==retrySource)continue;
+        // A claim without a native user ID has no durable turn identity: a
+        // different DOM key may be the same turn after virtualized rows remount.
+        if(!prior.retryUserId) {
+          if(!await proveManualAfterLegacyRoute(prior,event.legacyRetryProof||preparing?.legacyRetryProof,retryUserId))throw duplicate();
+          continue;
+        }
+        // An unbound current turn cannot be distinguished from a consumed
+        // native user merely because its rendered key changed or disappeared.
+        if(!retryUserId)throw duplicate();
         // Distinct positively bound native turns remain independent even when
         // ChatGPT reuses a fallback DOM key. Without both IDs that key is
         // ambiguous and cannot authorize a second click after restart.
@@ -278,7 +312,8 @@ function appendJournal(event, tab = {}) {
       if(claim&&(!owns(claim)||claim.phase!=='reserved')||preparing&&!owns(preparing))throw duplicate();
       retrySendClaims[key]={operationId,tabId,sourceUrl:retrySource,promptKey:event.promptKey,retryUserId,at:claim?.at||Date.now(),phase:'reserved'};
       retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key,attemptId:event.attemptId||preparing?.attemptId||'',
-        retryUserId:event.retryUserId||preparing?.retryUserId||null};
+        retryUserId:event.retryUserId||preparing?.retryUserId||null,
+        legacyRetryProof:event.legacyRetryProof||preparing?.legacyRetryProof||null};
       if(retryPreparingByChat[retrySource].retryUserId)event={...event,retryUserId:retryPreparingByChat[retrySource].retryUserId};
     }
     if(event.kind==='goal.started'&&retrySource&&(
@@ -294,6 +329,25 @@ function appendJournal(event, tab = {}) {
       const goal=(await chrome.storage.local.get('chatgpt-goal:'+retrySource))['chatgpt-goal:'+retrySource];
       if(goal&&(goal.stopRequested||goal.pauseRequested||['stopped','paused'].includes(goal.phase)))
         throw Object.assign(new Error('Цель остановлена или приостановлена; автоповтор отменён'),{journalPolicy:true});
+    }
+    if(event.kind==='retry.preparation_recovered'&&event.legacyNoClick) {
+      const proof=event.legacyNoClick,state=meta.retryByChat?.[journalChatId(retrySource)];
+      let changed=!Number.isSafeInteger(proof.expectedSequence)||proof.expectedSequence<0||proof.expectedSequence>meta.sequence;
+      if(!changed&&proof.expectedSequence<meta.sequence) {
+        const count=meta.sequence-proof.expectedSequence;
+        if(count>1000)changed=true;
+        else {
+          const keys=Array.from({length:count},(_,i)=>`${JOURNAL_PREFIX}${String(proof.expectedSequence+i+1).padStart(12,'0')}`);
+          const delta=await chrome.storage.local.get(keys);
+          changed=keys.some((key,i)=>{const entry=delta[key];return !entry||entry.sequence!==proof.expectedSequence+i+1||
+            entry.tabId===tabId||retryDraftUrl(entry.sourceUrl)===retrySource||retryDraftUrl(entry.observedTabUrl)===retrySource;});
+        }
+      }
+      if(!retrySource||changed||
+          proof.oldPromptKey!==event.promptKey||state?.lastPromptKey!==proof.oldPromptKey||
+          typeof proof.newPromptKey!=='string'||!proof.newPromptKey.startsWith(new URL(retrySource).pathname+'|')||
+          !state.blocked||state.terminal||state.blockedAttemptId!==event.attemptId)
+        throw Object.assign(new Error('Проверенный запрос изменился до восстановления'),{journalPolicy:true,code:'RETRY_LEGACY_RACE'});
     }
     if(event.kind==='retry.cancelled_recovered') {
       const state=meta.retryByChat?.[journalChatId(retrySource)];
@@ -336,7 +390,7 @@ function appendJournal(event, tab = {}) {
       if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
         throw duplicate();
     }
-    if(event.kind==='retry.planned'||event.kind==='retry.send_intent')reserveRetry();
+    if(event.kind==='retry.planned'||event.kind==='retry.send_intent')await reserveRetry();
     const unknownPreparation=retryPreparingByChat[retrySource],unknownOwner=unknownPreparation?.tabId;
     const unknownOwnerTabs=event.kind==='draft.restore_intent'&&event.allowUnknown===true&&unknownOwner!==tabId&&Number.isInteger(unknownOwner)
       ?await chrome.tabs.query({}):null;
@@ -410,6 +464,14 @@ function appendJournal(event, tab = {}) {
         if(!intent.sourceUrl||intent.sourceUrl!==retryDraftUrl(sourceUrl)||typeof intent.promptKey!=='string'||!intent.promptKey)throw Object.assign(new Error('Исходный запрос автоповтора не подтверждён'),{journalPolicy:true});
         const claim=retryPreparingByChat[intent.sourceUrl]?.claimKey||JSON.stringify([intent.sourceUrl,intent.promptKey]);
         if(!owns(retrySendClaims[claim])||retrySendClaims[claim].phase!=='reserved'||!owns(retryPreparingByChat[intent.sourceUrl]))throw duplicate();
+        const prepared=retryPreparingByChat[intent.sourceUrl];
+        if(prepared.legacyRetryProof) {
+          const bound={requestId:prepared.legacyRetryProof.requestId,attemptId:prepared.attemptId};
+          for(const prior of Object.values(retrySendClaims)) {
+            if(prior.phase==='consumed'&&prior.sourceUrl===intent.sourceUrl&&!prior.retryUserId&&
+                !await proveManualAfterLegacyRoute(prior,prepared.legacyRetryProof,prepared.retryUserId,bound))throw duplicate();
+          }
+        }
         // Keep the claim after failure/unknown and worker restart. A different
         // native user turn receives its own claim; tab IDs cannot duplicate it.
         retrySendClaims[claim]={...retrySendClaims[claim],phase:'consumed'};

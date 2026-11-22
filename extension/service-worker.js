@@ -1167,9 +1167,15 @@ async function reconcileGoalMarker(tabId,url) {
       JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
       JSON.stringify(currentRequest)!==JSON.stringify(request)||
       ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId)).url)!==url)return pending();
-  const result=await goalController.completion({url,tabId,completionKey:p.completionKey,promptKey:p.promptKey,userId:p.userId,
-    response:n.goalResponse||'',rawExact:n.goalRawExact===true,nativeVerified:true,nativeMarkerPending:n.goalMarkerPending===true});
+  // A queued-resume fence requires a fresh contiguous journal and receipt
+  // check before completion. Reuse the waiting-goal verifier rather than
+  // bypassing that durable fence when a terminal marker finishes rendering.
+  const result=goal.queuedResumeFence?await reconcileWaitingGoalAnswer(tabId,url):
+    await goalController.completion({url,tabId,completionKey:p.completionKey,promptKey:p.promptKey,userId:p.userId,
+      response:n.goalResponse||'',rawExact:n.goalRawExact===true,nativeVerified:true,nativeMarkerPending:n.goalMarkerPending===true});
+  if(!result)return pending();
   if(result.pendingMarker)return pending();
+  if(!result.ok)return (await goalController.get(url))?.markerPending?pending():{ok:true,pending:false};
   if(result.ok&&['completed','blocked','stopped'].includes(result.record?.phase)&&view.status) {
     const receipt=statusReceipt(),error=result.record.phase!=='completed';
     const reserved=await reserveChatNotification(url,tabId,error?'error':'success',Date.now(),receipt,
@@ -1345,6 +1351,48 @@ function proveHandoffRetryIdentity({url,tabId,planned,native,checkpoint,handoff,
   return requests.length===1&&sends.length===1&&Number(requests[0].eventAt)===Number(planned.attemptId)&&
     typeof native.userText==='string'&&native.userText!==''&&sends[0].text===native.userText&&
     !events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>requests[0].sequence);
+}
+
+// A previously refused route-only attempt may be rebound only to the exact
+// observed manual request. This grants no send: the retry coordinator still
+// needs a fresh reservation, and the journal checks the snapshot atomically.
+function proveLegacyNoClickRoute({url,tabId,planned,native,checkpoint,receipt,journal,state,delivery,goal}) {
+  const events=journal?.events,sequence=journal?.meta?.sequence,path=new URL(url).pathname;
+  if(!planned||planned.promptKey!==path||!planned.requestId||!native?.ok||native.isLatest!==true||
+      native.isReadOnly!==false||native.generating!==false||native.hasError!==true||!native.userId||
+      !native.promptKey?.startsWith(path+'|')||delivery?.action!=='retry'||
+      !Number.isFinite(delivery.deliveryUserSentAtMs)||delivery.deliveryUserSentAtMs!==native.lastUserSentAtMs||
+      !receipt?.requestId||receipt.requestId!==planned.requestId||String(receipt.startedAt)!==planned.attemptId||
+      receipt.submittedUserId!==native.userId||![url,''].includes(receipt.url)||(receipt.tabId!==undefined&&receipt.tabId!==tabId)||
+      checkpoint?.state!=='active'||checkpoint.url!==url||checkpoint.requestId!==planned.requestId||
+      checkpoint.startedAt!==receipt.startedAt||checkpoint.promptKey!==native.promptKey||
+      !Number.isFinite(checkpoint.requestFailedAt)||!state?.blocked||state.terminal||
+      state.blockedAttemptId!==planned.attemptId||![path,native.promptKey].includes(state.lastPromptKey)||
+      journal?.ok!==true||journal.storageError||!Number.isSafeInteger(sequence)||!Array.isArray(events))return null;
+  const root=receipt.url!==url;
+  const started=events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===(root?'https://chatgpt.com/':url)&&
+    e.requestId===receipt.requestId&&e.eventAt===receipt.startedAt&&!e.operationId);
+  if(started.length!==1||!Number.isSafeInteger(started[0].sequence))return null;
+  const suffix=events.filter(e=>e.sequence>=started[0].sequence);
+  if(suffix.length!==sequence-started[0].sequence+1||suffix.some((e,i)=>e.sequence!==started[0].sequence+i)||
+      suffix.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>started[0].sequence))return null;
+  const failures=suffix.filter(e=>e.kind==='request.failed'&&e.tabId===tabId&&e.requestId===receipt.requestId&&
+    e.eventAt===checkpoint.requestFailedAt);
+  if(failures.length!==1||failures[0].sequence<=started[0].sequence)return null;
+  if(root) {
+    const own=suffix.filter(e=>e.kind==='goal.manual_started'&&e.tabId===tabId&&e.sourceUrl===url&&
+      e.requestId===receipt.requestId&&e.startedAt===receipt.startedAt&&e.goalId===goal?.id&&
+      e.userId===native.userId&&e.promptKey===native.promptKey&&e.composerSourceUrl==='https://chatgpt.com/');
+    const allocated=suffix.filter(e=>e.kind==='completion.url_allocated'&&e.tabId===tabId&&e.sourceUrl===url&&
+      e.requestId===receipt.requestId&&e.promptKey===native.promptKey&&e.attemptId===planned.attemptId);
+    const initial=goal?.manualStart;
+    if(!goal?.id||goal.expectedPromptKey!==native.promptKey||own.length!==1||allocated.length!==1||
+        initial?.tabId!==tabId||initial.sourceUrl!=='https://chatgpt.com/'||initial.url!==url||
+        initial.requestId!==receipt.requestId||initial.startedAt!==receipt.startedAt||initial.promptKey!==native.promptKey||
+        initial.userId!==native.userId||own[0].sequence<=started[0].sequence||allocated[0].sequence<=started[0].sequence||
+        failures[0].sequence<=started[0].sequence)return null;
+  }
+  return {expectedSequence:sequence,oldPromptKey:state.lastPromptKey,newPromptKey:native.promptKey};
 }
 
 // A late native message can prove an earlier retry was sent even after its
@@ -1552,10 +1600,15 @@ async function recoverNoClickRetry(tabId,url) {
     const native=await inspectBoundNativeTurn(tabId,url);
     const failedRequest=await completionCheckpointRead(tabId);
     const handoff=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
-    const rebound=planned.promptKey!==state.lastPromptKey&&native?.promptKey===state.lastPromptKey&&
-      proveHandoffRetryIdentity({url,tabId,planned,native,checkpoint:failedRequest,handoff,journal});
-    if(planned.promptKey!==state.lastPromptKey&&!rebound)return state;
+    const [delivery]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
+    const receipt=await latestRequestReceipt(tabId);
     const goal=await goalController.get(url);
+    let legacy=proveLegacyNoClickRoute({url,tabId,planned,native,checkpoint:failedRequest,receipt,journal,state,delivery:delivery?.result,goal});
+    const handoffRebound=planned.promptKey!==state.lastPromptKey&&native?.promptKey===state.lastPromptKey&&
+      proveHandoffRetryIdentity({url,tabId,planned,native,checkpoint:failedRequest,handoff,journal});
+    const rebound=Boolean(legacy||handoffRebound);
+    if(planned.promptKey!==state.lastPromptKey&&!rebound)return state;
+    if(legacy&&goal&&goal.expectedPromptKey!==native.promptKey)return state;
     const protectingGoal=goal&&!(goal.phase==='completed'&&goal.expectedPromptKey!==planned.promptKey);
     if(protectingGoal&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||Date.now()>=goal.deadlineAt||
         !(goal.phase==='blocked'&&goal.reason==='Восстановление запроса завершилось ошибкой'||
@@ -1565,7 +1618,6 @@ async function recoverNoClickRetry(tabId,url) {
       checkpoint.startedAt===Number(planned.attemptId)&&checkpoint.requestId===planned.requestId&&checkpoint.httpCompleted===true&&
       native?.terminalEmptyResponse===true&&native.nativeConversationInactive===true;
     if(cleanupOnly&&!terminalEmpty)return state;
-    const [delivery]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
     const deliveryIdle=delivery?.result?.action==='retry'&&Number.isFinite(delivery.result.deliveryUserSentAtMs)&&
       delivery.result.deliveryUserSentAtMs===native?.lastUserSentAtMs&&native?.hasError===true&&
       failedRequest?.state==='active'&&(rebound||failedRequest.url===url&&failedRequest.promptKey===planned.promptKey)&&
@@ -1583,7 +1635,7 @@ async function recoverNoClickRetry(tabId,url) {
     }
     if(carriedDraft&&!verifiedIdle)return state;
     if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||(!native.hasError&&!terminalEmpty)||!native.userId||
-        native.promptKey!==(rebound?state.lastPromptKey:planned.promptKey)||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
+        native.promptKey!==(legacy?legacy.newPromptKey:rebound?state.lastPromptKey:planned.promptKey)||planned.retryUserId&&native.userId!==planned.retryUserId||Math.abs(native.lastUserSentAtMs-Number(planned.attemptId))>10000||
         !Number.isFinite(native.lastUserSentAtMs))return state;
     const [error]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
     if(!terminalEmpty&&error?.result?.action!=='retry')return state;
@@ -1615,16 +1667,26 @@ async function recoverNoClickRetry(tabId,url) {
           JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(failedRequest))return state;
     }
     if(JSON.stringify(await readRetryDraft(url))!==JSON.stringify(carriedDraft))return state;
-    if(rebound) {
+    if(handoffRebound&&!legacy) {
       const freshJournal=await readJournal(),freshNative=await inspectBoundNativeTurn(tabId,url),freshCheckpoint=await completionCheckpointRead(tabId);
       const freshHandoff=(await chrome.storage.local.get(handoffKey(tabId)))[handoffKey(tabId)];
       if(!proveHandoffRetryIdentity({url,tabId,planned,native:freshNative,checkpoint:freshCheckpoint,handoff:freshHandoff,journal:freshJournal})||
           freshNative.promptKey!==state.lastPromptKey||JSON.stringify(await goalController.get(url))!==JSON.stringify(goal))return state;
     }
+    if(legacy) {
+      const freshJournal=await readJournal(),freshNative=await inspectBoundNativeTurn(tabId,url),freshCheckpoint=await completionCheckpointRead(tabId),freshReceipt=await latestRequestReceipt(tabId);
+      const [freshDelivery]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
+      legacy=proveLegacyNoClickRoute({url,tabId,planned,native:freshNative,checkpoint:freshCheckpoint,receipt:freshReceipt,journal:freshJournal,state,delivery:freshDelivery?.result,goal});
+      if(!legacy||JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||
+          JSON.stringify(await readRetryState(url))!==JSON.stringify(state)||JSON.stringify(await readRetryDraft(url))!==JSON.stringify(carriedDraft)||
+          JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(freshReceipt)||
+          ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return state;
+    }
     await appendJournal({kind:'retry.preparation_recovered',operationId:failed.operationId,sourceUrl:url,
       attemptId:planned.attemptId,promptKey:rebound?state.lastPromptKey:planned.promptKey,requestId:planned.requestId,
+      ...(legacy?{legacyNoClick:legacy}:{}),
       preparationDraftOperationId:carriedDraft?.operationId||null,preparationDraftSequence:carriedDraft?.savedSequence||null},tab);
-    await goalController.retry({url,tabId,kind:'retry.preparation_recovered',promptKey:rebound?state.lastPromptKey:planned.promptKey,attemptId:planned.attemptId});
+    await goalController.retry({url,tabId,kind:'retry.preparation_recovered',promptKey:legacy?legacy.newPromptKey:rebound?state.lastPromptKey:planned.promptKey,attemptId:planned.attemptId});
     return readRetryState(url);
   })();
   retryReadinessRecoveries.set(url,work);
@@ -2255,6 +2317,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse?.({ok:false,error:'Goal chat binding mismatch'});
       return false;
     }
+    const observeWaitingGoal=async()=>{
+      if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return false;
+      const waiting=await goalController.get(url);
+      return waiting?.phase==='waiting'&&!waiting.operation&&!waiting.manualPending&&!waiting.manualOverride&&
+        !waiting.pauseRequested&&!waiting.stopRequested&&Date.now()<waiting.deadlineAt;
+    };
     (async()=>{
       if(ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
       if(message.type==='CHATGPT_GOAL_RECOVER'){
@@ -2271,8 +2339,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if(typeof reconcileCompletedSourceHandoff==='function')await reconcileCompletedSourceHandoff(tabId,url);
         const queued=typeof reconcileQueuedGoalResume==='function'?await reconcileQueuedGoalResume(tabId,url).catch(()=>({ok:true,pending:true,canRetry:true})):null;if(queued)return queued;
         if(typeof reconcileNativeGoalAcknowledgement==='function')await reconcileNativeGoalAcknowledgement(tabId,url);
-        const marker=await reconcileGoalMarker(tabId,url);if(marker)return marker;
-        const answer=await reconcileWaitingGoalAnswer(tabId,url);if(answer?.ok||answer?.pendingMarker)return answer;
+        const marker=await reconcileGoalMarker(tabId,url);
+        if(marker?.pending===true) {
+          const current=await goalController.get(url);
+          if(current?.phase==='paused'||current?.phase==='stopped'||current?.pauseRequested||current?.stopRequested)
+            return {ok:true,pending:false,canRetry:false};
+        }
+        if(marker)return marker;
+        const answer=await reconcileWaitingGoalAnswer(tabId,url);
+        if(answer?.pendingMarker)return {...answer,pending:true,canRetry:true};
+        if(answer?.ok)return answer;
         const goal=await goalController.get(url);
         const recoverableReservation=goal?.operation?.status==='reserved'&&
             ['Отправка отменена: Чат занят или другой механизм восстановления активен',
@@ -2290,8 +2366,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // coordinator still enforces pending and unknown-send fences.
         await bindNativeManualSupplement(tabId,url).catch(()=>({ok:false,pending:true}));
         await reconcileGoalPromptBinding(tabId,url).catch(()=>({ok:false}));
-        const boundAnswer=await reconcileWaitingGoalAnswer(tabId,url);if(boundAnswer?.ok||boundAnswer?.pendingMarker)return boundAnswer;
-        return goalController.recoverTab({id:tabId,url});
+        const boundAnswer=await reconcileWaitingGoalAnswer(tabId,url);
+        if(boundAnswer?.pendingMarker)return {...boundAnswer,pending:true,canRetry:true};
+        if(boundAnswer?.ok)return boundAnswer;
+        const recovered=await goalController.recoverTab({id:tabId,url});
+        if(recovered?.ok)return recovered;
+        // No native final answer yet is not a terminal recovery result. Keep
+        // observing only the same active, unpaused waiting Goal; each future
+        // pass repeats the native, journal and one-use send checks above.
+        if(await observeWaitingGoal())
+          return {ok:true,pending:true,canRetry:true};
+        return recovered;
       }
       if(message.type==='CHATGPT_GOAL_CONTEXT'){await bindNativeManualSupplement(tabId,url);return {ok:true,text:await goalController.context(url)};}
       if(message.type==='CHATGPT_GOAL_CHECK')return goalController.check({
@@ -2304,7 +2389,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         url,tabId,id:message.goalId,operationId:message.operationId,status:message.status,
         reason:message.reason,newPromptKey:message.newPromptKey});
       return goalController.manual({url,tabId});
-    })().then(sendResponse).catch(error=>sendResponse({ok:false,error:String(error?.message||error)}));
+    })().then(sendResponse).catch(async error=>{
+      // A temporary native-probe failure must not silently turn off an
+      // otherwise active Goal's bounded observation loop.
+      if(message.type==='CHATGPT_GOAL_RECOVER'){
+        try{if(await observeWaitingGoal()){sendResponse({ok:true,pending:true,canRetry:true});return;}}catch{}
+      }
+      sendResponse({ok:false,error:String(error?.message||error)});
+    });
     return true;
   }
   if (['CHATGPT_HANDOFF_TITLE_INFO','CHATGPT_HANDOFF_RENAME_RECOVER'].includes(message?.type)) {
@@ -2470,24 +2562,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'CHATGPT_LOG_EVENT') {
     if (!sender.tab?.url?.startsWith('https://chatgpt.com/') || sender.frameId > 0) return;
-    const event = message.event;
-    if (!event || typeof event.kind !== 'string') return;
+    if (!message.event || typeof message.event.kind !== 'string') return;
+    const {retryUserId:untrustedRetryUserId,legacyRetryProof:untrustedLegacyRetryProof,...event}=message.event;
     if(['draft.restore_intent','retry.manual_reset','retry.preparation_superseded','retry.preparation_recovered','retry.cancelled_recovered','retry.late_recovered','handoff.superseded','goal.unsent_release'].includes(event.kind)) {
       sendResponse({ok:false,error:'Сброс требует подтверждённой ручной отправки'});return false;
     }
     const prepareEvent=async()=>{
-      if(event.kind!=='retry.planned'||!chrome.scripting?.executeScript||typeof inspectCompletedTurn!=='function')return event;
+      if(event.kind!=='retry.planned')return event;
+      // The content script cannot assert a native identity or a legacy-claim
+      // exception. Derive both from the observed POST and latest native turn.
+      const {retryUserId:ignoredUser,legacyRetryProof:ignoredProof,...untrusted}=event;
+      if(!chrome.scripting?.executeScript||typeof inspectCompletedTurn!=='function')return untrusted;
       const url=ChatGPTHandoffTitle.chatUrl(event.sourceUrl||sender.tab.url);
+      const receipt=await latestRequestReceipt(sender.tab.id);
       const [checked]=await chrome.scripting.executeScript({target:{tabId:sender.tab.id},world:'MAIN',
         func:inspectCompletedTurn,args:[url]});
       const native=checked?.result;
       if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||
           !native.userId||native.promptKey!==event.promptKey||
+          !receipt?.requestId||receipt.requestId!==event.requestId||String(receipt.startedAt)!==String(event.attemptId)||
+          receipt.submittedUserId!==native.userId||(receipt.tabId!==undefined&&receipt.tabId!==sender.tab.id)||receipt.url!==url||
           ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(sender.tab.id)).url)!==url)
-        return event; // Legacy/temporarily unavailable native data retains the existing guarded claim.
-      return {...event,retryUserId:native.userId};
+        return untrusted; // Missing proof cannot weaken any existing claim.
+      const journal=await readJournal(),events=journal?.events;
+      const matches=Array.isArray(events)?events.filter(e=>e.kind==='request.started'&&e.tabId===sender.tab.id&&
+        e.sourceUrl===url&&e.requestId===receipt.requestId&&e.eventAt===receipt.startedAt&&!e.operationId):[];
+      const legacyRetryProof=journal?.ok&&!journal.storageError&&matches.length===1&&Number.isSafeInteger(matches[0].sequence)&&
+        JSON.stringify(await latestRequestReceipt(sender.tab.id))===JSON.stringify(receipt)&&
+        ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(sender.tab.id)).url)===url
+        ?{requestId:receipt.requestId,startedAt:receipt.startedAt,userId:native.userId,requestSequence:matches[0].sequence}:null;
+      return {...untrusted,retryUserId:native.userId,...(legacyRetryProof?{legacyRetryProof}:{})};
     };
-    prepareEvent().catch(()=>event).then(verified=>appendJournal(verified,sender.tab)).then(async result=>{
+    prepareEvent().catch(()=>{
+      if(event.kind!=='retry.planned')return event;
+      const {retryUserId,legacyRetryProof,...untrusted}=event;return untrusted;
+    }).then(verified=>appendJournal(verified,sender.tab)).then(async result=>{
       if(!result.superseded&&['retry.planned','retry.confirmed','retry.failed','retry.blocked','draft.restore_failed'].includes(event.kind)) {
         const observed=event.kind==='retry.confirmed'?await latestRequestReceipt(sender.tab.id):null;
         const confirmedAttempt=observed?.operationId===event.operationId&&Number.isFinite(observed.startedAt)

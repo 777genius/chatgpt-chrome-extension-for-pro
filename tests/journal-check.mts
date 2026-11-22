@@ -40,6 +40,25 @@ result=await runInContext('readJournal()',ctx);assert.equal(result.events.length
 fail=false;await append({kind:'watcher.started'});result=await runInContext('readJournal()',ctx);assert.equal(result.events.length,before+1);assert.equal(result.storageError,'');
 console.log('PASS: concurrent durable audit, exact payload export, worker restart correlation, source/target chat IDs, no false manual attribution, disk failure recovery');
 
+// Legacy no-click rebinding is an atomic summary transition, never a reset of
+// retry budget. A racing journal append prevents the old proof being used.
+{
+ const tab={id:90,url:'https://chatgpt.com/c/legacy-no-click',title:'Fixture'},path='/c/legacy-no-click',next=path+'|server:0:user',attemptId=String(Date.now());
+ await append({kind:'error.detected',action:'retry',sourceUrl:tab.url,promptKey:path,attemptId,error:'Interrupted'},tab);
+ await append({kind:'retry.failed',sourceUrl:tab.url,promptKey:path,attemptId,reason:'Stopped before send',clicked:false},tab);
+ const seq=storage['chatgpt-journal:meta'].sequence,proof={expectedSequence:seq,oldPromptKey:path,newPromptKey:next};
+ await append({kind:'watcher.started',sourceUrl:'https://chatgpt.com/c/unrelated'},{id:89,url:'https://chatgpt.com/c/unrelated',title:'Other'});
+ await append({kind:'retry.preparation_recovered',sourceUrl:tab.url,operationId:'recovered',promptKey:path,attemptId,legacyNoClick:proof},tab);
+ ctx.url=tab.url;let state=await runInContext('readRetryState(url)',ctx);
+ assert.equal(state.blocked,false);assert.equal(state.lastPromptKey,next);assert.equal(state.preparationRecoveries,1);
+ await append({kind:'error.detected',action:'retry',sourceUrl:tab.url,promptKey:path,attemptId,error:'Interrupted'},tab);
+ await append({kind:'retry.failed',sourceUrl:tab.url,promptKey:path,attemptId,reason:'Stopped before send',clicked:false},tab);
+ const stale={expectedSequence:storage['chatgpt-journal:meta'].sequence,oldPromptKey:path,newPromptKey:next};
+ await append({kind:'watcher.started',sourceUrl:tab.url},tab);
+ await assert.rejects(()=>append({kind:'retry.preparation_recovered',sourceUrl:tab.url,operationId:'stale',promptKey:path,attemptId,legacyNoClick:stale},tab),/изменился/);
+ state=await runInContext('readRetryState(url)',ctx);assert.equal(state.blocked,true,'a stale proof cannot release the blocked state');
+}
+
 // Consecutive same-error count survives worker restart and duplicate DOM scans.
 const repeatTab={id:91,url:'https://chatgpt.com/c/repeated-error',title:'Test'};
 for(let i=0;i<3;i++)await append({kind:'error.detected',action:'retry',sourceUrl:repeatTab.url,
@@ -63,6 +82,8 @@ async function claimNativeUser(operationId:string,retryUserId:string,promptKey:s
 }
 await claimNativeUser('native-first','user-1','/c/stable-user|fallback-turn-1:0:user');
 ctx=boot();
+await assert.rejects(()=>append({kind:'retry.planned',operationId:'route-after-native',promptKey:'/c/stable-user',sourceUrl:stableTab.url},stableTab),
+ /Автоповтор этого запроса уже запускался/,'an unbound route-only key cannot bypass an earlier native-user claim');
 await claimNativeUser('native-second','user-2','/c/stable-user|fallback-turn-1:0:user');
 for(const migrated of [false,true]) {
  if(migrated){delete storage['chatgpt-journal:meta'].retrySendClaimSchema;storage['chatgpt-journal:meta'].retrySendClaims={};}
@@ -91,6 +112,84 @@ await assert.rejects(()=>claimNativeUser('native-refused','user-refused',noClick
 await claimNativeUser('native-refused-fresh','user-refused',noClickPrompt);
 
 // Schema-1 fallback claims also fence a later positively bound native view.
+// A route-only consumed claim cannot be bypassed by revealing the same user
+// through a newly mounted server-keyed DOM row. Only a later exact manual
+// request, proven across an unbroken journal suffix, can establish a new turn.
+{
+ const tab={id:96,url:'https://chatgpt.com/c/route-legacy',title:'Fixture'},route='/c/route-legacy';
+ for(const kind of ['retry.planned','retry.send_intent','send.authorized'])
+  await append({kind,operationId:'old-route',sourceUrl:tab.url,promptKey:route},tab);
+ await append({kind:'retry.failed',operationId:'old-route',sourceUrl:tab.url,clicked:true},tab);
+ await append({kind:'retry.finished',operationId:'old-route',sourceUrl:tab.url,clicked:true},tab);
+ const laterAt=Date.now()+1000,base={kind:'retry.planned',operationId:'later-native',sourceUrl:tab.url,
+  promptKey:route+'|server-entry:0:user',retryUserId:'manual-user',requestId:'manual-request',attemptId:String(laterAt)};
+ await assert.rejects(()=>append(base,tab),/Автоповтор этого запроса уже запускался/,
+  'new DOM key and user ID alone cannot release a legacy route-only unknown send');
+ await append({kind:'request.started',sourceUrl:tab.url,requestId:'manual-request',eventAt:laterAt},tab);
+ const started=storage['chatgpt-journal:meta'].sequence;
+ await append({kind:'retry.preparation_superseded',sourceUrl:tab.url,requestId:'manual-request',startedAt:laterAt},tab);
+ const legacyRetryProof={requestId:'manual-request',startedAt:laterAt,userId:'manual-user',requestSequence:started};
+ for(const bad of [
+  {...legacyRetryProof,userId:'other'}, {...legacyRetryProof,requestId:'other'},
+  {...legacyRetryProof,startedAt:laterAt+1}, {...legacyRetryProof,requestSequence:started+1}
+ ])await assert.rejects(()=>append({...base,legacyRetryProof:bad},tab),/Автоповтор этого запроса уже запускался/);
+ await append({...base,legacyRetryProof},tab);
+ await append({kind:'retry.send_intent',operationId:base.operationId,sourceUrl:tab.url,promptKey:base.promptKey,attemptId:base.attemptId,requestId:base.requestId},tab);
+ await append({kind:'send.authorized',operationId:base.operationId,sourceUrl:tab.url},tab);
+ await append({kind:'retry.confirmed',operationId:base.operationId,sourceUrl:tab.url},tab);
+ ctx=boot();
+ await assert.rejects(()=>append({...base,operationId:'duplicate-manual',legacyRetryProof},tab),/Автоповтор этого запроса уже запускался/,
+  'restart preserves the consumed manual-turn claim');
+}
+async function routeProofFixture(name:string,fallback=false) {
+ const tab={id:97,url:'https://chatgpt.com/c/'+name,title:'Fixture'},route='/c/'+name,at=Date.now()+5000;
+ for(const kind of ['retry.planned','retry.send_intent','send.authorized'])
+  await append({kind,operationId:name+'-old',sourceUrl:tab.url,promptKey:fallback?route+'|fallback-turn-0:0:user':route},tab);
+ await append({kind:'retry.failed',operationId:name+'-old',sourceUrl:tab.url,clicked:true},tab);
+ await append({kind:'retry.finished',operationId:name+'-old',sourceUrl:tab.url,clicked:true},tab);
+ await append({kind:'request.started',sourceUrl:tab.url,requestId:name+'-manual',eventAt:at},tab);
+ const requestSequence=storage['chatgpt-journal:meta'].sequence;
+ const event={kind:'retry.planned',operationId:name+'-new',sourceUrl:tab.url,promptKey:route+'|server:0:user',
+  retryUserId:'manual-user',requestId:name+'-manual',attemptId:String(at),
+  legacyRetryProof:{requestId:name+'-manual',startedAt:at,userId:'manual-user',requestSequence}};
+ return {tab,at,event};
+}
+{
+ const f=await routeProofFixture('fallback-to-server',true);
+ await assert.rejects(()=>append({...f.event,legacyRetryProof:undefined},f.tab),/Автоповтор этого запроса уже запускался/,
+  'revealing a server key cannot bypass a legacy fallback key without a proven new manual request');
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ await append(f.event,f.tab);
+ await append({...f.event,kind:'retry.send_intent'},f.tab);
+ await append({kind:'send.authorized',sourceUrl:f.tab.url,operationId:f.event.operationId},f.tab);
+ await append({kind:'retry.confirmed',sourceUrl:f.tab.url,operationId:f.event.operationId},f.tab);
+}
+{
+ const f=await routeProofFixture('route-no-manual-ack');
+ await assert.rejects(()=>append(f.event,f.tab),/Автоповтор этого запроса уже запускался/,'an observed POST alone is not a confirmed manual request');
+}
+{
+ const f=await routeProofFixture('route-gap');
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ const key='chatgpt-journal:event:'+String(f.event.legacyRetryProof.requestSequence).padStart(12,'0'),saved=storage[key];delete storage[key];
+ await assert.rejects(()=>append(f.event,f.tab),/Автоповтор этого запроса уже запускался/,'missing durable journal entry never authorizes a retry');
+ storage[key]=saved;
+}
+{
+ const f=await routeProofFixture('route-later-request');
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ await append({kind:'request.started',sourceUrl:f.tab.url,requestId:'other',eventAt:f.at+10},{...f.tab,id:98});
+ await assert.rejects(()=>append(f.event,f.tab),/Автоповтор этого запроса уже запускался/,'a later request in another tab wins');
+}
+{
+ const f=await routeProofFixture('route-grant-race');
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ await append(f.event,f.tab);
+ await append({...f.event,kind:'retry.send_intent'},f.tab);
+ await append({kind:'request.started',sourceUrl:f.tab.url,requestId:'newer',eventAt:f.at+10},{...f.tab,id:98});
+ await assert.rejects(()=>append({kind:'send.authorized',sourceUrl:f.tab.url,operationId:f.event.operationId},f.tab),/Автоповтор этого запроса уже запускался/,
+  'a newer request arriving after intent blocks the final send grant');
+}
 {
  const legacyTab={id:94,url:'https://chatgpt.com/c/legacy-fallback',title:'Test'},promptKey='/c/legacy-fallback|fallback-turn-1:0:user';
  for(const kind of ['retry.planned','retry.send_intent','send.authorized','retry.confirmed'])
