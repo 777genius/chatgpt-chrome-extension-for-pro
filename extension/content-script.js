@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.155';
+  const SCRIPT_VERSION = '1.8.164';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -46,9 +46,27 @@
       const result=await runtimeMessage({type:'CHATGPT_GOAL_RECOVER',url:location.href});
       if(!runtimeAvailable())return;
       if(location.pathname!==path){goalRecoveryAgain=true;return;}
-      if(result?.pending===true&&result.canRetry===true||result==null&&retrying)
-        goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},Date.now()-goalRecoveryFirstAt<30000?5000:30000);
-      else goalRecoveryFirstAt=0;
+      if(result?.pending===true&&result.canRetry===true||result==null&&retrying) {
+        const delay=Date.now()-goalRecoveryFirstAt<30000?5000:30000;
+        if(typeof document!=='undefined'&&document.visibilityState==='hidden') {
+          // One cancellable worker-backed wait at a time. Content timers in a
+          // hidden tab can be batched, delaying Goal until the user switches.
+          const token={};goalRecoveryTimer=token;
+          void (async()=>{
+            let remaining=delay;
+            while(remaining>0&&goalRecoveryTimer===token&&runtimeAvailable()&&location.pathname===path) {
+              const slice=Math.min(3000,remaining),waited=await runtimeMessage({type:'CHATGPT_WAIT',delayMs:slice});
+              if(goalRecoveryTimer!==token)return;
+              if(!waited?.ok) {
+                goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},delay);
+                return;
+              }
+              remaining-=slice;
+            }
+            if(goalRecoveryTimer===token){goalRecoveryTimer=null;void recoverGoalState(true);}
+          })();
+        } else goalRecoveryTimer=setTimeout(()=>{goalRecoveryTimer=null;void recoverGoalState(true);},delay);
+      } else goalRecoveryFirstAt=0;
     }catch{}finally{
       goalRecoveryBusy=false;
       if(goalRecoveryAgain&&runtimeAvailable()){goalRecoveryAgain=false;void recoverGoalState();}
@@ -136,7 +154,7 @@
       ? Date.now() - startedAt : null;
   }
 
-  let activeStatusRequest=null;
+  let activeStatusRequest=null,manuallyStoppedRequest=null;
   statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,composerActivity,
     hasActiveRequest:(url,startedAt)=>activeStatusRequest?.path===new URL(url).pathname&&activeStatusRequest.startedAt===startedAt,
     load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:composerActivity()==='generating',startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
@@ -1693,6 +1711,7 @@
       let pollId = null;
       let throttleId = null;
       let frameId = null;
+      let hiddenPoll = null, hiddenPollFailures = 0;
       let lastCheckAt = 0;
       let stableText = '';
       let stableSince = 0;
@@ -1715,6 +1734,8 @@
       const finish = (text) => {
         if (settled) return;
         settled = true;
+        hiddenPoll = null;
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         if (observer) observer.disconnect();
         observer = null;
         if (watchdogId !== null) clearInterval(watchdogId);
@@ -1861,6 +1882,35 @@
         }, delay);
       };
 
+      // Timers in an inactive Chrome tab can be batched for a minute. Keep
+      // one worker-backed wait outstanding while hidden so an otherwise idle
+      // final answer can be observed without requiring a focus event. The
+      // existing interval remains a fallback if messaging is unavailable.
+      const scheduleHiddenPoll = () => {
+        if (settled || hiddenPoll || document.visibilityState !== 'hidden' || !runtimeAvailable() || !isCurrent()) return;
+        const token = {};
+        hiddenPoll = token;
+        void runtimeMessage({type:'CHATGPT_WAIT',delayMs:3000}).then(result=>{
+          if (hiddenPoll !== token) return;
+          hiddenPoll = null;
+          if (settled || !runtimeAvailable() || !isCurrent() || document.visibilityState !== 'hidden') return;
+          if (!result?.ok) {
+            // Recover promptly from transient worker failures without an
+            // unbounded fast-failure loop if messaging remains unavailable.
+            if (++hiddenPollFailures <= 2) scheduleHiddenPoll();
+            return;
+          }
+          hiddenPollFailures = 0;
+          check();
+          scheduleHiddenPoll();
+        });
+      };
+      const onVisibilityChange = () => {
+        if (document.visibilityState === 'hidden') scheduleHiddenPoll();
+        else hiddenPoll = null;
+      };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+
       const root = conversationObserverRoot();
       if (root && typeof MutationObserver === 'function') {
         observer = new MutationObserver(scheduleCheck);
@@ -1869,7 +1919,13 @@
 
       // Interval fallback: background tabs freeze requestAnimationFrame, so the
       // observer chain alone can stall until the tab regains focus.
-      pollId = setInterval(check, STREAM_POLL_MS);
+      pollId = setInterval(() => {
+        check();
+        // If bounded immediate retries failed, the interval is a later
+        // recovery point rather than a permanently stopped worker chain.
+        if (hiddenPollFailures > 2) hiddenPollFailures = 0;
+        scheduleHiddenPoll();
+      }, STREAM_POLL_MS);
 
       // Only counted once generation has ended, so a long reasoning phase is
       // not mistaken for the 30s "no answer text appeared" fallback.
@@ -1886,6 +1942,7 @@
       }, STREAM_POLL_MS);
 
       check();
+      scheduleHiddenPoll();
     });
   }
 
@@ -2058,6 +2115,12 @@
     if (!isStopButton(event.target)) return;
     if (stoppingRecovery && !event.isTrusted) return;
     if(event.isTrusted){
+      const stoppedUrl=ChatGPTHandoffTitle.chatUrl(location.href)||
+        (location.origin==='https://chatgpt.com'&&location.pathname==='/'?'https://chatgpt.com/':''),
+        stoppedAt=globalThis.__chatgptNotifierRequestStartedAt,
+        stoppedId=globalThis.__chatgptNotifierRequestId;
+      if(stoppedUrl&&Number.isFinite(stoppedAt)&&typeof stoppedId==='string'&&stoppedId)
+        manuallyStoppedRequest={url:stoppedUrl,startedAt:stoppedAt,requestId:stoppedId};
       void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       const generation=statusIndicator?.loadingGeneration?.(),captured=globalThis.__chatgptNotifierRequestReceipt;
       const exact=!generation||generation.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&generation.startReceipt?.epoch===captured?.epoch&&generation.startReceipt?.order===captured?.order;
@@ -2115,6 +2178,18 @@
     }
     if(message?.type==='CHATGPT_STATUS_TICK'){sendResponse?.({ok:statusIndicator?.tick(message)||false});return;}
     if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&message.replayBinding) {
+      const binding=message.replayBinding;
+      if(!binding.targetUrl||ChatGPTHandoffTitle.chatUrl(location.href)!==binding.targetUrl||
+          binding.startedAt!==message.startedAt||binding.requestId!==message.requestId||
+          globalThis.__chatgptNotifierRequestStartedAt!==binding.startedAt||
+          globalThis.__chatgptNotifierRequestId!==binding.requestId||
+          manuallyStoppedRequest&&(manuallyStoppedRequest.url===binding.targetUrl||manuallyStoppedRequest.url===binding.sourceUrl)&&
+            manuallyStoppedRequest.startedAt===binding.startedAt&&
+            manuallyStoppedRequest.requestId===binding.requestId) {
+        sendResponse?.({ok:false,reason:'stale-replay-binding'});return;
+      }
+    }
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
     const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
     if(currentRequest&&message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')

@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';import{readFileSync}from'node:fs';import{createContext,runInContext}from'node:vm';
+const source=readFileSync('extension/service-worker.js','utf8');const a=source.indexOf('let journalStartupRecovery='),b=source.indexOf('const goalController=',a);assert.ok(a>=0&&b>a);
+let attempts=0,initializations=0,installed=0;const ctx=createContext({Promise,console,recoverProvisionalGoalCAS:async()=>{if(++attempts===1)throw Error('transient');},initializeJournal:async()=>{initializations++;}});
+runInContext(source.slice(a,b),ctx);await assert.rejects(()=>runInContext('ensureJournalStartupRecovery()',ctx),/transient/);
+await runInContext('ensureJournalStartupRecovery()',ctx);assert.equal(attempts,2);assert.equal(initializations,1);
+await runInContext('ensureJournalStartupRecovery()',ctx);assert.equal(attempts,2,'successful recovery is shared and not restarted');
+const c=source.indexOf('function activateErrorWatchers()'),d=source.indexOf('chrome.runtime.onInstalled.addListener',c);assert.ok(c>=0&&d>c);
+let timer:(()=>void)|null=null,watchAttempts=0;const ctx2=createContext({Promise,console:{warn:()=>{}},ensureJournalStartupRecovery:async()=>{if(++watchAttempts===1)throw Error('transient')},watcherBootstrap:{ensure:async()=>{installed++}},installErrorWatchers:async()=>{},setTimeout:(fn:()=>void)=>{timer=fn;return 1},clearTimeout:()=>{timer=null}});
+runInContext(source.slice(c,d),ctx2);runInContext('scheduleErrorWatchers()',ctx2);await new Promise(resolve=>setImmediate(resolve));assert.ok(timer,'failed startup schedules retry');(timer as ()=>void)();await new Promise(resolve=>setImmediate(resolve));assert.equal(installed,1,'watchers install after transient recovery failure');
+console.log('Journal bootstrap: transient recovery retries, successful gate is shared and watchers resume.');

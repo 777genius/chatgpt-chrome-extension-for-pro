@@ -514,17 +514,123 @@ for(const scenario of ['text','url','before-arm','late-after-intent','no-body','
  assert.equal(fresh.record.requestCandidateAmbiguous,undefined);assert.equal(fresh.record.requestCandidate,undefined);
  assert.equal((await env.store.composerRequest(wire)).ok,false,'old arm candidate cannot attach to refreshed arm');
 }
+// Slow Arm delivery may delay saving trusted consent after its exact request
+// was already observed. Only that unique, timely request can bridge freshness.
+for(const url of [root,saved])for(const delay of [9999,10001,60000]) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url});
+ const draftKey='synthetic-preserved-draft';env.data[draftKey]={text:'  User draft remains exact  ',attachments:['synthetic-file']};
+ const draft=structuredClone(env.data[draftKey]);
+ const wire={tabId:7,armId:armed.record.id,url,requestId:'timely-wire',startedAt:delay===60000?1010000:1000100,
+  submission:{userId:'native-user-7',userText:objective}};
+ await env.store.composerRequest(wire);env.clock(1000000+delay);
+ const result=await env.store.composerIntent({tabId:7,url,armId:armed.record.id,eventAt:1000000,
+  text:objective,baselineKey:url===root?'':'/c/manual-goal-source|old-user'});
+ assert.equal(result.record.phase,'intent',String(delay));assert.equal(result.record.request.requestId,wire.requestId);
+ assert.equal(result.record.intent.eventAt,1000000,'persist original trusted event time, not receipt time');
+ assert.equal(env.data[goalKey(saved)],undefined,'delayed consent alone cannot bind a Goal');
+ const proof={...env.proof(armed.record.id),requestId:wire.requestId,startedAt:wire.startedAt,
+  userSentAtMs:wire.startedAt+100,firstTurn:url===root};
+ const before=structuredClone(env.data);
+ for(const changes of [{nativeVerified:false},{requestId:'wrong-request'},{userText:'Wrong body'},
+   {promptKey:'/c/wrong-chat|user'},{startedAt:1010001}])
+  await assert.rejects(()=>env.store.composerBind({...proof,...changes}));
+ assert.deepEqual(env.data,before,'native binding checks still gate delayed consent');
+ await env.store.composerBind(proof);
+ assert.equal(env.data[goalKey(saved)].phase,'waiting');
+ assert.equal(env.data[goalKey(saved)].goal,objective);assert.equal(env.data[goalKey(saved)].startedAt,wire.startedAt);
+ assert.equal(env.messages.length,0,'neither delayed consent nor native adoption sends a message');
+ assert.deepEqual(env.data[draftKey],draft,'draft text and attachments are unchanged');
+}
+// A trusted send can precede durable Arm creation, not just its reply.
+{
+ const env=fixture(),actionAt=1000000,eventAt=1000100,requestAt=1000120;
+ env.clock(1000500); // The worker writes Arm after the native request started.
+ const armed=await env.store.composerArm({tabId:7,url:root,armActionAt:actionAt});
+ assert.equal(armed.record.armedAt,1000500);
+ assert.equal(armed.record.armActionAt,actionAt,'original Arm click is preserved with a bounded timestamp');
+ const request={tabId:7,armId:armed.record.id,url:root,requestId:'pre-write-request',startedAt:requestAt,
+   submission:{userId:'native-user-7',userText:objective}};
+ assert.equal((await env.store.composerRequest(request)).ok,true,'early request attaches after its Arm record exists');
+ const consent=await env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,eventAt,
+   text:objective,baselineKey:''});
+ assert.equal(consent.record.request.requestId,request.requestId,'the original event binds its exact request');
+ const bound=await env.store.composerBind({...env.proof(armed.record.id),requestId:request.requestId,startedAt:requestAt});
+ assert.equal(bound.record.phase,'bound');
+ assert.equal(env.data[goalKey(saved)].phase,'waiting','native verification tracks the pre-write first message');
+ assert.equal(env.messages.length,0,'the native first message is never resent');
+}
+{
+ const env=fixture();env.clock(1020000);
+ const armed=await env.store.composerArm({tabId:7,url:root,armActionAt:1000000});
+ assert.equal(armed.record.armActionAt,armed.record.armedAt,'unreasonably old Arm timestamps receive no early-send privilege');
+ await assert.rejects(()=>env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,
+   eventAt:1000100,text:objective,baselineKey:''}),/свежему/);
+}
+// Without prior request evidence, keep the original ten-second receipt gate.
+for(const delay of [9999,10001,60000]) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});env.clock(1000000+delay);
+ const intent={tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''};
+ if(delay===9999)assert.equal((await env.store.composerIntent(intent)).record.phase,'intent');
+ else {
+  const before=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerIntent(intent));assert.deepEqual(env.data,before);
+ }
+ assert.equal(env.messages.length,0);assert.equal(env.data[goalKey(saved)],undefined);
+}
+for(const scenario of ['missing','body','wire-route','arm-id','intent-route','empty-user-id','empty-request-id',
+ 'ambiguous','later-request','earlier-request','future-event','before-arm','wrong-phase','baseline-route']) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});
+ const wire={tabId:7,armId:armed.record.id,url:root,requestId:'timely-wire',startedAt:1000100,
+  submission:{userId:'native-user-7',userText:objective}};
+ if(scenario==='body')wire.submission.userText='Different objective';
+ if(scenario==='wire-route')wire.url=other;
+ if(scenario==='empty-user-id')wire.submission.userId='';
+ if(scenario==='empty-request-id')wire.requestId='';
+ if(scenario==='later-request')wire.startedAt=1010001;
+ if(scenario==='future-event')wire.startedAt=1060100;
+ if(scenario!=='missing')await env.store.composerRequest(wire);
+ if(scenario==='ambiguous')await env.store.composerRequest({...wire,requestId:'second-wire',startedAt:1000200});
+ if(scenario==='earlier-request')assert.equal((await env.store.composerGet({tabId:7})).requestCandidate?.requestId,wire.requestId,
+  'pre-event request is durably stored after Arm and must be rejected by intent time gate');
+ if(scenario==='wrong-phase')env.data[composerKey(7)].phase='cancelled';
+ // Keep the earlier-request case inside the ordinary freshness window, so
+ // only the stored request's startedAt < eventAt rule can reject it.
+ env.clock(scenario==='earlier-request'?1000300:1060000);
+ const intent={tabId:7,url:root,armId:armed.record.id,eventAt:scenario==='earlier-request'?1000200:1000000,text:objective,baselineKey:''};
+ if(scenario==='arm-id')intent.armId='wrong-arm';
+ if(scenario==='intent-route')intent.url=other;
+ if(scenario==='future-event')intent.eventAt=1060001;
+ if(scenario==='before-arm')intent.eventAt=999999;
+ if(scenario==='baseline-route')intent.baselineKey='/c/unrelated|before';
+ const before=structuredClone(env.data),writes=env.writes.length;
+ if(scenario==='earlier-request') {
+  const pending=await env.store.composerIntent(intent);
+  assert.equal(pending.record.request,undefined,'an earlier request is not adopted by later consent');
+  const state=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerBind({...env.proof(armed.record.id),
+    requestId:wire.requestId,startedAt:wire.startedAt}),/Нативная ручная отправка/,
+   'even a native-turn witness cannot adopt a request preceding trusted intent');
+  assert.deepEqual(env.data,state,'rejected bind does not change durable consent');
+ } else {
+  await assert.rejects(()=>env.store.composerIntent(intent),scenario);
+  assert.deepEqual(env.data,before,scenario);assert.equal(env.writes.length,writes,scenario);
+  assert.equal(env.events.length,0,scenario);
+ }
+ assert.equal(env.messages.length,0,scenario);
+}
+
 console.log('Pre-intent request observation: durable exact candidate, intent/native proof gates, ambiguity retention and cancellation passed.');
 
 // Exercise the worker's actual tab-close listener, not just the store API.
 {
  const worker=readFileSync('extension/service-worker.js','utf8');
  const from=worker.indexOf('chrome.tabs.onRemoved.addListener('),to=worker.indexOf('\n\nasync function restoreStatusAnimation()',from);
- assert.ok(from>0&&to>from);let listener:any,called:any;
+ assert.ok(from>0&&to>from);let listener:any,called:any,forgottenStartTab:number|null=null;
  const world=createContext({chrome:{tabs:{onRemoved:{addListener:(fn:any)=>{listener=fn}}}},
   goalController:{composerDisarm:async(value:any)=>{called=value}},journalInBackground:()=>{},
   lastNotificationFingerprintByTab:new Map(),legacyHandoffStatusFences:new Map(),manualRequestReceiptsByTab:new Map(),
-  forgetRequestReceipts:async()=>{},statusAnimation:{remove(){}}});
+  forgetRequestReceipts:async()=>{},forgetPendingRequestStarts:async(tabId:number)=>{forgottenStartTab=tabId;},statusAnimation:{remove(){}}});
  runInContext(worker.slice(from,to),world);listener(7);await new Promise<void>(resolve=>setImmediate(resolve));
  assert.deepEqual(structuredClone(called),{tabId:7,preserveBoundGoal:true});
+ assert.equal(forgottenStartTab,7,'closing the tab retires only its pending request-start observations');
 }

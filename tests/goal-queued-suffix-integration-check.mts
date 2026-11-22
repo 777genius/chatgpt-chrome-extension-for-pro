@@ -13,7 +13,12 @@ const now=Date.now(),sentAt=now+1000;
 let clock=now;
 const storage={async get(k:string){return {[k]:structuredClone(data[k])}},async set(v:any){Object.assign(data,structuredClone(v))}};
 const tabs={async get(id:number){return{id,url}},async sendMessage(id:number,message:any){if(message.type==='CHATGPT_GOAL_READINESS')return{ok:true,idle:!busy};sent.push({id,message});return{ok:true}}};
-const store=create({storage,tabs,appendJournal:async(e:any)=>events.push(structuredClone(e)),now:()=>clock,uuid:()=>`operation-${++sequence}`});
+const store=create({storage,tabs,appendJournal:async(e:any,_tab:any,options:any)=>{
+ if(options?.goalCAS){const cas=options.goalCAS,key='chatgpt-goal:'+cas.url;
+  if(JSON.stringify(data[key])!==JSON.stringify(cas.expected))throw Object.assign(new Error('Goal changed'),{code:'GOAL_FENCE_CHANGED'});
+  data[key]=structuredClone(cas.next);
+ }
+ events.push(structuredClone(e));return {ok:true};},now:()=>clock,uuid:()=>`operation-${++sequence}`});
 await store.start({url,tabId:7,goal:'Complete the isolated task',rules:'',maxContinuations:3,maxMinutes:60});
 let g=data['chatgpt-goal:'+url],op=g.operation;
 await store.intent({url,tabId:7,id:g.id,operationId:op.id,text:op.text,baselineKey:'/c/queued-suffix-test|previous'});
@@ -46,7 +51,7 @@ const journal={ok:true,storageError:'',meta:{sequence:105},events:[
 const source=readFileSync('extension/service-worker.js','utf8'),start=source.indexOf('async function reconcileQueuedGoalResume('),end=source.indexOf('async function reconcileAcceptedHandoffGoal(',start);
 assert.ok(start>0&&end>start);
 let flipReadOnly=false,injectLate=false;
-const ctx=createContext({URL,Date,JSON,Number,Math,ChatGPTGoalPolicy:{canonical:(v:string)=>v},inspectCompletedTurn:()=>{},chrome:{tabs,scripting:{executeScript:async(input:any)=>{if(input.args.length>3){if(flipReadOnly)native.isReadOnly=true;return [{result:structuredClone(historical)}]}return [{result:structuredClone(native)}]}}},latestRequestReceipt:async()=>structuredClone(receipt),readJournal:async()=>{const copy=structuredClone(journal);if(injectLate&&data['chatgpt-goal:'+url].phase==='waiting'){copy.events.push({kind:'request.started',tabId:8,sourceUrl:url,requestId:'later',eventAt:sentAt2+1000,sequence:106});copy.meta.sequence=106}return copy},goalController:store});
+const ctx=createContext({URL,Date,JSON,Number,Math,JOURNAL_META:'chatgpt-journal:meta',JOURNAL_PREFIX:'chatgpt-journal:event:',RETRY_MIGRATION_BATCH_SIZE:50,journalFailure:'',ChatGPTGoalPolicy:{canonical:(v:string)=>v},inspectCompletedTurn:()=>{},chrome:{tabs,storage:{local:{get:async(keys:string|string[])=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(key=>[key,structuredClone(key==='chatgpt-journal:meta'?journal.meta:journal.events.find(row=>'chatgpt-journal:event:'+String(row.sequence).padStart(12,'0')===key))]))}},scripting:{executeScript:async(input:any)=>{if(input.args.length>3){if(flipReadOnly)native.isReadOnly=true;return [{result:structuredClone(historical)}]}return [{result:structuredClone(native)}]}}},latestRequestReceipt:async()=>structuredClone(receipt),readJournal:async()=>{const copy=structuredClone(journal);if(injectLate&&data['chatgpt-goal:'+url].phase==='waiting'){copy.events.push({kind:'request.started',tabId:8,sourceUrl:url,requestId:'later',eventAt:sentAt2+1000,sequence:106});copy.meta.sequence=106}return copy},goalController:store});
 runInContext(source.slice(start,end),ctx);ctx.url=url;
 const missingAnchor=journal.events.shift();
 await runInContext('reconcileQueuedGoalResume(7,url)',ctx);

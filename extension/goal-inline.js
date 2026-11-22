@@ -12,7 +12,7 @@
     const ownerAttribute='data-chatgpt-goal-inline-owner';
     let ownsDOM=false;
     let disposed=false,route=null,epoch=0,sequence=0,record=null,composer=null,loaded=false,loading=false;
-    let busy=false,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
+    let busy=false,arming=null,pendingRefresh=false,error='',open=false,anchor=null,editor=null,layoutItem=null,hydrated=null;
     const cleanups=[];
     let observer=null,binding=null,bindTimer=null,bindGeneration=0,failedBinding=null;
     const ROOT_URL='https://chatgpt.com/';
@@ -258,7 +258,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record&&policy.canonical(record.url)!==next)record=null;
         return true;
       }
-      stopBinding();record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';failedBinding=null;
+      stopBinding();arming=null;record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';failedBinding=null;
       open=false;panel.hidden=true;resetFields();render();
       return true;
     }
@@ -456,33 +456,64 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         stopBinding();
       }
       const url=route,revision=epoch,serial=++sequence;
+      let settleArm,acknowledgedId=null;
+      const arm=action==='arm'?{token:null,actionAt:Date.now(),promise:new Promise(resolve=>{settleArm=resolve;})}:null;
+      if(arm){arming=arm;input={...input,armActionAt:arm.actionAt};}
+      // A trusted native send captured during Arm may follow the same initial
+      // allocation while the worker's acknowledgement is still in flight.
+      const currentAction=()=>accepts(url,revision,serial)||arm?.token!=null&&contextMatches(arm.token);
       busy=true;error='';failedBinding=null;render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action,url,...input});
-        if(!accepts(url,revision,serial))return;
+        if(!currentAction())return;
         validateResult(result,url);
         if(!result?.ok)throw Error(result?.error||result?.reason||'Goal action was not confirmed');
-        apply(result);resumeBinding();
+        if(arm) {
+          if(typeof result.composer?.id!=='string'||!result.composer.id||result.composer.phase!=='armed'||policy.pageUrl(result.composer.url)!==url)
+            throw Error('Goal arming was not acknowledged');
+          acknowledgedId=result.composer.id;
+        }
+        if(arm?.token!=null) {
+          binding.id=acknowledgedId;composer=result.composer;record=result.record||null;loaded=true;hydrate();
+        } else {apply(result);resumeBinding();}
       } catch(cause) {
-        if(!accepts(url,revision,serial))return;
-        error='Goal: '+String(cause?.message||cause);
+        if(!currentAction())return;
+        acknowledgedId=null;error='Goal: '+String(cause?.message||cause);
         if(controls.isConnected)show(true,false);
       } finally {
-        if(accepts(url,revision,serial)) {
-          busy=false;render();
-          if(pendingRefresh){pendingRefresh=false;void refresh();}
+        if(currentAction()) {
+          // The captured send owns this same busy interval until its intent is
+          // saved. An intervening GET must not overwrite the exact Arm ACK.
+          if(!(acknowledgedId&&arm?.token!=null)) {
+            busy=false;render();
+            if(pendingRefresh){pendingRefresh=false;void refresh();}
+          }
         }
+        if(arm){if(arming===arm)arming=null;settleArm(acknowledgedId);}
       }
     }
     async function manualIntent({text,baselineKey,eventAt,linkTargets}) {
       if(!valid())return {ok:false};
       if(syncRoute()){void refresh();return {ok:false};}
-      if(!route||!loaded||busy||composer?.phase!=='armed'||typeof text!=='string'||!text.trim()||
-          typeof baselineKey!=='string'||!Number.isFinite(eventAt))return {ok:false};
-      const url=route,id=composer.id;
+      const arm=busy?arming:null;
+      if(!route||!loaded||busy&&!arm||arm?.token!=null||!arm&&composer?.phase!=='armed'||
+          typeof text!=='string'||!text.trim()||typeof baselineKey!=='string'||!Number.isFinite(eventAt))return {ok:false};
+      const url=route;
+      let id=arm?null:composer.id;
+      // Copy only the already captured trusted payload. Never re-read the
+      // composer after waiting for an Arm acknowledgement or a route change.
+      if(Array.isArray(linkTargets))linkTargets=linkTargets.slice();
       stopBinding();
       binding={id,origin:url,allocated:'',token:bindGeneration,persisted:false,inFlight:false,stopped:false,deadline:eventAt+BIND_WINDOW};
       const token=binding.token;
+      if(arm) {
+        arm.token=token;
+        id=await arm.promise;
+        if(!id||!contextMatches(token)||composer?.id!==id||composer.phase!=='armed') {
+          if(contextMatches(token))stopBinding();
+          return {ok:false};
+        }
+      }
       busy=true;loading=false;error='';failedBinding=null;sequence++;render();
       try {
         const result=await request({type:'CHATGPT_GOAL_INLINE',action:'intent',armId:id,url,text,baselineKey,eventAt,linkTargets});

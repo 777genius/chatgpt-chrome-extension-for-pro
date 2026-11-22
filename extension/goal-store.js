@@ -3,12 +3,12 @@
 // Chrome worker owns the only durable Goal coordinator. No page script may
 // authorize itself to click; the journal's consumed send grant is authoritative.
 (function(root) {
-  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),beforeDispatch=async record=>{}}) {
+  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),ready=async()=>{},beforeDispatch=async record=>{}}) {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     let writes=Promise.resolve();
     const serialize=fn=>{
-      const task=writes.catch(()=>{}).then(fn);
+      const task=writes.catch(()=>{}).then(async()=>{await ready();return fn();});
       writes=task;
       return task;
     };
@@ -75,7 +75,7 @@
         return {ok:true};
       });
     }
-    async function composerArm({tabId,url,rules,maxContinuations,maxMinutes}) {
+    async function composerArm({tabId,url,rules,maxContinuations,maxMinutes,armActionAt}) {
       requireTab(tabId);
       const target=requirePage(url);
       const config=policy.composerSettings({rules,
@@ -108,7 +108,11 @@
         }
         if(previous?.phase==='armed'&&previous.url===target&&
             JSON.stringify(previous.config)===JSON.stringify(config))return {ok:true,record:previous};
-        const record={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt:now()};
+        const armedAt=now();
+        // The trusted UI Arm action can precede this durable write. Preserve
+        // its bounded timestamp without letting older requests bind a Goal.
+        const actionAt=Number.isFinite(armActionAt)&&armActionAt>=armedAt-10000&&armActionAt<=armedAt?armActionAt:armedAt;
+        const record={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt,armActionAt:actionAt};
         await storage.set({[composerKey(tabId)]:record});
         return {ok:true,record};
       });
@@ -158,8 +162,17 @@
             return {ok:true,record:current};
           throw Error('Другая ручная отправка Goal уже ожидает подтверждения');
         }
-        if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<current.armedAt||
-            eventAt>now()||now()-eventAt>10000)
+        const candidate=current.requestCandidate,time=now();
+        const attachCandidate=!current.requestCandidateAmbiguous&&candidate&&candidate.url===target&&
+          typeof candidate.requestId==='string'&&!!candidate.requestId&&
+          typeof candidate.submission?.userId==='string'&&!!candidate.submission.userId&&candidate.submission.userId.length<=256&&
+          Number.isFinite(candidate.startedAt)&&candidate.startedAt>=eventAt&&candidate.startedAt-eventAt<=10000&&
+          policy.submittedTextMatches(text,candidate.submission.userText,null);
+        // Arm delivery can delay this trusted event past its receipt window.
+        // Only an exact request already observed inside the original window
+        // bridges that delay; native confirmation remains required at bind.
+        if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<(current.armActionAt??current.armedAt)||
+            eventAt>time||time-eventAt>10000&&!attachCandidate)
           throw Error('Ручная отправка Goal не относится к свежему включению');
         if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string'||
             linkTargets!==undefined&&(!Array.isArray(linkTargets)||linkTargets.length>32||
@@ -167,10 +180,6 @@
           throw Error('Ручная цель должна содержать точный текст до 10000 символов');
         if(baselineKey&&(target==='https://chatgpt.com/'||!baselineKey.startsWith(new URL(target).pathname+'|')))
           throw Error('Исходное сообщение Goal относится к другому чату');
-        const candidate=current.requestCandidate;
-        const attachCandidate=!current.requestCandidateAmbiguous&&candidate&&candidate.url===target&&
-          candidate.startedAt>=eventAt&&candidate.startedAt-eventAt<=10000&&
-          policy.submittedTextMatches(text,candidate.submission?.userText,null);
         const record={...current,phase:'intent',intent:{text,eventAt,baselineKey,
           ...(linkTargets!==undefined?{linkTargets}: {})},
           ...(attachCandidate?{request:candidate}:{})};
@@ -188,7 +197,7 @@
           // Network observation may beat the saved trusted UI intent. Keep at
           // most one exact candidate; it cannot start Goal or authorize a send.
           if(current.requestCandidateAmbiguous||typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
-              startedAt<current.armedAt||policy.pageUrl(url)!==current.url||
+              startedAt<(current.armActionAt??current.armedAt)||policy.pageUrl(url)!==current.url||
               typeof submission?.userId!=='string'||!submission.userId||submission.userId.length>256||
               typeof submission.userText!=='string'||!submission.userText.trim()||submission.userText.length>10000)return {ok:false};
           const candidate={requestId,startedAt,url:current.url,submission:{userId:submission.userId,userText:submission.userText}};
@@ -423,10 +432,10 @@
       const {operation, ...safe}=record;
       return {...safe,operation:operation?{id:operation.id,kind:operation.kind,status:operation.status,createdAt:operation.createdAt}:null};
     }
-    async function event(kind,record,tabId,details={}) {
-      await appendJournal({kind:'goal.'+kind,sourceUrl:record.url,operationId:record.operation?.id||record.id,
+    async function event(kind,record,tabId,details={},options) {
+      return appendJournal({kind:'goal.'+kind,sourceUrl:record.url,operationId:record.operation?.id||record.id,
         goalId:record.id,phase:record.phase,continuations:record.continuations,reason:record.reason||'',...details},
-        {id:tabId,url:record.url});
+        {id:tabId,url:record.url},options);
     }
     function operation(record,kind,tabId,time) {
       if(kind==='continuation'&&record.continuations>=record.maxContinuations)
@@ -436,7 +445,7 @@
     }
     function stopTransition(old) {
       const inFlight=['sending','clicked'].includes(old.phase);
-      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,resumeRequested:false,
+      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,stoppedAt:now(),resumeRequested:false,
         ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
         reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
           'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
@@ -672,7 +681,7 @@
           operation:{...record.operation,status:'intent',baselineKey:typeof baselineKey==='string'?baselineKey:''}};
         await save(next);
         await appendJournal({kind:'goal.send_intent',sourceUrl:record.url,operationId,
-          goalId:id,text,promptKey:baselineKey||''},{id:tabId,url:record.url});
+          goalId:id,text,promptKey:baselineKey||'',...(record.operation.queuedResumeFence?{queuedResumeFence:record.operation.queuedResumeFence}:{})},{id:tabId,url:record.url});
         return {ok:true};
       });
     }
@@ -831,9 +840,17 @@
           next={...next,phase:'stopped',reason:outcome==='budget'?'Лимит продолжений исчерпан':'Время Goal истекло'};
         else if(record.phase==='paused')next={...next,pendingCompletion:{key:completionKey,promptKey},reason:'Ожидает возобновления'};
         else next={...next,phase:'preparing',operation:operation(record,'continuation',tabId,now()),pendingCompletion:null,reason:''};
-        await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,
-          {completionKey,promptKey,nativeVerified:nativeVerified===true,exactMarker:outcome==='complete',blockedMarker:outcome==='blocked'});
-        await save(next);
+        if(record.queuedResumeFence&&next.operation)next={...next,operation:{...next.operation,queuedResumeFence:record.queuedResumeFence}};
+        const details={completionKey,promptKey,nativeVerified:nativeVerified===true,exactMarker:outcome==='complete',blockedMarker:outcome==='blocked'};
+        if(record.queuedResumeFence) {
+          try {
+            await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,details,
+              {goalCAS:{url:target,expected:record,next,fence:record.queuedResumeFence}});
+          } catch(error) {
+            if(error?.code==='GOAL_FENCE_CHANGED')return {ok:false};
+            throw error;
+          }
+        } else {await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,details);await save(next);}
         return {ok:true,record:next,dispatch:next.phase==='preparing'};
       });
       if(result.dispatch)await deliver(result.record);

@@ -55,7 +55,12 @@ function message(tabId:number,value:Value) {
 function send(tabId:number,operationId:string,extra:Value={}) {
   return message(tabId,{type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:pages.get(tabId)!.url,text:'доделай е2е',operationId,...extra}});
 }
-const intent=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>append(tabId,'retry.send_intent',id,{promptKey});
+const intent=async(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>{
+ const source=pages.get(tabId)!.url.replace(/\/?(?:\?.*)?$/,'');
+ if(storage['chatgpt-journal:meta']?.retryPreparingByChat?.[source]?.operationId!==id)
+  await append(tabId,'retry.planned',id,{promptKey,retryUserId:'fixture-user:'+promptKey});
+ return append(tabId,'retry.send_intent',id,{promptKey,retryUserId:'fixture-user:'+promptKey});
+};
 const plan=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>message(tabId,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.planned',operationId:id,sourceUrl:pages.get(tabId)!.url,promptKey}});
 
 addPage(7);addPage(8,sourceUrl+'/?model=fixture');boot();
@@ -107,9 +112,18 @@ assert.equal((await send(10,'wrong-source')).ok,false,'caller cannot move a pers
 
 addPage(11,'https://chatgpt.com/c/write-fixture');
 await intent(11,'retry-write-failure');failWrite=true;
+const clicksBeforeWriteFailure=clicks.length;
 assert.equal((await send(11,'retry-write-failure')).ok,false);
 failWrite=false;
-assert.equal((await send(11,'retry-write-failure')).clicked,true,'failed atomic claim write grants no click and consumes no durable authorization');
+assert.equal((await send(11,'retry-write-failure')).ok,false,
+ 'unresolved failed atomic claim write never authorizes the same automatic send');
+await append(11,'watcher.started','write-gap-reconciled');
+assert.equal((await send(11,'retry-write-failure')).ok,false,
+ 'a durable previousWriteError marker still fences the old retry plan');
+assert.equal(clicks.length,clicksBeforeWriteFailure,'a write gap cannot cause a second click');
+boot();
+assert.equal((await send(11,'retry-write-failure')).ok,false,
+ 'restart cannot turn a refused journal-gap retry into a new send');
 
 addPage(12,'https://chatgpt.com/c/no-click-fixture');
 await intent(12,'retry-no-click');pages.get(12)!.editor.textContent='Owner changed draft';
@@ -174,10 +188,8 @@ addPage(15,legacyUrl);boot();
 assert.equal((await plan(15,'new-operation-old-failure','/c/legacy-retry|old-turn')).duplicate,true,'upgrade blocks a new tab/new operation for a historically authorized unknown send');
 assert.equal(storage['chatgpt-journal:meta'].retrySendClaimSchema,2);
 assert.deepEqual(Object.fromEntries(Object.entries(storage).filter(([key])=>key.startsWith('chatgpt-journal:event:'))),legacyEvents,'retry claim migration never changes immutable events');
-assert.equal((await plan(15,'new-distinct-failure','/c/legacy-retry|new-turn')).ok,true,'historical consumed claim does not lock a distinct failed user turn');
-await append(15,'retry.finished','new-distinct-failure',{clicked:false,confirmed:false});
-assert.equal((await plan(15,'new-after-proven-refusal','/c/legacy-retry|refused-turn')).ok,true,'historical explicit no-click proof releases only that failed-turn claim');
-await append(15,'retry.finished','new-after-proven-refusal',{clicked:false,confirmed:false});
+assert.equal((await plan(15,'new-distinct-failure','/c/legacy-retry|new-turn')).duplicate,true,'a changed key without a verified new user cannot bypass an unknown legacy send');
+assert.equal((await plan(15,'new-after-proven-refusal','/c/legacy-retry|refused-turn')).duplicate,true,'a separate unknown send still fences a failed-turn key after a no-click refusal');
 assert.equal((await plan(15,'legacy-no-click','/c/legacy-retry|refused-turn')).duplicate,true,'historical no-click proof never rearms its consumed operation ID');
 for(const key of Object.keys(storage))delete storage[key];
 const initializedSource='https://chatgpt.com/c/initialized-legacy';

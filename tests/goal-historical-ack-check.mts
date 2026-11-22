@@ -67,8 +67,10 @@ async function workerFixture(){
   {kind:'send.dispatched',operationId:op.id,tabId:7,sourceUrl:url,requestedText:op.text,text:op.text,recordedAt:2100},
   {kind:'request.started',operationId:op.id,tabId:7,sourceUrl:url,requestId:'own-request',eventAt:20000},
   {kind:'request.started',operationId:null,tabId:7,sourceUrl:url,requestId:'manual-request',eventAt:30000}];
- let live=url,probes=0,onLast:(()=>void)|null=null,ackCalls=0,ackOk=true;
- const ctx=createContext({URL,console,goalController:h.store,readJournal:async()=>({events:structuredClone(events)}),
+ let live=url,probes=0,onLast:(()=>void)|null=null,ackCalls=0,ackOk=true,journalReads=0,journalError=false;
+ let request:V|null={operationId:op.id,requestId:'own-request',startedAt:20000,url};
+ const ctx=createContext({URL,console,goalController:h.store,readJournal:async()=>{journalReads++;if(journalError)throw Error('Full journal unavailable');return {events:structuredClone(events)};},
+  latestRequestReceipt:async()=>structuredClone(request),
   confirmNativeGoalSend:async()=>{ackCalls++;return {ok:ackOk};},
   inspectCompletedTurn:function(){},ChatGPTGoalPolicy:{canonical:(u:string)=>u},
   chrome:{storage:{local:{get:async(k:string)=>({[k]:structuredClone(h.data[k])})}},tabs:{get:async()=>({url:live})},
@@ -77,16 +79,28 @@ async function workerFixture(){
  return {...h,events,historical,latest,route:(v:string)=>{live=v;},onLast:(fn:()=>void)=>{onLast=fn;},
   run:()=>runInContext(`reconcileNativeGoalAcknowledgement(8,'${url}')`,ctx),
   runOwner:()=>runInContext(`reconcileNativeGoalAcknowledgement(7,'${url}')`,ctx),
-  ackCalls:()=>ackCalls,ackOk:(v:boolean)=>{ackOk=v;}};
+  ackCalls:()=>ackCalls,ackOk:(v:boolean)=>{ackOk=v;},journalReads:()=>journalReads,failJournal:()=>{journalError=true;},setRequest:(value:V|null)=>{request=value;}};
 }
 for(const phase of ['sending','clicked']) {
- const h=await workerFixture();h.record.phase=phase;
+ const h=await workerFixture();h.record.phase=phase;h.failJournal();
  assert.equal((await h.runOwner()).ok,true,phase+' should reconcile without waiting for a timeout');
+ assert.equal(h.journalReads(),0,'background Goal ACK with its exact live receipt bypasses full journal loading');
  assert.equal(h.ackCalls(),1);assert.equal(h.sends.length,1,'observation never dispatches');
  const pending=await workerFixture();pending.record.phase=phase;pending.ackOk(false);
  assert.equal(await pending.runOwner(),undefined,'unconfirmed in-flight sends stay in flight');
  assert.equal(pending.data['chatgpt-goal:'+url].phase,phase);
  assert.equal(pending.sends.length,1,'an uncertain send is never repeated');
+}
+{
+ const h=await workerFixture();h.record.phase='clicked';h.setRequest(null);
+ assert.equal((await h.runOwner()).ok,true,'lost receipt still uses immutable journal proof');
+ assert.equal(h.journalReads(),1);assert.equal(h.ackCalls(),1);
+}
+for(const flag of ['stopRequested','pauseRequested','manualOverride','manualPending']) {
+ const h=await workerFixture();h.record[flag]=true;h.failJournal();
+ assert.equal(await h.runOwner(),undefined,flag);
+ assert.equal(h.ackCalls(),0);assert.equal(h.journalReads(),0,'background observation preserves '+flag+' before either ACK path');
+ assert.equal(h.data['chatgpt-goal:'+url].phase,'blocked');
 }
 {
  const h=await workerFixture(),before=h.sends.length;assert.equal((await h.run()).ok,true);

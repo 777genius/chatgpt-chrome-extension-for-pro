@@ -46,7 +46,7 @@ async function check(mode:Mode) {
     bootWorker();await append('draft.saved',{draft,phase:mode==='stopped'?'before-recovery-stop':undefined});
     if(!['saved-only','marker','stopped'].includes(mode))await append('draft.replaced');
     if(mode==='stopped')await append('recovery.stop_result',{stopped:true});
-    if(['confirmed','unknown'].includes(mode)){await append('retry.send_intent');await append('send.authorized');}
+    if(['confirmed','unknown'].includes(mode)){await append('retry.planned');await append('retry.send_intent');await append('send.authorized');}
     if(mode==='confirmed')await append('retry.confirmed');
     if(mode==='no-click')await append('retry.cancelled');
     bootWorker();bootContent();await drain();
