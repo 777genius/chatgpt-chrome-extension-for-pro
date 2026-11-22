@@ -96,5 +96,6 @@ console.log('Queued resume marker: same-request journal fence and actual Goal co
  Object.assign(h.native,{goalRawExact:true,goalMarkerPending:false});
  h.beforeCAS(()=>h.journal.push({sequence:2,kind:'request.started',tabId:8,sourceUrl:url,requestId:'newer',eventAt:700}));
  assert.equal((await h.run()).pending,true,'a new request between native verification and Goal commit keeps the marker pending');
+ assert.ok(h.journal.some((e:any)=>e.requestId==='newer'),'regression must reach the CAS boundary');
  assert.equal(h.data['chatgpt-goal:'+url].phase,'waiting');assert.equal(h.messages.length,0);assert.equal(h.notices.length,0);
 }
