@@ -75,7 +75,7 @@
         return {ok:true};
       });
     }
-    async function composerArm({tabId,url,rules,maxContinuations,maxMinutes}) {
+    async function composerArm({tabId,url,rules,maxContinuations,maxMinutes,armActionAt}) {
       requireTab(tabId);
       const target=requirePage(url);
       const config=policy.composerSettings({rules,
@@ -108,7 +108,11 @@
         }
         if(previous?.phase==='armed'&&previous.url===target&&
             JSON.stringify(previous.config)===JSON.stringify(config))return {ok:true,record:previous};
-        const record={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt:now()};
+        const armedAt=now();
+        // The trusted UI Arm action can precede this durable write. Preserve
+        // its bounded timestamp without letting older requests bind a Goal.
+        const actionAt=Number.isFinite(armActionAt)&&armActionAt>=armedAt-10000&&armActionAt<=armedAt?armActionAt:armedAt;
+        const record={schema:1,id:uuid(),phase:'armed',url:target,config,armedAt,armActionAt:actionAt};
         await storage.set({[composerKey(tabId)]:record});
         return {ok:true,record};
       });
@@ -167,7 +171,7 @@
         // Arm delivery can delay this trusted event past its receipt window.
         // Only an exact request already observed inside the original window
         // bridges that delay; native confirmation remains required at bind.
-        if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<current.armedAt||
+        if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<(current.armActionAt??current.armedAt)||
             eventAt>time||time-eventAt>10000&&!attachCandidate)
           throw Error('Ручная отправка Goal не относится к свежему включению');
         if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string'||
@@ -193,7 +197,7 @@
           // Network observation may beat the saved trusted UI intent. Keep at
           // most one exact candidate; it cannot start Goal or authorize a send.
           if(current.requestCandidateAmbiguous||typeof requestId!=='string'||!requestId||!Number.isFinite(startedAt)||
-              startedAt<current.armedAt||policy.pageUrl(url)!==current.url||
+              startedAt<(current.armActionAt??current.armedAt)||policy.pageUrl(url)!==current.url||
               typeof submission?.userId!=='string'||!submission.userId||submission.userId.length>256||
               typeof submission.userText!=='string'||!submission.userText.trim()||submission.userText.length>10000)return {ok:false};
           const candidate={requestId,startedAt,url:current.url,submission:{userId:submission.userId,userText:submission.userText}};
