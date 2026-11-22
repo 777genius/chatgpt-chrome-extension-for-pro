@@ -35,9 +35,9 @@ function journalIngressChanged(snapshot,tabId,url,knownTabs) {
   for(const [route,lastIngress] of journalIngressRoutes) {
     if(lastIngress<=snapshot.serial)continue;
     const [owner,source,observed]=JSON.parse(route),saved=retryDraftUrl(knownTabs?.[owner]?.url||'');
-    // Only two positively different chat routes may leave this grant intact.
-    // An absent observed route is ambiguous, not evidence for another chat.
-    if(owner===tabId||source===url||observed===url||saved===url||!observed&&!saved)return true;
+    // Match the persisted request rule: either route identifying this chat
+    // conflicts, while an unknown route conflicts only if no route is known.
+    if(owner===tabId||source===url||observed===url||saved===url||!source&&!observed&&!saved)return true;
   }
   return false;
 }
