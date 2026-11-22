@@ -31,7 +31,7 @@ async function fixture(scheduled=false){
  ctx.dependencies.now=()=>100010;
  // Store captures dependencies at creation, so use a fresh historical instance.
  const historical=runInContext('ChatGPTGoalStore.create({...dependencies,now:()=>100010})',ctx);
- data['chatgpt-goal-composer:7'].armedAt=100000;
+ Object.assign(data['chatgpt-goal-composer:7'],{armedAt:100000,armActionAt:100000});
  await historical.composerIntent({tabId:7,url:'https://chatgpt.com/',armId:arm.record.id,eventAt:100010,text:'Original objective',baselineKey:''});
  if(scheduled)data['chatgpt-goal-composer:7'].request={requestId:requests[0].requestId,startedAt:requests[0].eventAt,url:'https://chatgpt.com/'};
  const pending=structuredClone(data['chatgpt-goal-composer:7']);ctx.pending=pending;
