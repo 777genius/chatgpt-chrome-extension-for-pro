@@ -1711,7 +1711,7 @@
       let pollId = null;
       let throttleId = null;
       let frameId = null;
-      let hiddenPoll = null;
+      let hiddenPoll = null, hiddenPollFailures = 0;
       let lastCheckAt = 0;
       let stableText = '';
       let stableSince = 0;
@@ -1893,7 +1893,14 @@
         void runtimeMessage({type:'CHATGPT_WAIT',delayMs:3000}).then(result=>{
           if (hiddenPoll !== token) return;
           hiddenPoll = null;
-          if (settled || !runtimeAvailable() || !isCurrent() || document.visibilityState !== 'hidden' || !result?.ok) return;
+          if (settled || !runtimeAvailable() || !isCurrent() || document.visibilityState !== 'hidden') return;
+          if (!result?.ok) {
+            // Recover promptly from transient worker failures without an
+            // unbounded fast-failure loop if messaging remains unavailable.
+            if (++hiddenPollFailures <= 2) scheduleHiddenPoll();
+            return;
+          }
+          hiddenPollFailures = 0;
           check();
           scheduleHiddenPoll();
         });
@@ -1914,8 +1921,9 @@
       // observer chain alone can stall until the tab regains focus.
       pollId = setInterval(() => {
         check();
-        // A failed worker wait stops its chain without spinning. The existing
-        // interval is the bounded retry point if messaging becomes available.
+        // If bounded immediate retries failed, the interval is a later
+        // recovery point rather than a permanently stopped worker chain.
+        if (hiddenPollFailures > 2) hiddenPollFailures = 0;
         scheduleHiddenPoll();
       }, STREAM_POLL_MS);
 
