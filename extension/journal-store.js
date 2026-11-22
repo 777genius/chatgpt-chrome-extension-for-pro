@@ -572,7 +572,7 @@ function appendJournal(event, tab = {}, options = {}) {
     const unknownOwnerTabs=event.kind==='draft.restore_intent'&&event.allowUnknown===true&&unknownOwner!==tabId&&Number.isInteger(unknownOwner)
       ?await chrome.tabs.query({}):null;
     const unknownOwnerClosed=Array.isArray(unknownOwnerTabs)&&!unknownOwnerTabs.some(t=>t.id===unknownOwner);
-    const unknownDraftClaim=event.kind==='draft.restore_intent'&&event.allowUnknown===true&&savedDraft?.phase==='unknown'&&savedDraft.replacementProven===true&&
+    const unknownDraftClaim=event.kind==='draft.restore_intent'&&event.allowUnknown===true&&!journalFailure&&savedDraft?.phase==='unknown'&&savedDraft.replacementProven===true&&
       Number.isInteger(event.expectedSequence)&&event.expectedSequence===meta.sequence&&
       !active[tabId]&&!active[unknownOwner]&&unknownPreparation?.operationId===operationId&&
       (unknownOwner===tabId||event.originalTabId===unknownOwner&&unknownOwnerClosed)&&
@@ -762,8 +762,9 @@ function appendJournal(event, tab = {}, options = {}) {
     const retryDraftByChat=staleDraftSave?meta.retryDraftByChat:reduceRetryDraft(meta.retryDraftByChat,entry,meta.retryByChat?.[journalChatId(entry.sourceUrl)]?.manualStartedAt);
     const retryCAS=event.kind==='retry.preparation_recovered'&&event.legacyNoClick?{url:retrySource,tabId,sequence,operationId,
       expected:meta.retryByChat?.[journalChatId(retrySource)]}:null;
+    const protectedDraftClaim=event.kind==='draft.restore_intent'&&unknownDraftClaim;
     const protectedUrl=goalCAS?.url||(protectedGoalGrant?active[tabId]?.chatUrl:null)||
-      (protectedRetryGrant?active[tabId]?.sourceUrl:null)||retryCAS?.url;
+      (protectedRetryGrant?active[tabId]?.sourceUrl:null)||retryCAS?.url||(protectedDraftClaim?retrySource:null);
     const protectedIngressChanged=()=>journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl)||
       protectedGoalGrant&&(ingressAtEnqueue.tabs.get(protectedAnchorTab)||0)!==(journalIngressByTab.get(protectedAnchorTab)||0);
     const grantRace=()=>Object.assign(new Error('Запрос изменился до разрешения автоповтора'),{journalPolicy:true,code:'RETRY_GRANT_RACE'});
@@ -807,7 +808,8 @@ function appendJournal(event, tab = {}, options = {}) {
     }
     // A grant already recorded while ingress occurred must stay consumed: no
     // page click has happened, but replaying this authorization is unsafe.
-    if((protectedGoalGrant||protectedRetryGrant)&&protectedIngressChanged())throw protectedRetryGrant?grantRace():goalFenceChanged();
+    if((protectedGoalGrant||protectedRetryGrant||protectedDraftClaim)&&protectedIngressChanged())
+      throw protectedRetryGrant||protectedDraftClaim?grantRace():goalFenceChanged();
     journalFailure = '';
     return { ok: !staleDraftSave, ...(staleDraftSave?{duplicate:true}:{}), ...(superseded?{superseded:true}:{}), sequence, sourceUrl:entry.sourceUrl, operationId:entry.operationId,
       ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)],draft:claimedDraft.draft}}:{}) };

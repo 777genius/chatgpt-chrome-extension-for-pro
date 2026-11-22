@@ -11,19 +11,20 @@ function fixture() {
  let request:Value|null={requestId:'actual-request',startedAt:1100,url,operationId:'operation'},live=url,afterProbe:(()=>void)|null=null;
  let native:Value={ok:true,url,isLatest:true,isReadOnly:false,userId:'native-id',userSentAtMs:1100,userText:text,
   userVisibleText:'Long goal… Show more',promptKey:prompt};
- let proof:Value|null=null;
+ let proof:Value|null=null,proofReads=0,proofError:Error|null=null,onProof:(()=>void)|null=null;
  const reports:Value[]=[],probes:Value[]=[],completions:Value[]=[];
- const context=createContext({URL,readGoalAckProof:async()=>proof,goalController:{report:async(value:Value)=>{reports.push(value);return {ok:true};},completion:async(value:Value)=>{completions.push(value);return {ok:true};}},
+ const context=createContext({URL,readGoalAckProof:async()=>{proofReads++;if(proofError)throw proofError;onProof?.();return proof;},goalController:{report:async(value:Value)=>{reports.push(value);return {ok:true};},completion:async(value:Value)=>{completions.push(value);return {ok:true};}},
   latestRequestReceipt:async()=>structuredClone(request),inspectCompletedTurn:function(){},ChatGPTGoalPolicy:{canonical:(v:string)=>v===url?url:''},
   chrome:{storage:{local:{get:async(key:string)=>({[key]:structuredClone(data[key])})}},tabs:{get:async()=>({id:7,url:live})},
    scripting:{executeScript:async(options:Value)=>{probes.push(options);const result=structuredClone(native);afterProbe?.();return [{result}];}}}});
  runInContext(helper,context);
  const args={url,tabId:7,id:'goal',operationId:'operation',requestId:'actual-request',startedAt:1100};
- return {data,reports,probes,args,completions,setProof:(value:Value)=>{proof=value;},record:()=>data['chatgpt-goal:'+url],native,setRequest:(v:Value|null)=>{request=v;},route:(v:string)=>{live=v;},onProbe:(fn:()=>void)=>{afterProbe=fn;},run:(patch:Value={})=>{context.args={...args,...patch};return runInContext('confirmNativeGoalSend(args)',context) as Promise<Value>;}};
+ return {data,reports,probes,args,completions,proofReads:()=>proofReads,failProof:()=>{proofError=new Error('Full journal unavailable');},onProof:(fn:()=>void)=>{onProof=fn;},setProof:(value:Value)=>{proof=value;},record:()=>data['chatgpt-goal:'+url],native,setRequest:(v:Value|null)=>{request=v;},route:(v:string)=>{live=v;},onProbe:(fn:()=>void)=>{afterProbe=fn;},run:(patch:Value={})=>{context.args={...args,...patch};return runInContext('confirmNativeGoalSend(args)',context) as Promise<Value>;}};
 }
 {
- const h=fixture();assert.equal((await h.run()).ok,true);assert.equal(h.reports.length,1);
+ const h=fixture();h.failProof();assert.equal((await h.run()).ok,true);assert.equal(h.reports.length,1);
  assert.equal(h.reports[0].newPromptKey,prompt);assert.equal(h.reports[0].status,'confirmed');
+ assert.equal(h.proofReads(),0,'exact live receipt/native text/time ACK does not wait for the full journal');
  assert.deepEqual(JSON.parse(JSON.stringify(h.probes[0].args)),[url,true]);
 }
 {
@@ -49,7 +50,20 @@ for(const mutate of [(h:ReturnType<typeof fixture>)=>{h.record().operation.id='r
 }
 {
  const h=fixture();h.native.userText='Long goal [link](https://example.test/task)';h.native.userVisibleText=h.record().operation.text;
+ h.failProof();
  assert.equal((await h.run()).ok,true,'bound native visible text can prove a known rich serialization without consulting collapsed DOM');
+ assert.equal(h.proofReads(),0);
+}
+{
+ const h=fixture();h.failProof();h.setRequest({...h.args,url:'',operationId:'operation'});
+ assert.equal((await h.run()).ok,true,'exact operation/request/time still permits the existing empty receipt URL case');
+ assert.equal(h.proofReads(),0);
+}
+{
+ const h=fixture();h.native.userText='Native rich serialization';h.native.userVisibleText='Collapsed';
+ h.setProof({submittedText:h.native.userText});
+ assert.equal((await h.run()).ok,true,'known receipt retains the immutable rich serialization fallback');
+ assert.equal(h.proofReads(),1);assert.equal(h.probes.length,2,'native state is refreshed after awaiting historical proof');
 }
 // Correlation derives only from the worker's committed request-start event.
 {
@@ -74,6 +88,8 @@ for(const change of [{manualStartedAt:1200},{manualPending:{requestId:'manual-ne
  Object.assign(h.native,{turnStatus:'complete',generating:false,hasError:false,assistantCompleted:true,
   assistantPhase:'final_answer',assistantKey:'done',goalResponse:'GOAL_COMPLETE',goalRawExact:true});
  assert.equal((await h.run()).ok,true,'a durable actual serialization confirms the old click after its cache disappears');
+ assert.equal(h.proofReads(),1);assert.equal(h.probes.length,1,'missing-receipt history is loaded before its native probe');
+ assert.equal(h.proofReads(),1);assert.equal(h.probes.length,1,'missing receipt proof precedes the native inspection');
  assert.equal(h.reports[0].nativeConfirmed,true);assert.equal(h.completions.length,1,'a completion that preceded ACK recovery is processed once by the coordinator');
 }
 {
@@ -93,6 +109,7 @@ for(const at of [2000,2500,3000]) {
  h.setProof({submittedText:h.record().operation.text,sendWindow:{notBefore:2000,notAfter:3000},
   request:{requestId:'actual-request',startedAt:20000,url,operationId:'operation'}});
  assert.equal((await h.run({startedAt:20000})).ok,true,'accepted within the exact committed authorization/click window');
+ assert.equal(h.proofReads(),1);assert.equal(h.probes.length,2,'historical fallback refreshes native evidence after the journal read');
 }
 for(const at of [1999,3001]) {
  const h=fixture();h.setRequest({requestId:'actual-request',startedAt:20000,url,operationId:'operation'});
@@ -107,4 +124,17 @@ for(const at of [1999,3001]) {
  const h=fixture();h.onProbe(()=>{h.record().phase='waiting';h.record().operation=null;h.record().lastConfirmedOperation={id:'operation',tabId:7};});
  assert.equal((await h.run()).alreadyConfirmed,true,'observer ACK committed during sender inspection remains successful');
  assert.equal(h.reports.length,0);assert.equal(h.completions.length,0,'duplicate sender does not process the answer again');
+}
+for(const scenario of ['native-user','native-text','new-request','route','operation']) {
+ const h=fixture();h.native.userText='Native rich serialization';h.native.userVisibleText='Collapsed';
+ h.setProof({submittedText:h.native.userText});
+ h.onProof(()=>{
+  if(scenario==='native-user')h.native.userId='';
+  if(scenario==='native-text')h.native.userText='Newer message';
+  if(scenario==='new-request')h.setRequest({operationId:'manual',requestId:'later',startedAt:1200,url});
+  if(scenario==='route')h.route('https://chatgpt.com/c/other');
+  if(scenario==='operation')h.record().operation.id='new-operation';
+ });
+ assert.equal((await h.run()).ok,false,scenario+' changed while historical proof was loading');
+ assert.equal(h.proofReads(),1);assert.equal(h.probes.length,2);assert.equal(h.reports.length,0);
 }

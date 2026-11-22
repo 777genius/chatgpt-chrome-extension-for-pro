@@ -11,10 +11,10 @@ let native:any={ok:true,isLatest:true,isReadOnly:false,userId:'user-new',promptK
 let claim:any={operationId:'op-1',tabId:7,sourceUrl:url,phase:'consumed',retryUserId:'user-old',at:80000};
 let tabUrl=url,changeDuringProbe=false,journalChangeDuringProbe=false;
 let journal:any={ok:true,meta:{sequence:1},events:[{sequence:1,kind:'request.started',tabId:7,operationId:'op-1',requestId:'req-1',eventAt:100000,sourceUrl:url}]};
-const ctx=createContext({Number,Math,JOURNAL_META:'journal-meta',messageChatUrl:(m:any)=>m.url,latestRequestReceipt:async()=>({...receipt}),
+const ctx=createContext({Number,Math,JOURNAL_META:'journal-meta',JOURNAL_PREFIX:'chatgpt-journal:event:',RETRY_MIGRATION_BATCH_SIZE:50,journalFailure:'',retryDraftUrl:(value:string)=>value?.startsWith('https://chatgpt.com/c/')?value:null,messageChatUrl:(m:any)=>m.url,latestRequestReceipt:async()=>({...receipt}),
   readJournal:async()=>structuredClone(journal),
   ChatGPTHandoffTitle:{chatUrl:(value:string)=>value},inspectCompletedTurn:()=>{},
-  chrome:{storage:{local:{get:async()=>({'journal-meta':{sequence:journal.meta.sequence,retrySendClaims:{key:claim}}})}},tabs:{get:async()=>({url:tabUrl})},scripting:{executeScript:async()=>{if(changeDuringProbe)receipt={...receipt,requestId:'req-new'};if(journalChangeDuringProbe)journal.meta.sequence++;return [{result:{...native}}]}}}});
+  chrome:{storage:{local:{get:async(keys:any)=>{if(keys==='journal-meta')return {'journal-meta':{sequence:journal.meta.sequence,retrySendClaims:{key:claim},retryPreparingByChat:{[url]:{operationId:'op-1',tabId:7,plannedSequence:1}}}};return Object.fromEntries((Array.isArray(keys)?keys:[keys]).map((key:string)=>[key,journal.events.find((e:any)=>key==='chatgpt-journal:event:'+String(e.sequence).padStart(12,'0'))]));}}},tabs:{get:async()=>({url:tabUrl})},scripting:{executeScript:async()=>{if(changeDuringProbe)receipt={...receipt,requestId:'req-new'};if(journalChangeDuringProbe)journal.meta.sequence++;return [{result:{...native}}]}}}});
 const listener=runInContext(`(message,sender,sendResponse)=>{${source.slice(start,end)}sendResponse({ok:false})}`,ctx);
 const check=(overrides:any={})=>new Promise<any>(resolve=>listener({type:'CHATGPT_RETRY_CONFIRMATION',url,operationId:'op-1',promptKey,text:'доделай е2е',...overrides},{tab:{id:7,url},frameId:0},resolve));
 assert.equal((await check()).ok,true,'fresh exact native turn confirms the bound request');
@@ -27,8 +27,8 @@ for(const scenario of ['wrong-chat','missing','duplicate','later-request','other
  if(scenario==='later-request'){journal.events.push({sequence:2,kind:'request.started',tabId:7,requestId:'new'});journal.meta.sequence=2;}
  if(scenario==='other-tab-later'){journal.events.push({sequence:2,kind:'request.started',tabId:8,sourceUrl:url,requestId:'new'});journal.meta.sequence=2;}
  if(scenario==='sequence-gap')journal.events[0].sequence=2;
- if(scenario==='storage-error')journal.storageError='unavailable';
- assert.equal((await check()).ok,false,scenario);journal=saved;
+ if(scenario==='storage-error')ctx.journalFailure='unavailable';
+ assert.equal((await check()).ok,false,scenario);journal=saved;ctx.journalFailure='';
 }
 receipt.url='https://chatgpt.com/c/other';assert.equal((await check()).ok,false,'a conflicting nonempty URL is not replaced');receipt.url=url;
 receipt.url='';journalChangeDuringProbe=true;assert.equal((await check()).ok,false,'a concurrent journal write requires fresh proof');journalChangeDuringProbe=false;journal.meta.sequence=1;receipt.url=url;

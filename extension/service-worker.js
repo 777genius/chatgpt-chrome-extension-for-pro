@@ -1666,6 +1666,95 @@ async function recoverLateRetry(tabId,url) {
   try{return await work;}finally{if(lateRetryRecoveries.get(url)===work)lateRetryRecoveries.delete(url);}
 }
 
+// A native final answer can prove delivery after the retry confirmation UI
+// timed out, even when the transport itself ended in ERR_ABORTED. Restore only
+// the saved draft; the consumed send stays fenced and is never re-sent.
+async function restoreAcceptedRetryDraft(tabId,url) {
+  if(journalFailure)return false;
+  const draft=await readRetryDraft(url);
+  if(!draft||draft.phase!=='unknown'||draft.claimedAt||!draft.replacementProven||
+      typeof draft.retryText!=='string'||!draft.retryText||typeof draft.draft!=='string'||!draft.draft)return false;
+  const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META],prep=meta?.retryPreparingByChat?.[url];
+  const claim=meta?.retrySendClaims?.[prep?.claimKey],start=prep?.plannedSequence;
+  if(prep?.operationId!==draft.operationId||prep.tabId!==tabId||claim?.operationId!==draft.operationId||
+      claim.tabId!==tabId||claim.sourceUrl!==url||claim.phase!=='consumed'||!meta.retryConsumedOperations?.[draft.operationId]||
+      meta.active?.[tabId]||!Number.isSafeInteger(start)||start<1||!Number.isSafeInteger(meta.sequence)||
+      meta.sequence<start||meta.sequence-start>1000)return false;
+  const events=[];
+  for(let first=start;first<=meta.sequence;first+=RETRY_MIGRATION_BATCH_SIZE) {
+    const keys=Array.from({length:Math.min(RETRY_MIGRATION_BATCH_SIZE,meta.sequence-first+1)},(_,i)=>
+      `${JOURNAL_PREFIX}${String(first+i).padStart(12,'0')}`);
+    const rows=await chrome.storage.local.get(keys);
+    for(let i=0;i<keys.length;i++) {
+      const row=rows[keys[i]];
+      if(!row||row.sequence!==first+i||row.previousWriteError)return false;
+      events.push(row);
+    }
+  }
+  const own=events.filter(e=>e.operationId===draft.operationId&&e.tabId===tabId&&e.sourceUrl===url);
+  const one=kind=>{const found=own.filter(e=>e.kind===kind);return found.length===1?found[0]:null;};
+  const planned=one('retry.planned'),saved=own.find(e=>e.kind==='draft.saved'&&e.sequence===draft.savedSequence),
+    replaced=one('draft.replaced'),grant=one('send.authorized'),sent=one('send.dispatched'),clicked=one('retry.clicked'),
+    request=one('request.started'),failed=one('retry.failed'),finished=one('retry.finished');
+  if(!planned||planned.sequence!==start||!saved||saved.draft!==draft.draft||saved.text!==draft.retryText||
+      own.some(e=>e.kind==='draft.saved'&&e.sequence>saved.sequence)||!replaced||!grant||!sent||!clicked||
+      !request||!failed||!finished||!request.requestId||!Number.isFinite(request.eventAt)||
+      !(planned.sequence<saved.sequence&&saved.sequence<replaced.sequence&&replaced.sequence<grant.sequence&&
+        grant.sequence<sent.sequence&&grant.sequence<request.sequence&&sent.sequence<clicked.sequence&&
+        clicked.sequence<failed.sequence&&failed.sequence<finished.sequence)||
+      sent.text!==draft.retryText||failed.clicked!==true||failed.confirmed!==false||
+      failed.errorCode!=='RETRY_CONFIRMATION_UNPROVEN'||finished.clicked!==true||finished.confirmed!==false||
+      events.some(e=>e.kind==='request.started'&&e.sequence>request.sequence&&
+        (e.tabId===tabId||retryDraftUrl(e.sourceUrl)===url||retryDraftUrl(e.observedTabUrl)===url||
+          !retryDraftUrl(e.sourceUrl)&&!retryDraftUrl(e.observedTabUrl))))return false;
+  const receipt=await latestRequestReceipt(tabId);
+  if(receipt&&(receipt.operationId!==draft.operationId||receipt.requestId!==request.requestId||
+      receipt.startedAt!==request.eventAt||![url,''].includes(receipt.url)||typeof receipt.submittedUserId!=='string'||!receipt.submittedUserId))return false;
+  const checkpoint=receipt?null:await completionCheckpointRead(tabId);
+  const goal=receipt?null:(await chrome.storage.local.get('chatgpt-goal:'+url))['chatgpt-goal:'+url];
+  let confirmation=null;
+  if(!receipt) {
+    const bound=events.filter(e=>e.kind==='completion.bound'&&e.tabId===tabId&&e.sourceUrl===url&&
+      e.startedAt===request.eventAt&&e.promptKey===checkpoint?.promptKey);
+    const confirmed=events.filter(e=>e.kind==='completion.confirmed'&&e.tabId===tabId&&e.sourceUrl===url&&
+      e.startedAt===request.eventAt&&e.promptKey===checkpoint?.promptKey&&e.proof==='native-final');
+    if(checkpoint?.state!=='complete'||checkpoint.url!==url||checkpoint.requestId!==request.requestId||
+        checkpoint.startedAt!==request.eventAt||typeof checkpoint.nativeUserId!=='string'||!checkpoint.nativeUserId||
+        !Number.isFinite(checkpoint.nativeUserSentAtMs)||typeof checkpoint.promptKey!=='string'||!checkpoint.promptKey||
+        goal&&(goal.stopRequested||goal.pauseRequested||['stopped','paused'].includes(goal.phase))||
+        bound.length!==1||confirmed.length!==1||!(request.sequence<bound[0].sequence&&bound[0].sequence<confirmed[0].sequence)||
+        events.some(e=>e.sequence>request.sequence&&(e.tabId===tabId||retryDraftUrl(e.sourceUrl)===url||retryDraftUrl(e.observedTabUrl)===url)&&
+          ['goal.stopped','goal.stop_requested','goal.paused','retry.manual_reset'].includes(e.kind)))return false;
+    confirmation=confirmed[0];
+  }
+  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  const native=checked?.result;
+  if(!native?.ok||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==false||native.generating!==false||
+      native.turnStatus!=='complete'||native.assistantCompleted!==true||native.assistantPhase!=='final_answer'||!native.assistantId||
+      native.userId!==(receipt?receipt.submittedUserId:checkpoint.nativeUserId)||
+      !receipt&&(native.promptKey!==checkpoint.promptKey||native.userSentAtMs!==checkpoint.nativeUserSentAtMs||native.assistantKey!==confirmation.assistantKey)||
+      native.userText!==draft.retryText&&native.userVisibleText!==draft.retryText)return false;
+  const tab=await chrome.tabs.get(tabId);if(retryDraftUrl(tab.url)!==url)return false;
+  const [editor]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+    args:[{action:'inspect-plain-retry-draft',url:tab.url,text:''}]});
+  if(editor?.result?.ok!==true||editor.result.matches!==true||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
+      JSON.stringify(await readRetryDraft(url))!==JSON.stringify(draft))return false;
+  const [fresh]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
+  if(journalFailure||JSON.stringify(fresh?.result)!==JSON.stringify(native)||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
+      !receipt&&(JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+        JSON.stringify((await chrome.storage.local.get('chatgpt-goal:'+url))['chatgpt-goal:'+url])!==JSON.stringify(goal))||
+      retryDraftUrl((await chrome.tabs.get(tabId)).url)!==url)return false;
+  try {
+    await appendJournal({kind:'draft.restore_intent',sourceUrl:url,operationId:draft.operationId,
+      savedSequence:draft.savedSequence,allowUnknown:true,originalTabId:tabId,expectedSequence:meta.sequence},tab);
+  } catch{return false;}
+  const [result]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
+    args:[{action:'restore-unknown-retry-draft',url:tab.url,draft:draft.draft,retryText:draft.retryText}]});
+  if(result?.result?.ok!==true)return false;
+  await appendJournal({kind:'draft.restored',sourceUrl:url,operationId:draft.operationId,draftChars:draft.draft.length,unknownOutcome:true},tab);
+  return true;
+}
+
 const retryReadinessRecoveries=new Map();
 // Restore only the editor, never an uncertain send. The durable consumed
 // retry and preparation claims remain in place until independent evidence
@@ -2094,9 +2183,20 @@ async function reconcileNativeGoalAcknowledgement(tabId,url) {
   const key='chatgpt-goal:'+url,record=(await chrome.storage.local.get(key))[key],op=record?.operation;
   if(!['sending','clicked','blocked'].includes(record?.phase)||!op||!['intent','clicked'].includes(op.status)||
       record.pauseRequested||record.stopRequested||record.manualOverride||record.manualPending)return;
+  let currentChecked=false;
+  if(op.tabId===tabId) {
+    const request=await latestRequestReceipt(tabId);
+    if(request?.operationId===op.id&&request.requestId&&Number.isFinite(request.startedAt)) {
+      currentChecked=true;
+      const result=await confirmNativeGoalSend({url,tabId,id:record.id,operationId:op.id,
+        requestId:request.requestId,startedAt:request.startedAt});
+      if(result?.ok)return result;
+      if(record.phase!=='blocked')return;
+    }
+  }
   const proof=await readGoalAckProof(op.tabId,url,op);
   if(!proof)return;
-  if(op.tabId===tabId) {
+  if(op.tabId===tabId&&!currentChecked) {
     const result=await confirmNativeGoalSend({url,tabId,id:record.id,operationId:op.id,
       requestId:proof.request.requestId,startedAt:proof.request.startedAt});
     if(result?.ok)return result;
@@ -2483,14 +2583,23 @@ async function confirmNativeGoalSend({url,tabId,id,operationId,requestId,started
     !(value.manualStartedAt>value.operation.createdAt);
   if(!sameOperation(record))return {ok:false,pending:false,error:'Операция Goal изменилась'};
   const known=await latestRequestReceipt(tabId);
-  const proof=typeof readGoalAckProof==='function'?await readGoalAckProof(tabId,url,op):null;
+  const historicalProof=()=>typeof readGoalAckProof==='function'?readGoalAckProof(tabId,url,op):null;
+  let proof=known?null:await historicalProof();
   const request=known||proof?.request;
   const matches=known=>known?.operationId===operationId&&known.requestId===requestId&&known.startedAt===startedAt&&typeof requestId==='string'&&requestId&&
     Number.isFinite(startedAt)&&startedAt>=op.createdAt&&(!known.url||ChatGPTGoalPolicy.canonical(known.url)===url);
   if(!matches(request))return {ok:false,pending:true};
-  const [checked]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
-  const native=checked?.result;
+  const probe=async()=>(await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]}))[0]?.result;
+  let native=await probe();
   if(alreadyConfirmed((await chrome.storage.local.get(key))[key]))return {ok:true,alreadyConfirmed:true};
+  // Exact live receipt/text/time already proves this ACK. Load the historical
+  // serialization or click window only when that existing fallback is needed.
+  if(!proof&&native?.ok&&native.url===url&&native.isLatest===true&&native.isReadOnly===false&&
+      (!(Math.abs(native.userSentAtMs-startedAt)<=10000)||native.userText!==op.text&&native.userVisibleText!==op.text)) {
+    proof=await historicalProof();
+    if(proof)native=await probe(); // A slow history read must not reuse an earlier native snapshot.
+    if(alreadyConfirmed((await chrome.storage.local.get(key))[key]))return {ok:true,alreadyConfirmed:true};
+  }
   if(!native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||
       typeof native.userId!=='string'||!native.userId||typeof native.promptKey!=='string'||
       !native.promptKey.startsWith(new URL(url).pathname+'|')||native.promptKey===op.baselineKey||
@@ -2801,7 +2910,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async()=>{
       if(retryDraftUrl((await chrome.tabs.get(tabId)).url)!==url)return {ok:false};
       if(message.type==='CHATGPT_RETRY_DRAFT_GET'){
-        await restoreUnknownRetryDraft(tabId,url).catch(()=>false);
+        if(!await restoreAcceptedRetryDraft(tabId,url).catch(()=>false))
+          await restoreUnknownRetryDraft(tabId,url).catch(()=>false);
         return {ok:true,record:await readRetryDraft(url)};
       }
       return claimRetryDraft(url,message.operationId,message.savedSequence,sender.tab);
@@ -3135,14 +3245,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Some native request receipts lack documentUrl. Accept only an exact
         // durable request-start binding in this tab and chat; an empty URL is
         // not itself evidence and may never bypass a later request or a gap.
-        const journal=await readJournal(),events=journal?.events;
-        if(!journal?.ok||journal.storageError||!Array.isArray(events)||events.length!==journal.meta?.sequence||
-            events.some((e,i)=>e.sequence!==i+1))return {ok:false};
+        const journalMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META],preparation=journalMeta?.retryPreparingByChat?.[url];
+        const first=preparation?.plannedSequence,through=journalMeta?.sequence;
+        if(journalFailure||preparation?.operationId!==message.operationId||preparation.tabId!==tabId||!Number.isSafeInteger(first)||first<1||
+            !Number.isSafeInteger(through)||through<first||through-first>1000)return {ok:false};
+        const events=[];
+        for(let start=first;start<=through;start+=RETRY_MIGRATION_BATCH_SIZE) {
+          const keys=Array.from({length:Math.min(RETRY_MIGRATION_BATCH_SIZE,through-start+1)},(_,i)=>
+            `${JOURNAL_PREFIX}${String(start+i).padStart(12,'0')}`);
+          const values=await chrome.storage.local.get(keys);
+          for(let i=0;i<keys.length;i++){const row=values[keys[i]];if(!row||row.sequence!==start+i||row.previousWriteError)return {ok:false};events.push(row);}
+        }
         const started=events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&
           e.operationId===message.operationId&&e.requestId===receipt.requestId&&e.eventAt===receipt.startedAt&&e.sourceUrl===url);
-        if(started.length!==1||events.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&
-            e.sequence>started[0].sequence))return {ok:false};
-        journalSequence=journal.meta.sequence;
+        if(started.length!==1||events.some(e=>e.kind==='request.started'&&e.sequence>started[0].sequence&&
+            (e.tabId===tabId||retryDraftUrl(e.sourceUrl)===url||retryDraftUrl(e.observedTabUrl)===url||
+              !retryDraftUrl(e.sourceUrl)&&!retryDraftUrl(e.observedTabUrl))))return {ok:false};
+        journalSequence=through;
       }
       const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
       const claims=Object.values(meta?.retrySendClaims||{}).filter(claim=>

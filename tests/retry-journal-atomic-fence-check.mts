@@ -118,4 +118,21 @@ for(const newer of [true,false]) {
  await assert.rejects(()=>f.append({kind:'retry.send_intent',sourceUrl:url,operationId:'no-plan',promptKey:prompt}),
   /Автоповтор этого запроса уже запускался/,'an intent without any reservation cannot fabricate a plan anchor');
 }
+{
+ const f=await fixture(),prompt=path+'|draft-user',op='draft-claim-race';
+ delete f.data['chatgpt-journal:meta'].retryDraftByChat[url];
+ await f.append({kind:'retry.planned',sourceUrl:url,operationId:op,promptKey:prompt});
+ const saved=await f.append({kind:'draft.saved',sourceUrl:url,operationId:op,draft:'owner',text:'retry'});
+ await f.append({kind:'draft.replaced',sourceUrl:url,operationId:op});
+ await f.append({kind:'retry.send_intent',sourceUrl:url,operationId:op,promptKey:prompt});
+ await f.append({kind:'send.authorized',sourceUrl:url,operationId:op});
+ await f.append({kind:'retry.failed',sourceUrl:url,operationId:op,clicked:true});
+ const head=f.data['chatgpt-journal:meta'].sequence;
+ const held=f.defer((v:any)=>v['chatgpt-journal:meta']?.retryDraftClaims?.[op]);
+ const claim=f.append({kind:'draft.restore_intent',sourceUrl:url,operationId:op,savedSequence:saved.sequence,allowUnknown:true,originalTabId:7,expectedSequence:head});
+ await held.observed;
+ const newer=f.append({kind:'request.started',sourceUrl:'https://chatgpt.com/',requestId:'unknown-during-claim'},{id:8,url:'https://chatgpt.com/'});
+ held.release();await assert.rejects(claim,(e:any)=>e.code==='RETRY_GRANT_RACE');await newer;
+ assert.ok(f.data['chatgpt-journal:meta'].retryDraftClaims[op],'claimed backup stays consumed after concurrent request');
+}
 console.log('Retry recovery CAS fences concurrent ingress and restores budget/draft after restart.');
