@@ -9,7 +9,7 @@ function fixture(){
  const markerPending={url,tabId:7,promptKey,completionKey:promptKey+'|assistant',userId:'native-user',observedAt:900};
  const goal:V={schema:1,id:'goal',url,originUrl:url,goal:'Complete synthetic objective',rules:'',phase:'waiting',operation:null,
   expectedPromptKey:promptKey,lastCompletionKey:'',markerPending,continuations:2,maxContinuations:30,maxMinutes:1440,startedAt:500,deadlineAt:100000};
- const data:V={['chatgpt-goal:'+url]:goal},messages:V[]=[],notices:V[]=[],events:V[]=[],journal:V[]=[];
+ const data:V={['chatgpt-goal:'+url]:goal},messages:V[]=[],notices:V[]=[],events:V[]=[],journal:V[]=[],storageReads:any[]=[];
  let live=url,after:(()=>void)|null=null,beforeCAS:(()=>void)|null=null;
  const checkpoint:V={state:'active',url,requestId:'request',startedAt:500,promptKey};
  const request:V={url,requestId:'request',startedAt:500,receipt:{epoch:'e',order:1}};
@@ -17,9 +17,14 @@ function fixture(){
  const native:V={ok:true,url,isLatest:true,isReadOnly:false,turnStatus:'complete',generating:false,hasError:false,
   userId:'native-user',promptKey,assistantKey:'assistant',assistantCompleted:true,assistantPhase:'final_answer',
   goalResponse:'GOAL_COMPLETE',goalRawExact:false,goalMarkerPending:true};
- const storage={get:async(k:string)=>({[k]:structuredClone(data[k])}),set:async(v:V)=>Object.assign(data,structuredClone(v))};
+ const storage={get:async(keys:string|string[])=>{
+  assert.notEqual(keys,null,'marker recovery reads exact storage keys');storageReads.push(structuredClone(keys));
+  return Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,structuredClone(k==='chatgpt-journal:meta'
+   ?{sequence:journal.reduce((head,row)=>Math.max(head,row.sequence),0)}
+   :k.startsWith('chatgpt-journal:event:')?journal.find(row=>'chatgpt-journal:event:'+String(row.sequence).padStart(12,'0')===k):data[k]) ]));
+ },set:async(v:V)=>Object.assign(data,structuredClone(v))};
  const tabs={get:async()=>({id:7,url:live,title:'Synthetic chat'}),sendMessage:async(_id:number,message:V)=>{messages.push(message);return {ok:true};}};
- const ctx=createContext({URL,Date,console,chrome:{tabs,scripting:{executeScript:async()=>[{result:structuredClone(native)}]}},inspectCompletedTurn:()=>{},
+ const ctx=createContext({URL,Date,console,JOURNAL_META:'chatgpt-journal:meta',JOURNAL_PREFIX:'chatgpt-journal:event:',RETRY_MIGRATION_BATCH_SIZE:50,journalFailure:'',chrome:{storage:{local:storage},tabs,scripting:{executeScript:async()=>[{result:structuredClone(native)}]}},inspectCompletedTurn:()=>{},
   readJournal:async()=>({ok:true,events:structuredClone(journal),meta:{sequence:journal.length}}),completionCheckpointRead:async()=>structuredClone(checkpoint),
   latestRequestReceipt:async()=>structuredClone(request),readChatStatus:async()=>structuredClone(view),
   inspectBoundNativeTurn:async()=>{const result=structuredClone(native);after?.();return result;},
@@ -42,7 +47,7 @@ function fixture(){
  runInContext(source,ctx);
  const waitingSource=worker.slice(worker.indexOf('async function reconcileWaitingGoalAnswer('),worker.indexOf('async function reconcileCompletedSourceHandoff('));
  runInContext(waitingSource,ctx);
- return{data,native,checkpoint,request,view,messages,notices,events,journal,run:()=>runInContext(`reconcileGoalMarker(7,'${url}')`,ctx),after:(fn:()=>void)=>{after=fn;},beforeCAS:(fn:()=>void)=>{beforeCAS=fn;},route:(s:string)=>{live=s;}};
+ return{data,native,checkpoint,request,view,messages,notices,events,journal,storageReads,run:()=>runInContext(`reconcileGoalMarker(7,'${url}')`,ctx),after:(fn:()=>void)=>{after=fn;},beforeCAS:(fn:()=>void)=>{beforeCAS=fn;},route:(s:string)=>{live=s;}};
 }
 {
  const h=fixture();assert.equal((await h.run()).pending,true);
@@ -79,6 +84,7 @@ console.log('Goal marker reconciliation: settle-before-stop, zero early notices/
  const result=await h.run();
  assert.equal(result.ok,true,'a fully witnessed unchanged request settles the marker through the actual coordinator');
  assert.equal(h.data['chatgpt-goal:'+url].phase,'completed');assert.equal(h.notices.length,1);
+ assert.ok(h.storageReads.some(keys=>Array.isArray(keys)&&keys[0]==='chatgpt-journal:event:000000000001'),'marker completion exercises the exact anchored range reader');
  assert.equal(h.messages.length,0);assert.equal(await h.run(),null,'settled marker is never replayed');
 }
 console.log('Queued resume marker: same-request journal fence and actual Goal controller passed.');

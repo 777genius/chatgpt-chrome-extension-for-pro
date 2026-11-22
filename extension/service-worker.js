@@ -2434,28 +2434,46 @@ async function reconcileWaitingGoalAnswer(tabId,url) {
   const fence=goal.queuedResumeFence;
   if(fence) {
     if(n.hasError!==false)return;
-    const receipt=await latestRequestReceipt(tabId),journal=await readJournal();
-    const tail=journal?.events?.filter(e=>e.sequence>=fence.requestSequence)||[];
-    if(!journal?.ok||journal.storageError||!Number.isSafeInteger(fence.requestSequence)||fence.requestSequence<1||
-        receipt?.requestId!==fence.requestId||receipt.startedAt!==fence.startedAt||n.userId!==fence.userId||
-        tail.length!==journal.meta?.sequence-fence.requestSequence+1||tail.some((e,i)=>e.sequence!==fence.requestSequence+i)||
-        tail[0]?.kind!=='request.started'||tail[0].tabId!==tabId||tail[0].sourceUrl!==url||
-        tail[0].requestId!==fence.requestId||tail[0].eventAt!==fence.startedAt||
-        tail.some(e=>e.kind==='request.started'&&(e.tabId===tabId||e.sourceUrl===url)&&e.sequence>fence.requestSequence)||
+    if(!Number.isSafeInteger(fence.requestSequence)||fence.requestSequence<1)return;
+    // The persisted request sequence is the authoritative first anchor. Read
+    // its complete suffix, then only new rows after the second native probe.
+    // Full-history export must never sit on this background completion path.
+    const readRange=async(first,minimumHead)=>{
+      const meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META],head=meta?.sequence;
+      if(journalFailure||!Number.isSafeInteger(head)||head<minimumHead)return null;
+      for(let start=first;start<=head;start+=RETRY_MIGRATION_BATCH_SIZE) {
+        const keys=Array.from({length:Math.min(RETRY_MIGRATION_BATCH_SIZE,head-start+1)},(_,i)=>
+          `${JOURNAL_PREFIX}${String(start+i).padStart(12,'0')}`);
+        const values=await chrome.storage.local.get(keys);
+        for(let i=0;i<keys.length;i++) {
+          const row=values[keys[i]],sequence=start+i;
+          if(!row||row.sequence!==sequence||row.previousWriteError)return null;
+          if(sequence===fence.requestSequence) {
+            if(row.kind!=='request.started'||row.tabId!==tabId||row.sourceUrl!==url||
+                row.requestId!==fence.requestId||row.eventAt!==fence.startedAt)return null;
+          } else if(row.kind==='request.started') {
+            const source=ChatGPTGoalPolicy.canonical(row.sourceUrl),observed=ChatGPTGoalPolicy.canonical(row.observedTabUrl);
+            if(row.tabId===tabId||source===url||observed===url||!source&&!observed)return null;
+          }
+        }
+      }
+      if(journalFailure||(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META]?.sequence!==head)return null;
+      return head;
+    };
+    const receipt=await latestRequestReceipt(tabId),head=await readRange(fence.requestSequence,fence.requestSequence);
+    if(head===null||receipt?.requestId!==fence.requestId||receipt.startedAt!==fence.startedAt||n.userId!==fence.userId||
         JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
         JSON.stringify(await goalController.get(url))!==JSON.stringify(goal))return;
     const [last]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectCompletedTurn,args:[url,true]});
-    const check=last?.result,finalJournal=await readJournal(),finalTail=finalJournal?.events?.filter(e=>e.sequence>=fence.requestSequence)||[];
+    const check=last?.result,finalHead=await readRange(head+1,head);
     if(!check?.ok||check.url!==url||check.isLatest!==true||check.isReadOnly!==false||check.generating!==false||
         check.hasError!==false||check.turnStatus!=='complete'||check.assistantCompleted!==true||check.assistantPhase!=='final_answer'||
         check.promptKey!==n.promptKey||check.userId!==n.userId||check.assistantKey!==n.assistantKey||
         check.goalResponse!==n.goalResponse||check.goalRawExact!==n.goalRawExact||check.goalMarkerPending!==n.goalMarkerPending||
-        !finalJournal?.ok||finalJournal.storageError||finalTail.length!==finalJournal.meta?.sequence-fence.requestSequence+1||
-        finalTail.some((e,i)=>e.sequence!==fence.requestSequence+i)||finalTail.some(e=>e.kind==='request.started'&&
-          (e.tabId===tabId||e.sourceUrl===url)&&e.sequence>fence.requestSequence)||
-        JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
+        finalHead===null||JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(receipt)||
         JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||
-        ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return;
+        ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url||journalFailure||
+        (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META]?.sequence!==finalHead)return;
   }
   return goalController.completion({url,tabId,completionKey,promptKey:n.promptKey,userId:n.userId,
     response:n.goalResponse||'',rawExact:n.goalRawExact===true,nativeMarkerPending:n.goalMarkerPending===true,nativeVerified:true,verifiedQueuedResumeFence:fence||null});
