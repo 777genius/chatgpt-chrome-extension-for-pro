@@ -603,9 +603,20 @@ for(const scenario of ['missing','body','wire-route','arm-id','intent-route','em
  if(scenario==='before-arm')intent.eventAt=999999;
  if(scenario==='baseline-route')intent.baselineKey='/c/unrelated|before';
  const before=structuredClone(env.data),writes=env.writes.length;
- await assert.rejects(()=>env.store.composerIntent(intent),scenario);
- assert.deepEqual(env.data,before,scenario);assert.equal(env.writes.length,writes,scenario);
- assert.equal(env.messages.length,0,scenario);assert.equal(env.events.length,0,scenario);
+ if(scenario==='earlier-request') {
+  const pending=await env.store.composerIntent(intent);
+  assert.equal(pending.record.request,undefined,'an earlier request is not adopted by later consent');
+  const state=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerBind({...env.proof(armed.record.id),
+    requestId:wire.requestId,startedAt:wire.startedAt}),/Нативная ручная отправка/,
+   'even a native-turn witness cannot adopt a request preceding trusted intent');
+  assert.deepEqual(env.data,state,'rejected bind does not change durable consent');
+ } else {
+  await assert.rejects(()=>env.store.composerIntent(intent),scenario);
+  assert.deepEqual(env.data,before,scenario);assert.equal(env.writes.length,writes,scenario);
+  assert.equal(env.events.length,0,scenario);
+ }
+ assert.equal(env.messages.length,0,scenario);
 }
 
 console.log('Pre-intent request observation: durable exact candidate, intent/native proof gates, ambiguity retention and cancellation passed.');
