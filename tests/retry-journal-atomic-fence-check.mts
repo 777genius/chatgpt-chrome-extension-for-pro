@@ -10,7 +10,7 @@ async function fixture(){
   set:async(v:any)=>{if(fail?.(v)){fail=null;throw Error('synthetic cleanup failure');}if(before?.(v)){before=null;entered();await gate;}writes.push(structuredClone(v));Object.assign(data,structuredClone(v));if(after?.(v)){after=null;entered();await gate;}}
  }}};
  let ctx=createContext({URL,console,chrome});runInContext(source,ctx);
- const append=(e:any,t=tab)=>{ctx.e=e;ctx.t=t;return runInContext('appendJournal(e,t)',ctx)};
+ const append=(e:any,t:{id?:number,url?:string}=tab)=>{ctx.e=e;ctx.t=t;return runInContext('appendJournal(e,t)',ctx)};
  await runInContext("initializeJournal('test')",ctx);
  await append({kind:'error.detected',action:'retry',sourceUrl:url,promptKey:path,attemptId,error:'Interrupted'});
  await append({kind:'retry.failed',sourceUrl:url,promptKey:path,attemptId,reason:'refused',clicked:false});
