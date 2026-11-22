@@ -441,7 +441,7 @@
     }
     function stopTransition(old) {
       const inFlight=['sending','clicked'].includes(old.phase);
-      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,resumeRequested:false,
+      return {...old,phase:inFlight?old.phase:'stopped',stopRequested:inFlight,stoppedAt:now(),resumeRequested:false,
         ...(old.phase==='preparing'||(old.phase==='blocked'&&old.operation?.status==='reserved')?{operation:null,pendingSendKind:null}:{}),
         reason:inFlight?'Остановка после исхода текущей отправки':old.phase==='blocked'?
           'Явно остановлено после неизвестного исхода; проверьте журнал перед новым запуском':'Остановлено пользователем'};
