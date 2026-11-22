@@ -587,13 +587,14 @@ for(const scenario of ['missing','body','wire-route','arm-id','intent-route','em
  if(scenario==='empty-user-id')wire.submission.userId='';
  if(scenario==='empty-request-id')wire.requestId='';
  if(scenario==='later-request')wire.startedAt=1010001;
- if(scenario==='earlier-request')wire.startedAt=999999;
  if(scenario==='future-event')wire.startedAt=1060100;
  if(scenario!=='missing')await env.store.composerRequest(wire);
  if(scenario==='ambiguous')await env.store.composerRequest({...wire,requestId:'second-wire',startedAt:1000200});
+ if(scenario==='earlier-request')assert.equal((await env.store.composerGet({tabId:7})).requestCandidate?.requestId,wire.requestId,
+  'pre-event request is durably stored after Arm and must be rejected by intent time gate');
  if(scenario==='wrong-phase')env.data[composerKey(7)].phase='cancelled';
  env.clock(1060000);
- const intent={tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''};
+ const intent={tabId:7,url:root,armId:armed.record.id,eventAt:scenario==='earlier-request'?1000200:1000000,text:objective,baselineKey:''};
  if(scenario==='arm-id')intent.armId='wrong-arm';
  if(scenario==='intent-route')intent.url=other;
  if(scenario==='future-event')intent.eventAt=1060001;
