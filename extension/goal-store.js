@@ -158,8 +158,17 @@
             return {ok:true,record:current};
           throw Error('Другая ручная отправка Goal уже ожидает подтверждения');
         }
+        const candidate=current.requestCandidate,time=now();
+        const attachCandidate=!current.requestCandidateAmbiguous&&candidate&&candidate.url===target&&
+          typeof candidate.requestId==='string'&&!!candidate.requestId&&
+          typeof candidate.submission?.userId==='string'&&!!candidate.submission.userId&&candidate.submission.userId.length<=256&&
+          Number.isFinite(candidate.startedAt)&&candidate.startedAt>=eventAt&&candidate.startedAt-eventAt<=10000&&
+          policy.submittedTextMatches(text,candidate.submission.userText,null);
+        // Arm delivery can delay this trusted event past its receipt window.
+        // Only an exact request already observed inside the original window
+        // bridges that delay; native confirmation remains required at bind.
         if(current.phase!=='armed'||!Number.isFinite(eventAt)||eventAt<current.armedAt||
-            eventAt>now()||now()-eventAt>10000)
+            eventAt>time||time-eventAt>10000&&!attachCandidate)
           throw Error('Ручная отправка Goal не относится к свежему включению');
         if(typeof text!=='string'||!text.trim()||text.length>10000||typeof baselineKey!=='string'||
             linkTargets!==undefined&&(!Array.isArray(linkTargets)||linkTargets.length>32||
@@ -167,10 +176,6 @@
           throw Error('Ручная цель должна содержать точный текст до 10000 символов');
         if(baselineKey&&(target==='https://chatgpt.com/'||!baselineKey.startsWith(new URL(target).pathname+'|')))
           throw Error('Исходное сообщение Goal относится к другому чату');
-        const candidate=current.requestCandidate;
-        const attachCandidate=!current.requestCandidateAmbiguous&&candidate&&candidate.url===target&&
-          candidate.startedAt>=eventAt&&candidate.startedAt-eventAt<=10000&&
-          policy.submittedTextMatches(text,candidate.submission?.userText,null);
         const record={...current,phase:'intent',intent:{text,eventAt,baselineKey,
           ...(linkTargets!==undefined?{linkTargets}: {})},
           ...(attachCandidate?{request:candidate}:{})};

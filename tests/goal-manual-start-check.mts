@@ -514,6 +514,72 @@ for(const scenario of ['text','url','before-arm','late-after-intent','no-body','
  assert.equal(fresh.record.requestCandidateAmbiguous,undefined);assert.equal(fresh.record.requestCandidate,undefined);
  assert.equal((await env.store.composerRequest(wire)).ok,false,'old arm candidate cannot attach to refreshed arm');
 }
+// Slow Arm delivery may delay saving trusted consent after its exact request
+// was already observed. Only that unique, timely request can bridge freshness.
+for(const url of [root,saved])for(const delay of [9999,10001,60000]) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url});
+ const draftKey='synthetic-preserved-draft';env.data[draftKey]={text:'  User draft remains exact  ',attachments:['synthetic-file']};
+ const draft=structuredClone(env.data[draftKey]);
+ const wire={tabId:7,armId:armed.record.id,url,requestId:'timely-wire',startedAt:delay===60000?1010000:1000100,
+  submission:{userId:'native-user-7',userText:objective}};
+ await env.store.composerRequest(wire);env.clock(1000000+delay);
+ const result=await env.store.composerIntent({tabId:7,url,armId:armed.record.id,eventAt:1000000,
+  text:objective,baselineKey:url===root?'':'/c/manual-goal-source|old-user'});
+ assert.equal(result.record.phase,'intent',String(delay));assert.equal(result.record.request.requestId,wire.requestId);
+ assert.equal(result.record.intent.eventAt,1000000,'persist original trusted event time, not receipt time');
+ assert.equal(env.data[goalKey(saved)],undefined,'delayed consent alone cannot bind a Goal');
+ const proof={...env.proof(armed.record.id),requestId:wire.requestId,startedAt:wire.startedAt,
+  userSentAtMs:wire.startedAt+100,firstTurn:url===root};
+ const before=structuredClone(env.data);
+ for(const changes of [{nativeVerified:false},{requestId:'wrong-request'},{userText:'Wrong body'},
+   {promptKey:'/c/wrong-chat|user'},{startedAt:1010001}])
+  await assert.rejects(()=>env.store.composerBind({...proof,...changes}));
+ assert.deepEqual(env.data,before,'native binding checks still gate delayed consent');
+ await env.store.composerBind(proof);
+ assert.equal(env.data[goalKey(saved)].phase,'waiting');
+ assert.equal(env.data[goalKey(saved)].goal,objective);assert.equal(env.data[goalKey(saved)].startedAt,wire.startedAt);
+ assert.equal(env.messages.length,0,'neither delayed consent nor native adoption sends a message');
+ assert.deepEqual(env.data[draftKey],draft,'draft text and attachments are unchanged');
+}
+// Without prior request evidence, keep the original ten-second receipt gate.
+for(const delay of [9999,10001,60000]) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});env.clock(1000000+delay);
+ const intent={tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''};
+ if(delay===9999)assert.equal((await env.store.composerIntent(intent)).record.phase,'intent');
+ else {
+  const before=structuredClone(env.data);
+  await assert.rejects(()=>env.store.composerIntent(intent));assert.deepEqual(env.data,before);
+ }
+ assert.equal(env.messages.length,0);assert.equal(env.data[goalKey(saved)],undefined);
+}
+for(const scenario of ['missing','body','wire-route','arm-id','intent-route','empty-user-id','empty-request-id',
+ 'ambiguous','later-request','earlier-request','future-event','before-arm','wrong-phase','baseline-route']) {
+ const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});
+ const wire={tabId:7,armId:armed.record.id,url:root,requestId:'timely-wire',startedAt:1000100,
+  submission:{userId:'native-user-7',userText:objective}};
+ if(scenario==='body')wire.submission.userText='Different objective';
+ if(scenario==='wire-route')wire.url=other;
+ if(scenario==='empty-user-id')wire.submission.userId='';
+ if(scenario==='empty-request-id')wire.requestId='';
+ if(scenario==='later-request')wire.startedAt=1010001;
+ if(scenario==='earlier-request')wire.startedAt=999999;
+ if(scenario==='future-event')wire.startedAt=1060100;
+ if(scenario!=='missing')await env.store.composerRequest(wire);
+ if(scenario==='ambiguous')await env.store.composerRequest({...wire,requestId:'second-wire',startedAt:1000200});
+ if(scenario==='wrong-phase')env.data[composerKey(7)].phase='cancelled';
+ env.clock(1060000);
+ const intent={tabId:7,url:root,armId:armed.record.id,eventAt:1000000,text:objective,baselineKey:''};
+ if(scenario==='arm-id')intent.armId='wrong-arm';
+ if(scenario==='intent-route')intent.url=other;
+ if(scenario==='future-event')intent.eventAt=1060001;
+ if(scenario==='before-arm')intent.eventAt=999999;
+ if(scenario==='baseline-route')intent.baselineKey='/c/unrelated|before';
+ const before=structuredClone(env.data),writes=env.writes.length;
+ await assert.rejects(()=>env.store.composerIntent(intent),scenario);
+ assert.deepEqual(env.data,before,scenario);assert.equal(env.writes.length,writes,scenario);
+ assert.equal(env.messages.length,0,scenario);assert.equal(env.events.length,0,scenario);
+}
+
 console.log('Pre-intent request observation: durable exact candidate, intent/native proof gates, ambiguity retention and cancellation passed.');
 
 // Exercise the worker's actual tab-close listener, not just the store API.

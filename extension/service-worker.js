@@ -1605,12 +1605,23 @@ async function recoverNoClickRetry(tabId,url) {
     if(carriedDraft&&(carriedDraft.operationId!==failed.operationId||carriedDraft.claimedAt||
         !['saved','not-clicked'].includes(carriedDraft.phase)||typeof carriedDraft.draft!=='string'||
         !carriedDraft.draft||carriedDraft.attemptId!==failed.attemptId))return state;
-    const planned=events.find(e=>e.kind==='retry.planned');
+    const plans=events.filter(e=>e.kind==='retry.planned'),finishes=events.filter(e=>e.kind==='retry.finished');
+    const planned=plans.length===1?plans[0]:null;
+    const intents=events.filter(e=>e.kind==='retry.send_intent'),grants=events.filter(e=>e.kind==='send.authorized'),
+      refusals=events.filter(e=>e.kind==='send.not_clicked');
+    // A refusal proves only its preceding, unique admission. It cannot release
+    // a later grant or an operation with repeated/ambiguous send admissions.
+    const admissionRefused=!(intents.length||grants.length)||intents.length===1&&grants.length<=1&&refusals.length===1&&
+      [...intents,...grants,...refusals].every(e=>e.tabId===tabId&&e.sourceUrl===url)&&
+      refusals[0].promptKey===planned?.promptKey&&planned?.sequence<intents[0].sequence&&intents[0].sequence<refusals[0].sequence&&
+      (!grants.length||intents[0].sequence<grants[0].sequence&&grants[0].sequence<refusals[0].sequence)&&
+      refusals[0].sequence<failed.sequence;
     const cleanupOnly=failed.kind==='draft.restore_failed'&&!events.some(e=>e.kind==='draft.saved');
     if(failed.kind==='draft.restore_failed'&&!cleanupOnly||planned?.attemptId!==failed.attemptId||
-        !events.some(e=>e.kind==='retry.finished'&&e.clicked===false)||
+        finishes.length!==1||finishes[0].clicked!==false||finishes[0].confirmed===true||
+        !(planned?.sequence<failed.sequence&&failed.sequence<finishes[0].sequence)||
         events.some(e=>e.kind==='send.dispatched'||e.kind==='retry.clicked'||e.kind==='request.started')||
-        events.some(e=>e.kind==='retry.send_intent'||e.kind==='send.authorized')&&!events.some(e=>e.kind==='send.not_clicked')||
+        !admissionRefused||events.some(e=>e.clicked===true||e.confirmed===true)||
         journal.events.some(e=>(e.tabId===tabId||e.sourceUrl===url)&&e.kind==='request.started'&&e.recordedAt>planned.recordedAt))return state;
     const tab=await chrome.tabs.get(tabId);
     if(tab.url!==url||tab.status!=='complete')return state;
@@ -1620,14 +1631,38 @@ async function recoverNoClickRetry(tabId,url) {
     const [delivery]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
     const receipt=await latestRequestReceipt(tabId);
     const goal=await goalController.get(url);
-    let legacy=proveLegacyNoClickRoute({url,tabId,planned,native,checkpoint:failedRequest,receipt,journal,state,delivery:delivery?.result,goal});
+    const completedSuccessor=goal?.phase==='completed'?
+      await proveCompletedGoalSuccessor(tabId,url,goal,receipt,native,journal):null;
+    if(goal?.phase==='completed'&&!completedSuccessor)return state;
+    let unboundIdle=null;
+    const unboundMessage={url,operationId:planned.operationId,alertIndex:0,attemptId:planned.attemptId,
+      requestId:planned.requestId,promptKey:native?.promptKey,
+      recoveryBinding:events.filter(e=>e.kind==='recovery.stop_intent').at(-1)?.recoveryBinding};
+    async function proveUnboundIdle() {
+      const [surface]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,
+        args:[0,false,'inspect-recovery',url,unboundMessage.promptKey,unboundMessage.recoveryBinding]});
+      return proveInactiveRecoveryIdle(tabId,url,unboundMessage,receipt,surface?.result||{});
+    }
+    if(failedRequest?.url===url&&failedRequest.promptKey==='') {
+      unboundIdle=await proveUnboundIdle();
+      if(!unboundIdle?.requestProof)return state;
+    }
+    const boundTerminal=(saved,turn)=>saved?.state==='active'&&saved.url===url&&
+      saved.promptKey===turn?.promptKey&&saved.requestId===planned.requestId&&String(saved.startedAt)===planned.attemptId&&
+      (saved.httpCompleted===true||Number.isFinite(saved.requestFailedAt)&&saved.requestFailedAt>=saved.startedAt)&&
+      turn?.generating===false&&turn.nativeConversationInactive===true;
+    const completedBoundIdle=Boolean(completedSuccessor&&!unboundIdle&&boundTerminal(failedRequest,native));
+    if(completedSuccessor&&!unboundIdle&&!completedBoundIdle)return state;
+    const requestFence=expectedSequence=>({expectedSequence,
+      oldPromptKey:state.lastPromptKey,newPromptKey:native.promptKey});
+    let legacy=unboundIdle?requestFence(unboundIdle.requestProof.expectedSequence):completedSuccessor?requestFence(completedSuccessor.expectedSequence):
+      proveLegacyNoClickRoute({url,tabId,planned,native,checkpoint:failedRequest,receipt,journal,state,delivery:delivery?.result,goal});
     const handoffRebound=planned.promptKey!==state.lastPromptKey&&native?.promptKey===state.lastPromptKey&&
       proveHandoffRetryIdentity({url,tabId,planned,native,checkpoint:failedRequest,handoff,journal});
     const rebound=Boolean(legacy||handoffRebound);
     if(planned.promptKey!==state.lastPromptKey&&!rebound)return state;
-    if(legacy&&goal&&goal.expectedPromptKey!==native.promptKey)return state;
-    const protectingGoal=goal&&!(goal.phase==='completed'&&goal.expectedPromptKey!==planned.promptKey);
-    if(protectingGoal&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||Date.now()>=goal.deadlineAt||
+    if(legacy&&!unboundIdle&&!completedSuccessor&&goal&&goal.expectedPromptKey!==native.promptKey)return state;
+    if(goal&&!completedSuccessor&&(goal.operation||goal.pauseRequested||goal.stopRequested||goal.manualPending||Date.now()>=goal.deadlineAt||
         !(goal.phase==='blocked'&&goal.reason==='Восстановление запроса завершилось ошибкой'||
           rebound&&goal.phase==='waiting'&&!goal.expectedPromptKey)))return state;
     const checkpoint=native?.hasError?null:await completionCheckpointRead(tabId);
@@ -1640,12 +1675,12 @@ async function recoverNoClickRetry(tabId,url) {
       failedRequest?.state==='active'&&(rebound||failedRequest.url===url&&failedRequest.promptKey===planned.promptKey)&&
       failedRequest.requestId===planned.requestId&&String(failedRequest.startedAt)===planned.attemptId&&
       (failedRequest.httpCompleted===true||Number.isFinite(failedRequest.requestFailedAt));
-    let verifiedIdle=native?.generating===false&&(native.nativeConversationInactive===true||deliveryIdle);
-    if(rebound&&!deliveryIdle)return state;
+    let verifiedIdle=Boolean(unboundIdle)||native?.generating===false&&(native.nativeConversationInactive===true||deliveryIdle);
+    if(rebound&&!unboundIdle&&!completedBoundIdle&&!deliveryIdle)return state;
     if(carriedDraft&&!verifiedIdle) {
       const bound=events.filter(e=>e.kind==='recovery.stop_intent').at(-1)?.recoveryBinding;
       if(bound?.kind!=='user'||bound.userId!==native?.userId)return state;
-      const message={url,alertIndex:0,attemptId:planned.attemptId,requestId:planned.requestId,promptKey:planned.promptKey,recoveryBinding:bound};
+      const message={url,operationId:planned.operationId,alertIndex:0,attemptId:planned.attemptId,requestId:planned.requestId,promptKey:planned.promptKey,recoveryBinding:bound};
       const [surface]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,
         args:[0,false,'inspect-recovery',url,planned.promptKey,bound]});
       verifiedIdle=Boolean(await proveInactiveRecoveryIdle(tabId,url,message,await latestRequestReceipt(tabId),surface?.result||{}));
@@ -1693,12 +1728,26 @@ async function recoverNoClickRetry(tabId,url) {
     if(legacy) {
       const freshJournal=await readJournal(),freshNative=await inspectBoundNativeTurn(tabId,url),freshCheckpoint=await completionCheckpointRead(tabId),freshReceipt=await latestRequestReceipt(tabId);
       const [freshDelivery]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectChatError,args:[0,false]});
-      legacy=proveLegacyNoClickRoute({url,tabId,planned,native:freshNative,checkpoint:freshCheckpoint,receipt:freshReceipt,journal:freshJournal,state,delivery:freshDelivery?.result,goal});
+      if(unboundIdle) {
+        const idle=await proveUnboundIdle();
+        if(!idle?.requestProof||JSON.stringify(freshNative)!==JSON.stringify(native)||
+            JSON.stringify(freshCheckpoint)!==JSON.stringify(failedRequest))return state;
+        legacy=requestFence(idle.requestProof.expectedSequence);
+      } else if(completedSuccessor) {
+        const proof=await proveCompletedGoalSuccessor(tabId,url,goal,freshReceipt,freshNative,freshJournal);
+        if(!proof||!boundTerminal(freshCheckpoint,freshNative)||JSON.stringify(freshNative)!==JSON.stringify(native)||
+            JSON.stringify(freshCheckpoint)!==JSON.stringify(failedRequest)||
+            JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(failedRequest))return state;
+        legacy=requestFence(proof.expectedSequence);
+      } else legacy=proveLegacyNoClickRoute({url,tabId,planned,native:freshNative,checkpoint:freshCheckpoint,receipt:freshReceipt,journal:freshJournal,state,delivery:freshDelivery?.result,goal});
       if(!legacy||JSON.stringify(await goalController.get(url))!==JSON.stringify(goal)||
           JSON.stringify(await readRetryState(url))!==JSON.stringify(state)||JSON.stringify(await readRetryDraft(url))!==JSON.stringify(carriedDraft)||
           JSON.stringify(await latestRequestReceipt(tabId))!==JSON.stringify(freshReceipt)||
           ChatGPTGoalPolicy.canonical((await chrome.tabs.get(tabId)).url)!==url)return state;
     }
+    const finalJournal=await readJournal();
+    if(!finalJournal.ok||finalJournal.storageError||
+        JSON.stringify(finalJournal.events.filter(e=>e.operationId===failed.operationId))!==JSON.stringify(events))return state;
     await appendJournal({kind:'retry.preparation_recovered',operationId:failed.operationId,sourceUrl:url,
       attemptId:planned.attemptId,promptKey:rebound?state.lastPromptKey:planned.promptKey,requestId:planned.requestId,
       ...(legacy?{legacyNoClick:legacy}:{}),
@@ -1715,13 +1764,53 @@ async function recoverNoClickRetry(tabId,url) {
 async function proveInactiveRecoveryIdle(tabId,url,message,initial,surfaceProof={}) {
   if(message.recoveryBinding?.kind!=='user'||!message.recoveryBinding.userId)return null;
   const checkpoint=await completionCheckpointRead(tabId),native=await inspectBoundNativeTurn(tabId,url);
-  if(checkpoint?.state!=='active'||checkpoint.url!==url||checkpoint.promptKey!==message.promptKey||
+  const unbound=checkpoint?.promptKey==='';
+  if(checkpoint?.state!=='active'||checkpoint.url!==url||!unbound&&checkpoint.promptKey!==message.promptKey||
       String(checkpoint.startedAt)!==message.attemptId||checkpoint.requestId!==message.requestId||
       !checkpoint.httpCompleted&&!Number.isFinite(checkpoint.requestFailedAt)||
       !native?.ok||native.isLatest!==true||native.isReadOnly!==false||native.hasError!==true||
       native.generating!==false||native.nativeConversationInactive!==true&&surfaceProof.editorSubmitIdle!==true||native.promptKey!==message.promptKey||
       native.userId!==message.recoveryBinding.userId||!Number.isFinite(native.lastUserSentAtMs)||
       Math.abs(native.lastUserSentAtMs-checkpoint.startedAt)>10000)return null;
+  // A transport failure can precede prompt binding. Only the captured native
+  // manual submission and its complete failed-request history replace that key;
+  // an empty checkpoint never proves an automatic click was not delivered.
+  const receiptSnapshot=JSON.stringify(initial);
+  async function unboundProof(turn) {
+    if(!initial||initial.operationId||initial.requestId!==checkpoint.requestId||initial.startedAt!==checkpoint.startedAt||
+        initial.submittedUserId!==turn.userId||![url,''].includes(initial.url)||
+        initial.tabId!==undefined&&initial.tabId!==tabId||!message.operationId||
+        turn.url!==url||!turn.promptKey?.startsWith(new URL(url).pathname+'|')||
+        !Number.isFinite(checkpoint.requestFailedAt))return null;
+    const journal=await readJournal(),events=journal?.events,meta=journal?.meta;
+    if(!journal?.ok||journal.storageError||!Array.isArray(events)||!Number.isSafeInteger(meta?.sequence))return null;
+    const started=events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===url&&
+      e.requestId===initial.requestId&&e.eventAt===initial.startedAt&&!e.operationId);
+    if(started.length!==1||!Number.isSafeInteger(started[0].sequence)||started[0].sequence<1)return null;
+    const tail=events.filter(e=>e.sequence>=started[0].sequence);
+    if(tail.length!==meta.sequence-started[0].sequence+1||tail.some((e,i)=>e.sequence!==started[0].sequence+i||e.previousWriteError))return null;
+    const failed=tail.filter(e=>e.kind==='request.failed'&&e.tabId===tabId&&e.sourceUrl===url&&
+      e.requestId===initial.requestId&&e.eventAt===checkpoint.requestFailedAt&&!e.operationId);
+    const relevant=tail.filter(e=>e.tabId===tabId||e.sourceUrl===url||e.observedTabUrl===url);
+    if(failed.length!==1||failed[0].sequence<=started[0].sequence||checkpoint.requestFailedAt<checkpoint.startedAt||
+        relevant.some(e=>e.kind==='request.started'&&e.sequence>started[0].sequence||
+          e.operationId&&e.operationId!==message.operationId||e.clicked===true||e.confirmed===true||
+          ['goal.paused','goal.stopped','goal.stop_requested','goal.send_intent','handoff.navigating','handoff.sending',
+            'send.authorized','send.dispatched','retry.clicked','retry.confirmed','goal.clicked','handoff.clicked'].includes(e.kind)))return null;
+    if(Object.entries(meta.active||{}).some(([owner,e])=>Number(owner)===tabId||e.chatUrl===url||e.sourceUrl===url)||
+        meta.retryPreparingByChat?.[url]&&meta.retryPreparingByChat[url].operationId!==message.operationId||
+        meta.handoffSourceClaims?.[url]||Object.values(meta.retrySendClaims||{}).some(e=>e.sourceUrl===url&&
+          (e.operationId!==message.operationId||e.phase==='consumed')))return null;
+    const goal=await goalController.get(url);
+    const completedSuccessor=goal?.phase==='completed'?
+      await proveCompletedGoalSuccessor(tabId,url,goal,initial,turn,journal):null;
+    if(goal&&(goal.operation||goal.stopRequested||goal.pauseRequested||goal.manualPending||goal.manualOverride||
+        ['paused','stopped','handoff','moved'].includes(goal.phase)||
+        (goal.phase==='completed'?!completedSuccessor:Date.now()>=goal.deadlineAt)))return null;
+    return {sequence:meta.sequence,requestSequence:started[0].sequence,failedSequence:failed[0].sequence,goal,completedSuccessor};
+  }
+  const proof=unbound?await unboundProof(native):null;
+  if(unbound&&!proof)return null;
   const [editor]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:controlChatComposer,
     args:[{action:'inspect-plain-retry-draft',text:'',url}]});
   if(editor?.result?.ok!==true)return null;
@@ -1729,7 +1818,75 @@ async function proveInactiveRecoveryIdle(tabId,url,message,initial,surfaceProof=
     args:[message.alertIndex,false,'inspect-recovery',url,message.promptKey,message.recoveryBinding]});
   if(fresh?.result?.needsIdleProof!==true||native.nativeConversationInactive!==true&&fresh.result.editorSubmitIdle!==true||JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
       await latestRequestReceipt(tabId)!==initial||(await chrome.tabs.get(tabId)).url!==url)return null;
-  return {ok:true,stopped:false,idle:true,proof:'native-inactive-error-editor',recoveryBinding:message.recoveryBinding};
+  if(unbound) {
+    const current=await inspectBoundNativeTurn(tabId,url);
+    if(JSON.stringify(current)!==JSON.stringify(native)||JSON.stringify(initial)!==receiptSnapshot||
+        JSON.stringify(await unboundProof(current))!==JSON.stringify(proof)||
+        JSON.stringify(await completionCheckpointRead(tabId))!==JSON.stringify(checkpoint)||
+        await latestRequestReceipt(tabId)!==initial||(await chrome.tabs.get(tabId)).url!==url)return null;
+  }
+  return {ok:true,stopped:false,idle:true,proof:'native-inactive-error-editor',recoveryBinding:message.recoveryBinding,
+    ...(proof?{requestProof:{expectedSequence:proof.sequence,requestSequence:proof.requestSequence}}:{})};
+}
+
+
+// Rendered keys can alias one native user. A completed Goal is independent
+// only when its final submitted native user and a later manual request are
+// both durably identified. Missing historical receipts stay fail-closed.
+async function proveCompletedGoalSuccessor(tabId,url,goal,request,native,journal) {
+  if(goal?.phase!=='completed'||!goal.id||!goal.lastCompletionKey||goal.operation||goal.stopRequested||goal.pauseRequested||
+      goal.manualPending||goal.manualOverride||!request?.requestId||request.operationId||
+      !Number.isFinite(request.startedAt)||![url,''].includes(request.url)||request.tabId!==undefined&&request.tabId!==tabId||
+      !native?.ok||native.url!==url||native.isLatest!==true||native.isReadOnly!==false||native.generating!==false||native.hasError!==true||
+      typeof native.userId!=='string'||!native.userId||request.submittedUserId!==native.userId||
+      !Number.isFinite(native.lastUserSentAtMs)||Math.abs(native.lastUserSentAtMs-request.startedAt)>10000)return null;
+  journal ||= await readJournal();
+  const events=journal?.events,meta=journal?.meta;
+  if(!journal?.ok||journal.storageError||!Array.isArray(events)||!Number.isSafeInteger(meta?.sequence))return null;
+  const current=events.filter(e=>e.kind==='request.started'&&e.tabId===tabId&&e.sourceUrl===url&&
+    e.requestId===request.requestId&&e.eventAt===request.startedAt&&!e.operationId);
+  const completed=events.filter(e=>e.kind==='goal.answer_complete'&&e.goalId===goal.id&&e.completionKey===goal.lastCompletionKey);
+  if(current.length!==1||completed.length!==1||completed[0].sourceUrl!==url||completed[0].nativeVerified!==true||
+      completed[0].exactMarker!==true||!(completed[0].sequence<current[0].sequence))return null;
+  let previous,previousUserId,owner;
+  if(goal.lastConfirmedOperation?.id) {
+    const operationId=goal.lastConfirmedOperation.id;owner=goal.lastConfirmedOperation.tabId;
+    if(!Number.isInteger(owner))return null;
+    const confirmed=events.filter(e=>e.kind==='goal.confirmed'&&e.goalId===goal.id&&e.operationId===operationId);
+    const started=events.filter(e=>e.kind==='request.started'&&e.operationId===operationId);
+    if(confirmed.length!==1||started.length!==1||confirmed[0].sourceUrl!==url||confirmed[0].tabId!==owner||
+        started[0].sourceUrl!==url||started[0].tabId!==owner||!started[0].requestId||!Number.isFinite(started[0].eventAt)||
+        !(started[0].sequence<confirmed[0].sequence&&confirmed[0].sequence<completed[0].sequence)||
+        confirmed[0].requestId&&confirmed[0].requestId!==started[0].requestId)return null;
+    previous=started[0];
+    const receipt=await readRequestReceipt(owner,{requestId:previous.requestId,startedAt:previous.eventAt});
+    if(!receipt||receipt.requestId!==previous.requestId||receipt.startedAt!==previous.eventAt||
+        receipt.operationId!==operationId||![url,''].includes(receipt.url)||receipt.tabId!==undefined&&receipt.tabId!==owner||
+        typeof receipt.submittedUserId!=='string'||!receipt.submittedUserId)return null;
+    previousUserId=receipt.submittedUserId;
+  } else {
+    const binding=goal.manualStart;owner=binding?.tabId;
+    if(!Number.isInteger(owner)||!binding.requestId||typeof binding.userId!=='string'||!binding.userId||
+        !Number.isFinite(binding.startedAt)||binding.url!==url||goal.manualSupplementBinding)return null;
+    const started=events.filter(e=>e.kind==='request.started'&&e.tabId===owner&&!e.operationId&&
+      e.sourceUrl===(binding.sourceUrl||url)&&e.requestId===binding.requestId&&e.eventAt===binding.startedAt);
+    const bound=events.filter(e=>e.kind==='goal.manual_started'&&e.sourceUrl===url&&e.goalId===goal.id&&
+      e.tabId===owner&&e.requestId===binding.requestId&&e.startedAt===binding.startedAt&&e.userId===binding.userId);
+    if(started.length!==1||bound.length!==1||!(started[0].sequence<bound[0].sequence&&bound[0].sequence<completed[0].sequence))return null;
+    previous=started[0];previousUserId=binding.userId;
+  }
+  if(previousUserId===native.userId||previous.requestId===request.requestId||previous.eventAt>=request.startedAt)return null;
+  const tail=events.filter(e=>e.sequence>=previous.sequence);
+  if(!Number.isSafeInteger(previous.sequence)||previous.sequence<1||tail.length!==meta.sequence-previous.sequence+1||
+      tail.some((e,i)=>e.sequence!==previous.sequence+i||e.previousWriteError)||
+      tail.some(e=>e.kind==='request.started'&&e.sequence>previous.sequence&&e.sequence<completed[0].sequence&&
+        (e.tabId===owner||e.sourceUrl===url||e.observedTabUrl===url))||
+      tail.some(e=>e.kind==='request.started'&&e.sequence>current[0].sequence&&
+        (e.tabId===tabId||e.sourceUrl===url||e.observedTabUrl===url))||
+      tail.some(e=>e.sequence>completed[0].sequence&&(e.tabId===tabId||e.sourceUrl===url||e.observedTabUrl===url)&&
+        ['goal.paused','goal.stopped','goal.stop_requested'].includes(e.kind)))return null;
+  return {expectedSequence:meta.sequence,completedSequence:completed[0].sequence,currentSequence:current[0].sequence,
+    previousRequestId:previous.requestId,previousUserId,currentUserId:native.userId};
 }
 
 const goalAckProofs=new Map();

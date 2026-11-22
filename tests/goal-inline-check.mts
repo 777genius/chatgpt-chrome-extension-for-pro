@@ -106,7 +106,29 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
     const event=new window.Event('click',{bubbles:true,cancelable:true});
     Object.defineProperty(event,'isTrusted',{value:true});target.dispatchEvent(event);
   }
-  return {document,window,calls,state,instance,element,click,context,
+  let nativeSendHandlers:Map<string,(event:Record<string,unknown>)=>void>|null=null;
+  function nativeSend(type='keydown',changes:Record<string,unknown>={}) {
+    if(!nativeSendHandlers) {
+      nativeSendHandlers=new Map();
+      const content=readFileSync('extension/content-script.js','utf8');
+      const first=content.indexOf('  function rememberCompletionSendIntent()');
+      const last=content.indexOf('  let handoffRecord =',first);
+      assert.ok(first>0&&last>first);
+      Object.assign(context,{inlineGoal:instance,Element:window.Element,listeners:new AbortController(),
+        location:{get href(){return url;},get pathname(){return new URL(url).pathname;}},
+        composer:()=>editor,rawEditorText:(value:HTMLElement)=>value.textContent,
+        sendButton:()=>form.querySelector('[data-testid=send-button]'),
+        latestPromptSnapshot:()=>({promptKey:'native-baseline'}),
+        runtimeMessage:async()=>({ok:true}),ChatGPTHandoffTitle:{chatUrl:(value:string)=>new URL(value).pathname==='/'?'':value}});
+      const original=document.addEventListener;
+      document.addEventListener=((eventType:string,handler:(event:Record<string,unknown>)=>void)=>{
+        nativeSendHandlers!.set(eventType,handler);
+      }) as typeof document.addEventListener;
+      try {runInContext(content.slice(first,last),context);}finally {document.addEventListener=original;}
+    }
+    nativeSendHandlers.get(type)!({isTrusted:true,target:type==='keydown'?editor:form.querySelector('[data-testid=send-button]'),key:'Enter',...changes});
+  }
+  return {document,window,calls,state,instance,element,click,context,nativeSend,
     now:()=>clock,timers:()=>timers.size,nextDelay:()=>timers.size?Math.min(...Array.from(timers.values(),t=>t.at-clock)):null,advance:async(ms:number)=>{clock+=ms;for(const [id,timer] of Array.from(timers))if(timer.at<=clock){timers.delete(id);timer.run();}await tick();},
     composerState:()=>composerState,setComposer:(value:Composer|null)=>{composerState=value;},bindable:(value=true)=>{bindable=value;},
     toggle:()=>element('[role=switch]'),details:()=>element('[aria-label="Goal settings"]'),panel:()=>element<HTMLElement>('[data-chatgpt-goal-inline=panel]'),
@@ -253,6 +275,65 @@ function fixture(initial=chat,beforeRoot=false,hiddenComposer=false,nestedReason
   f.click(f.toggle());await tick();assert.equal(f.calls.at(-1)!.action,'stop');assert.equal(f.toggle().getAttribute('aria-checked'),'false');
   assert.equal(f.state.draftReads,0);assert.equal(f.state.nativeSends,0);
   assert.ok(f.calls.every(value=>value.action!=='start'),'inline never authorizes a separate initial send');f.instance.dispose();
+}
+
+// The real native-send capture handler may run before Arm's acknowledgement
+// or during a GET refresh. Exactly one trusted payload belongs to that Arm.
+for(const allocation of ['none','temporary','saved']) {
+  const f=fixture('https://chatgpt.com/');await tick();
+  const slowArm=deferred<Result>();f.respond(value=>value.action==='arm'?slowArm.promise:{ok:true,url:value.url,composer:f.composerState()});
+  f.click(f.toggle());
+  assert.equal(f.calls.at(-1)!.action,'arm');
+  const capturedDraft=f.draft();f.nativeSend('keydown');
+  f.nativeForm().querySelector('#prompt-textarea')!.textContent='  Next owner draft  ';f.nativeSend('click');
+  assert.equal(f.calls.filter(value=>value.action==='intent').length,0,'capture waits for the exact saved Arm');
+  if(allocation==='temporary')f.setUrl('https://chatgpt.com/c/local-chatgpt%3Afirst-send');
+  if(allocation==='saved')f.setUrl(chat);
+  f.notify();await tick();
+  const armed:Composer={id:'delayed-arm',url:'https://chatgpt.com/',phase:'armed',config:{rules:'',maxContinuations:30,maxMinutes:1440}};
+  f.setComposer(armed);f.respond(null);slowArm.resolve({ok:true,url:'https://chatgpt.com/',composer:armed});await tick();
+  const intents=f.calls.filter(value=>value.action==='intent');
+  assert.equal(intents.length,1,'the first trusted send survives a slow Arm ACK: '+allocation);
+  assert.equal(intents[0]!.armId,armed.id);assert.equal(intents[0]!.url,'https://chatgpt.com/');
+  assert.equal(intents[0]!.text,capturedDraft,'the first capture is immutable despite a second send and concurrent edits');assert.equal(intents[0]!.baselineKey,'native-baseline');
+  assert.equal(f.state.nativeSends,0,'capturing an intent never submits the native composer');
+  assert.equal(f.draft(),'  Next owner draft  ');f.instance.dispose();
+}
+for(const failure of ['arm-refused','malformed-ack','wrong-route','wrong-alias','disposed','untrusted','newline']) {
+  const origin=failure==='wrong-alias'?'https://chatgpt.com/':chat;
+  const f=fixture(origin);await tick();const slowArm=deferred<Result>();f.respond(()=>slowArm.promise);f.click(f.toggle());
+  f.nativeSend('keydown',failure==='untrusted'?{isTrusted:false}:failure==='newline'?{shiftKey:true}:{});
+  if(failure==='wrong-route'){f.setUrl(other);f.respond(null);await f.instance.refresh();}
+  if(failure==='wrong-alias') {
+    f.setUrl('https://chatgpt.com/c/local-chatgpt%3Afirst-send');f.notify();await tick();
+    f.setUrl('https://chatgpt.com/c/local-chatgpt%3Aother-send');f.respond(null);await f.instance.refresh();
+  }
+  if(failure==='disposed')f.instance.dispose();
+  const armed:Composer={id:'refused-or-stale-arm',url:origin,phase:'armed',config:{rules:'',maxContinuations:30,maxMinutes:1440}};
+  f.setComposer(armed);f.respond(null);slowArm.resolve(failure==='arm-refused'?{ok:false,error:'Synthetic Arm refusal'}:failure==='malformed-ack'?{ok:true,url:origin,composer:{...armed,phase:'disabled'}}:{ok:true,url:origin,composer:armed});await tick();
+  assert.equal(f.calls.filter(value=>value.action==='intent').length,0,failure+' cannot authorize the initial Goal');
+  assert.equal(f.state.nativeSends,0);f.instance.dispose();
+}
+{
+  const f=fixture();await tick();f.click(f.toggle());await tick();
+  const staleGet=deferred<Result>(),armed=f.composerState()!;f.respond(value=>value.action==='get'?staleGet.promise:{ok:true,url:chat,composer:f.composerState()});
+  const get=f.instance.refresh();f.respond(null);f.nativeSend();await tick();
+  const saved=f.composerState()!;assert.equal(saved.phase,'intent','GET loading cannot drop a trusted native send');
+  staleGet.resolve({ok:true,url:chat,composer:armed});await get;
+  assert.match(f.toggle().getAttribute('aria-description')||'',/Confirmation pending/,'stale GET cannot roll the captured intent back to Armed');
+  f.click(f.toggle());await tick();const count=f.calls.filter(value=>value.action==='intent').length;
+  f.nativeSend();await tick();assert.equal(f.calls.filter(value=>value.action==='intent').length,count,'explicit Disarm cancels future Goal capture');
+  f.instance.dispose();
+}
+for(const cancellation of ['disarm','stop']) {
+  const f=fixture();await tick();
+  if(cancellation==='disarm'){f.click(f.toggle());await tick();}else{f.setRecord(goal());await f.instance.refresh();}
+  const pending=deferred<Result>();f.respond(()=>pending.promise);f.click(f.toggle());f.nativeSend();
+  assert.equal(f.calls.at(-1)!.action,cancellation);
+  if(cancellation==='disarm')f.setComposer({...f.composerState()!,phase:'disabled'});
+  pending.resolve({ok:true,url:chat,composer:f.composerState(),record:cancellation==='stop'?goal(chat,'stopped'):null});await tick();
+  assert.equal(f.calls.filter(value=>value.action==='intent').length,0,'a pending '+cancellation+' cannot capture a new Goal');
+  f.instance.dispose();
 }
 
 // Allocation can occur while the intent acknowledgement is in flight. A real
