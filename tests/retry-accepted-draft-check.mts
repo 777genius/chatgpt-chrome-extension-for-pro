@@ -27,6 +27,25 @@ async function fixture(variant='ok') {
   [a.sequence,b.sequence]=[b.sequence,a.sequence];rows.sort((a:any,b:any)=>a.sequence-b.sequence);
  }
  if(variant==='later'||variant==='unknown')rows.push({kind:'request.started',sequence:100012,sourceUrl:variant==='later'?url:'https://chatgpt.com/',tabId:8});
+ if(variant.startsWith('allocation-')) {
+  const root={kind:'request.started',tabId:variant==='allocation-own-tab'?7:8,sourceUrl:variant==='allocation-nonroot'?'unknown':'https://chatgpt.com/',observedTabUrl:'https://chatgpt.com/',requestId:'root-request',eventAt:2000};
+  const allocation:any={kind:'completion.url_allocated',tabId:8,sourceUrl:'https://chatgpt.com/',observedTabUrl:'https://chatgpt.com/c/other',requestId:'root-request',attemptId:'2000',promptKey:'/c/other|user'};
+  if(variant==='allocation-same-chat'){allocation.observedTabUrl=url;allocation.promptKey='/c/accepted|user'}
+  if(variant==='allocation-attempt')allocation.attemptId='2001';
+  if(variant==='allocation-source-conflict')allocation.sourceUrl=url;
+  if(variant==='allocation-id')allocation.requestId='wrong';
+  if(variant==='allocation-tab')allocation.tabId=9;
+  if(variant==='allocation-prompt')allocation.promptKey='/c/other|';
+  if(variant==='allocation-explicit-conflict')allocation.targetUrl=url;
+  if(variant==='allocation-precedes')rows.push(allocation,root);else rows.push(root);
+  if(variant==='allocation-intervening')rows.push({kind:'request.started',tabId:8,sourceUrl:'https://chatgpt.com/c/other',requestId:'next',eventAt:2001});
+  if(!['allocation-missing','allocation-precedes'].includes(variant))rows.push(allocation);
+  if(variant==='allocation-duplicate'||variant==='allocation-conflict')rows.push({...allocation,...(variant==='allocation-conflict'?{promptKey:'/c/other|different'}:{})});
+  if(variant==='allocation-other-id')rows.push({...allocation,requestId:'other'});
+  if(variant==='allocation-duplicate-start')rows.push({...root});
+  if(variant==='allocation-following-unknown')rows.push({kind:'request.started',tabId:9,sourceUrl:'https://chatgpt.com/',observedTabUrl:'https://chatgpt.com/',requestId:'another',eventAt:2002});
+  rows.forEach((row:any,i:number)=>row.sequence=100001+i);
+ }
  if(variant==='gap')rows.splice(2,1);
  const meta:any={sequence:variant==='gap'?100011:rows.at(-1)!.sequence,active:{},retryPreparingByChat:{[url]:{operationId:op,tabId:7,claimKey:'claim',plannedSequence:100001}},retrySendClaims:{claim:{operationId:op,tabId:7,sourceUrl:url,phase:'consumed'}},retryConsumedOperations:{[op]:100004}};
  const draft:any={phase:'unknown',operationId:op,savedSequence:['two-saves','mismatched-save'].includes(variant)?100003:100002,replacementProven:true,retryText:'retry',draft:variant==='mismatched-save'?'other':'private'};
@@ -51,6 +70,8 @@ async function fixture(variant='ok') {
 const good=await fixture();assert.equal(good.ok,true);assert.equal(good.inserts,1);assert.deepEqual(good.writes.map((x:any)=>x.kind),['draft.restore_intent','draft.restored']);
 assert.equal((await fixture('checkpoint-ok')).inserts,1,'durable exact checkpoint and native-final binding survive lost receipt');
 for(const v of ['checkpoint-user','checkpoint-time','checkpoint-request','checkpoint-prompt','checkpoint-duplicate','checkpoint-stop','checkpoint-receipt-race','checkpoint-race'])assert.equal((await fixture(v)).inserts,0,v);
+for(const v of ['allocation-ok','allocation-duplicate'])assert.equal((await fixture(v)).inserts,1,v+' proves the root request belongs to a different chat');
+for(const v of ['allocation-own-tab','allocation-nonroot','allocation-same-chat','allocation-attempt','allocation-source-conflict','allocation-id','allocation-tab','allocation-prompt','allocation-explicit-conflict','allocation-missing','allocation-precedes','allocation-intervening','allocation-conflict','allocation-other-id','allocation-duplicate-start','allocation-following-unknown'])assert.equal((await fixture(v)).inserts,0,v);
 assert.equal((await fixture('two-saves')).inserts,1,'the exact latest saved sequence is accepted when an earlier backup exists');
 assert.equal((await fixture('request-first')).inserts,1,'network request can be recorded before send.dispatched');
 for(const v of ['old-pointer','mismatched-save','journal-failure','request-before-grant','later','unknown','gap','wrong-user','not-final','generating','editor-busy','editor-race','journal-race'])assert.equal((await fixture(v)).inserts,0,v);

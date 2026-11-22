@@ -1691,6 +1691,34 @@ async function restoreAcceptedRetryDraft(tabId,url) {
       events.push(row);
     }
   }
+  // An initially root-bound request from another tab is unrelated only when
+  // its own durable allocation unambiguously identifies a different chat.
+  // Repeated allocation observations are allowed solely when identical.
+  function allocatedElsewhere(row) {
+    if(row.tabId===tabId||!Number.isInteger(row.tabId)||row.sourceUrl!=='https://chatgpt.com/'||
+        row.observedTabUrl!=='https://chatgpt.com/'||typeof row.requestId!=='string'||!row.requestId||
+        !Number.isFinite(row.eventAt))return false;
+    const starts=events.filter(e=>e.kind==='request.started'&&e.tabId===row.tabId&&e.requestId===row.requestId);
+    if(starts.length!==1||starts[0].sequence!==row.sequence)return false;
+    const next=events.find(e=>e.kind==='request.started'&&e.tabId===row.tabId&&e.sequence>row.sequence);
+    const allocations=events.filter(e=>e.kind==='completion.url_allocated'&&e.tabId===row.tabId&&
+      e.sequence>row.sequence&&(!next||e.sequence<next.sequence));
+    if(!allocations.length||allocations.some(e=>e.requestId!==row.requestId))return false;
+    let identity=null;
+    for(const item of allocations) {
+      const observed=retryDraftUrl(item.observedTabUrl),explicit=retryDraftUrl(item.targetUrl),target=observed||explicit;
+      if(item.attemptId!==String(row.eventAt)||!target||target===url||observed&&explicit&&observed!==explicit||
+          item.sourceUrl!=='https://chatgpt.com/'&&retryDraftUrl(item.sourceUrl)!==target||
+          item.targetUrl&&!explicit||typeof item.promptKey!=='string'||
+          !item.promptKey.startsWith(new URL(target).pathname+'|')||item.promptKey===new URL(target).pathname+'|')return false;
+      const key=JSON.stringify([item.tabId,item.requestId,item.attemptId,target,item.promptKey]);
+      if(identity&&identity!==key)return false;
+      identity=key;
+      if(events.some(e=>e.kind==='request.started'&&e.tabId===row.tabId&&
+          e.sequence>row.sequence&&e.sequence<item.sequence))return false;
+    }
+    return true;
+  }
   const own=events.filter(e=>e.operationId===draft.operationId&&e.tabId===tabId&&e.sourceUrl===url);
   const one=kind=>{const found=own.filter(e=>e.kind===kind);return found.length===1?found[0]:null;};
   const planned=one('retry.planned'),saved=own.find(e=>e.kind==='draft.saved'&&e.sequence===draft.savedSequence),
@@ -1706,7 +1734,7 @@ async function restoreAcceptedRetryDraft(tabId,url) {
       failed.errorCode!=='RETRY_CONFIRMATION_UNPROVEN'||finished.clicked!==true||finished.confirmed!==false||
       events.some(e=>e.kind==='request.started'&&e.sequence>request.sequence&&
         (e.tabId===tabId||retryDraftUrl(e.sourceUrl)===url||retryDraftUrl(e.observedTabUrl)===url||
-          !retryDraftUrl(e.sourceUrl)&&!retryDraftUrl(e.observedTabUrl))))return false;
+          !retryDraftUrl(e.sourceUrl)&&!retryDraftUrl(e.observedTabUrl)&&!allocatedElsewhere(e))))return false;
   const receipt=await latestRequestReceipt(tabId);
   if(receipt&&(receipt.operationId!==draft.operationId||receipt.requestId!==request.requestId||
       receipt.startedAt!==request.eventAt||![url,''].includes(receipt.url)||typeof receipt.submittedUserId!=='string'||!receipt.submittedUserId))return false;
