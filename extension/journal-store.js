@@ -10,21 +10,36 @@ let journalQueue = Promise.resolve();
 let journalFailure = '';
 // Observe ingress synchronously, scoped both to the exact tab and canonical
 // conversation. An unidentifiable source may belong to any conversation.
-const journalIngressByTab = new Map(), journalIngressByChat = new Map();
+const journalIngressByTab = new Map(), journalIngressByChat = new Map(), journalIngressRoutes = new Map();
 let journalUnknownIngress = 0;
 function recordJournalIngress(event,tab) {
-  const tabId=tab?.id??event?.tabId,chat=retryDraftUrl(event?.sourceUrl||tab?.url||event?.url||'');
+  const tabId=tab?.id??event?.tabId,source=retryDraftUrl(event?.sourceUrl||event?.url||''),
+    observed=retryDraftUrl(tab?.url||''),chat=source||observed;
+  // A network request can name chat B while the durable tab snapshot still
+  // observes chat A. Retain both identities until protected writes finish.
+  const route=JSON.stringify([Number.isInteger(tabId)?tabId:null,source,observed]);
+  journalIngressRoutes.set(route,(journalIngressRoutes.get(route)||0)+1);
   if(Number.isInteger(tabId)&&tabId>=0)journalIngressByTab.set(tabId,(journalIngressByTab.get(tabId)||0)+1);
   else journalUnknownIngress++;
   if(chat)journalIngressByChat.set(chat,(journalIngressByChat.get(chat)||0)+1);
   else journalUnknownIngress++;
 }
 function journalIngressSnapshot(tabId,url) {
-  return {tabId,url,tab:journalIngressByTab.get(tabId)||0,chat:journalIngressByChat.get(url)||0,unknown:journalUnknownIngress,tabs:new Map(journalIngressByTab)};
+  return {tabId,url,tab:journalIngressByTab.get(tabId)||0,chat:journalIngressByChat.get(url)||0,
+    unknown:journalUnknownIngress,tabs:new Map(journalIngressByTab),routes:new Map(journalIngressRoutes)};
 }
-function journalIngressChanged(snapshot,tabId,url) {
-  return !snapshot||snapshot.tabId!==tabId||snapshot.url!==url||snapshot.tab!==(journalIngressByTab.get(tabId)||0)||
-    snapshot.chat!==(journalIngressByChat.get(url)||0)||snapshot.unknown!==journalUnknownIngress;
+function journalIngressChanged(snapshot,tabId,url,knownTabs) {
+  if(!snapshot||snapshot.tabId!==tabId||snapshot.url!==url||snapshot.tab!==(journalIngressByTab.get(tabId)||0)||
+      snapshot.chat!==(journalIngressByChat.get(url)||0)||snapshot.unknown!==journalUnknownIngress)return true;
+  if(!url)return false;
+  for(const [route,count] of journalIngressRoutes) {
+    if(count===(snapshot.routes?.get(route)||0))continue;
+    const [owner,source,observed]=JSON.parse(route),saved=retryDraftUrl(knownTabs?.[owner]?.url||'');
+    // Only two positively different chat routes may leave this grant intact.
+    // An absent observed route is ambiguous, not evidence for another chat.
+    if(owner===tabId||source===url||observed===url||saved===url||!observed&&!saved)return true;
+  }
+  return false;
 }
 async function hasProvisionalGoalCAS() {
   const value=(await chrome.storage.local.get(GOAL_CAS_RECEIPT))[GOAL_CAS_RECEIPT];
@@ -655,6 +670,8 @@ function appendJournal(event, tab = {}, options = {}) {
       }
       if(active[tabId].kind==='retry.send_intent') {
         const intent=active[tabId];
+        if(journalFailure)throw Object.assign(new Error('Неустранённый сбой записи журнала блокирует автоповтор'),
+          {journalPolicy:true,code:'RETRY_GRANT_RACE'});
         protectedRetryGrant=true;
         if(!intent.sourceUrl||intent.sourceUrl!==retryDraftUrl(sourceUrl)||typeof intent.promptKey!=='string'||!intent.promptKey)throw Object.assign(new Error('Исходный запрос автоповтора не подтверждён'),{journalPolicy:true});
         const claim=retryPreparingByChat[intent.sourceUrl]?.claimKey||JSON.stringify([intent.sourceUrl,intent.promptKey]);
@@ -765,7 +782,7 @@ function appendJournal(event, tab = {}, options = {}) {
     const protectedDraftClaim=event.kind==='draft.restore_intent'&&unknownDraftClaim;
     const protectedUrl=goalCAS?.url||(protectedGoalGrant?active[tabId]?.chatUrl:null)||
       (protectedRetryGrant?active[tabId]?.sourceUrl:null)||retryCAS?.url||(protectedDraftClaim?retrySource:null);
-    const protectedIngressChanged=()=>journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl)||
+    const protectedIngressChanged=()=>journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl,meta.tabs)||
       protectedGoalGrant&&(ingressAtEnqueue.tabs.get(protectedAnchorTab)||0)!==(journalIngressByTab.get(protectedAnchorTab)||0);
     const grantRace=()=>Object.assign(new Error('Запрос изменился до разрешения автоповтора'),{journalPolicy:true,code:'RETRY_GRANT_RACE'});
     if(protectedUrl&&protectedIngressChanged())throw protectedRetryGrant?grantRace():goalFenceChanged();
@@ -791,7 +808,7 @@ function appendJournal(event, tab = {}, options = {}) {
       catch(error) {throw Object.assign(new Error('Не удалось завершить восстановление автоповтора: '+String(error?.message||error)),
         {journalPolicy:true,code:'RETRY_CAS_CLEANUP_UNKNOWN'});}
     }
-    if(goalCAS&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl)) {
+    if(goalCAS&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl,meta.tabs)) {
       // An interrupt/crash before this compensation leaves the provisional
       // receipt in the same atomic write as next, so startup can restore it.
       await recoverProvisionalGoalCASLocked();
