@@ -2784,7 +2784,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if(message.action==='bind')return bindNativeComposerGoal(tabId,live,message.armId);
       if(message.action==='restore')return restoreMissingComposerGoal(tabId,live,message.armId,true);
       if(message.action==='arm')result=await goalController.composerArm({tabId,url:live,rules:message.rules,
-        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes});
+        maxContinuations:message.maxContinuations,maxMinutes:message.maxMinutes,armActionAt:message.armActionAt});
       else if(message.action==='disarm')result=await goalController.composerDisarm({tabId,armId:message.armId});
       else if(message.action==='intent')result=await goalController.composerIntent({tabId,url:requested,
         armId:message.armId,eventAt:message.eventAt,text:message.text,baselineKey:message.baselineKey,linkTargets:message.linkTargets});
