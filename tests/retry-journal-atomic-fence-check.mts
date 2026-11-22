@@ -119,6 +119,21 @@ for(const [observed,conflicts] of [['https://chatgpt.com/c/atomic-retry',true],
  else assert.equal((await grant).ok,true,'both positive B observations permit an unrelated request');
  await request;
 }
+// An entirely absent observed route does not invalidate a positive,
+// unrelated source chat. Unknown source and observed route must fail closed.
+for(const [requestSource,conflicts] of [['https://chatgpt.com/c/unrelated',false],
+  ['https://chatgpt.com/',true]] as const) {
+ const f=await fixture(),prompt=path+'|retry-user';
+ await f.append({kind:'retry.planned',sourceUrl:url,operationId:'source-only',promptKey:prompt});
+ await f.append({kind:'retry.send_intent',sourceUrl:url,operationId:'source-only',promptKey:prompt});
+ const held=f.defer((v:any)=>v['chatgpt-journal:meta']?.active?.[7]?.consumed===true);
+ const grant=f.append({kind:'send.authorized',sourceUrl:url,operationId:'source-only'});await held.observed;
+ const request=f.append({kind:'request.started',sourceUrl:requestSource,tabId:8,requestId:'unseen-tab'}, {});
+ held.release();
+ if(conflicts)await assert.rejects(grant,(e:any)=>e.code==='RETRY_GRANT_RACE');
+ else assert.equal((await grant).ok,true,'a verified different source chat remains non-conflicting');
+ await request;
+}
 {
  const f=await fixture(),prompt=path+'|retry-user';
  await f.append({kind:'retry.planned',sourceUrl:url,operationId:'gap-grant',promptKey:prompt});
