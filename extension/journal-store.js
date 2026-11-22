@@ -4,8 +4,31 @@
 // No automatic deletion: a failed write stops automatic sends rather than hiding a gap.
 const JOURNAL_PREFIX = 'chatgpt-journal:event:';
 const JOURNAL_META = 'chatgpt-journal:meta';
+const GOAL_CAS_RECEIPT = 'chatgpt-goal-cas:provisional';
 let journalQueue = Promise.resolve();
 let journalFailure = '';
+// Observe ingress synchronously, scoped both to the exact tab and canonical
+// conversation. An unidentifiable source may belong to any conversation.
+const journalIngressByTab = new Map(), journalIngressByChat = new Map();
+let journalUnknownIngress = 0;
+function recordJournalIngress(event,tab) {
+  const tabId=tab?.id??event?.tabId,chat=retryDraftUrl(event?.sourceUrl||tab?.url||event?.url||'');
+  if(Number.isInteger(tabId)&&tabId>=0)journalIngressByTab.set(tabId,(journalIngressByTab.get(tabId)||0)+1);
+  else journalUnknownIngress++;
+  if(chat)journalIngressByChat.set(chat,(journalIngressByChat.get(chat)||0)+1);
+  else journalUnknownIngress++;
+}
+function journalIngressSnapshot(tabId,url) {
+  return {tabId,url,tab:journalIngressByTab.get(tabId)||0,chat:journalIngressByChat.get(url)||0,unknown:journalUnknownIngress};
+}
+function journalIngressChanged(snapshot,tabId,url) {
+  return !snapshot||snapshot.tabId!==tabId||snapshot.url!==url||snapshot.tab!==(journalIngressByTab.get(tabId)||0)||
+    snapshot.chat!==(journalIngressByChat.get(url)||0)||snapshot.unknown!==journalUnknownIngress;
+}
+async function hasProvisionalGoalCAS() {
+  const value=(await chrome.storage.local.get(GOAL_CAS_RECEIPT))[GOAL_CAS_RECEIPT];
+  return value!==undefined&&value!==null;
+}
 const RETRY_STATE_WINDOW_MS = 120000;
 const RETRY_MIGRATION_BATCH_SIZE = 50;
 function journalChatId(value) {
@@ -222,9 +245,62 @@ async function retryMetadata(meta) {
   return {...meta, retrySchema: 1, retryByChat,handoffSourceClaims,handoffSourceClaimSchema:1,
     retrySendClaims,retryConsumedOperations,retrySendClaimSchema:2};
 }
-function appendJournal(event, tab = {}) {
+// Called only while holding journalQueue. Never recurse into appendJournal or
+// readJournal here: a pending writer would otherwise deadlock its recovery.
+async function recoverProvisionalGoalCASLocked() {
+  const receipt=(await chrome.storage.local.get(GOAL_CAS_RECEIPT))[GOAL_CAS_RECEIPT];
+  if(receipt===null||receipt===undefined)return {ok:true,recovered:false};
+  const failure=()=>Object.assign(new Error('Невозможно безопасно восстановить незавершённое состояние Goal'),
+    {journalPolicy:true,code:'GOAL_CAS_RECOVERY_UNCERTAIN'});
+  const url=retryDraftUrl(receipt.url),goalKey=url&&'chatgpt-goal:'+url;
+  if(typeof receipt!=='object'||Array.isArray(receipt)||receipt.schema!==1||!url||url!==receipt.url||!Number.isInteger(receipt.tabId)||receipt.tabId<0||
+      !receipt.expected||!receipt.next||typeof receipt.expected.id!=='string'||!receipt.expected.id||
+      receipt.expected.id!==receipt.next.id||receipt.expected.url!==url||receipt.next.url!==url||
+      !Number.isSafeInteger(receipt.sequence)||receipt.sequence<1||typeof receipt.kind!=='string')throw failure();
+  const eventKey=`${JOURNAL_PREFIX}${String(receipt.sequence).padStart(12,'0')}`;
+  const current=await chrome.storage.local.get([goalKey,JOURNAL_META,eventKey]);
+  const meta=current[JOURNAL_META],event=current[eventKey];
+  if(JSON.stringify(current[goalKey])!==JSON.stringify(receipt.next)||!Number.isSafeInteger(meta?.sequence)||
+      meta.sequence<receipt.sequence||event?.sequence!==receipt.sequence||event.kind!==receipt.kind||
+      event.goalId!==receipt.expected.id||event.tabId!==receipt.tabId||retryDraftUrl(event.sourceUrl)!==url)throw failure();
+  // Later requests may already be queued or recorded. Preserve all metadata
+  // and events, while rejecting a gap which could hide a conflicting write.
+  for(let first=receipt.sequence+1;first<=meta.sequence;first+=RETRY_MIGRATION_BATCH_SIZE) {
+    const keys=[];
+    for(let n=first;n<=Math.min(meta.sequence,first+RETRY_MIGRATION_BATCH_SIZE-1);n++)
+      keys.push(`${JOURNAL_PREFIX}${String(n).padStart(12,'0')}`);
+    const rows=await chrome.storage.local.get(keys);
+    if(keys.some((key,i)=>!rows[key]||rows[key].sequence!==first+i))throw failure();
+  }
+  const fresh=await chrome.storage.local.get([goalKey,JOURNAL_META,GOAL_CAS_RECEIPT]);
+  if(JSON.stringify(fresh[goalKey])!==JSON.stringify(receipt.next)||JSON.stringify(fresh[JOURNAL_META])!==JSON.stringify(meta)||
+      JSON.stringify(fresh[GOAL_CAS_RECEIPT])!==JSON.stringify(receipt))throw failure();
+  const sequence=meta.sequence+1,rollback={kind:'goal.completion_rolled_back',schema:1,sequence,
+    recordedAt:Date.now(),sourceUrl:url,sourceChatId:journalChatId(url),tabId:receipt.tabId,goalId:receipt.expected.id,
+    previousSequence:receipt.sequence,version:chrome.runtime.getManifest().version};
+  await chrome.storage.local.set({[goalKey]:receipt.expected,[`${JOURNAL_PREFIX}${String(sequence).padStart(12,'0')}`]:rollback,
+    [JOURNAL_META]:{...meta,sequence,lastAt:rollback.recordedAt},[GOAL_CAS_RECEIPT]:null});
+  return {ok:true,recovered:true};
+}
+function recoverProvisionalGoalCAS() {
+  const recovery=journalQueue.catch(()=>{}).then(recoverProvisionalGoalCASLocked);
+  journalQueue=recovery;
+  return recovery.catch(error=>{if(!error.journalPolicy){journalFailure=String(error?.message||error);console.error('Goal CAS recovery failed',journalFailure);}throw error;});
+}
+function appendJournal(event, tab = {}, options = {}) {
+  if(event?.kind==='request.started')recordJournalIngress(event,tab);
+  const enqueueTabId=tab.id??event.tabId??null;
+  const enqueueUrl=retryDraftUrl(options?.goalCAS?.url||event.sourceUrl||tab.url||event.url||'');
+  const ingressAtEnqueue=journalIngressSnapshot(enqueueTabId,enqueueUrl);
   const write = journalQueue.catch(() => {}).then(async () => {
     const savedMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+    const goalCAS=options?.goalCAS;
+    const existingGoalCAS=goalCAS?(await chrome.storage.local.get(GOAL_CAS_RECEIPT))[GOAL_CAS_RECEIPT]:null;
+    const goalFenceChanged=()=>Object.assign(new Error('Goal или журнал изменились до подтверждения ответа'),{journalPolicy:true,code:'GOAL_FENCE_CHANGED'});
+    // A CAS refusal must not even write a legacy metadata migration. The
+    // caller can retry after normal journal initialization has completed.
+    if(goalCAS&&(!savedMeta||savedMeta.retrySchema!==1||savedMeta.handoffSourceClaimSchema!==1||
+        savedMeta.retrySendClaimSchema!==2||journalFailure||existingGoalCAS!==null&&existingGoalCAS!==undefined))throw goalFenceChanged();
     const meta = retryDraftMetadata(await retryMetadata(savedMeta || { sequence: 0, startedAt: Date.now() }));
     // Save a legacy replay even if the requested operation is then refused.
     // This checkpoint changes metadata only, under the same serialized writer.
@@ -235,8 +311,43 @@ function appendJournal(event, tab = {}) {
     tab = {...tabs[tabId],...tab};
     if (tab.id != null && tab.url) tabs[tab.id] = {id:tab.id,url:tab.url,title:tab.title,windowId:tab.windowId};
     const sourceUrl = event.sourceUrl && event.sourceUrl !== 'https://chatgpt.com' ? event.sourceUrl : tab.url || event.sourceUrl || event.url || '';
+    async function verifyGoalFence(fence,url,anchorTabId) {
+      const canonical=retryDraftUrl(url);
+      if(!canonical||canonical!==url||!Number.isInteger(anchorTabId)||anchorTabId<0||
+          !fence||typeof fence.requestId!=='string'||!fence.requestId||typeof fence.userId!=='string'||!fence.userId||
+          !Number.isFinite(fence.startedAt)||!Number.isSafeInteger(fence.requestSequence)||fence.requestSequence<1||
+          !Number.isSafeInteger(meta.sequence)||fence.requestSequence>meta.sequence||journalFailure)return false;
+      for(let first=fence.requestSequence;first<=meta.sequence;first+=RETRY_MIGRATION_BATCH_SIZE) {
+        const keys=[];
+        for(let n=first;n<=Math.min(meta.sequence,first+RETRY_MIGRATION_BATCH_SIZE-1);n++)
+          keys.push(`${JOURNAL_PREFIX}${String(n).padStart(12,'0')}`);
+        const values=await chrome.storage.local.get(keys);
+        for(let i=0;i<keys.length;i++) {
+          const entry=values[keys[i]],number=first+i;
+          if(!entry||entry.sequence!==number||number>fence.requestSequence&&entry.previousWriteError)return false;
+          if(number===fence.requestSequence) {
+            if(entry.kind!=='request.started'||entry.tabId!==anchorTabId||retryDraftUrl(entry.sourceUrl)!==canonical||
+                entry.requestId!==fence.requestId||entry.eventAt!==fence.startedAt)return false;
+          } else if(entry.kind==='request.started'&&(entry.tabId===anchorTabId||retryDraftUrl(entry.sourceUrl)===canonical||
+              retryDraftUrl(entry.observedTabUrl)===canonical))return false;
+        }
+      }
+      return true;
+    }
+    let goalCASKey=null;
+    if(goalCAS) {
+      const {url,expected,next,fence}=goalCAS;
+      if(!['goal.answer_continue','goal.answer_complete','goal.answer_blocked','goal.answer_budget','goal.answer_deadline','goal.answer_unverified'].includes(event.kind)||
+          retryDraftUrl(sourceUrl)!==url||!expected||!next||expected.url!==url||next.url!==url||expected.id!==next.id||
+          event.goalId!==expected.id||JSON.stringify(expected.queuedResumeFence)!==JSON.stringify(fence)||
+          next.operation&&JSON.stringify(next.operation.queuedResumeFence)!==JSON.stringify(fence)||
+          !await verifyGoalFence(fence,url,tabId))throw goalFenceChanged();
+      goalCASKey='chatgpt-goal:'+url;
+      if(JSON.stringify((await chrome.storage.local.get(goalCASKey))[goalCASKey])!==JSON.stringify(expected))throw goalFenceChanged();
+    }
     const targetUrl = event.targetUrl || '';
     const active = { ...meta.active };
+    let protectedGoalGrant=false;
     const retrySendClaims = { ...meta.retrySendClaims };
     const retryConsumedOperations = { ...meta.retryConsumedOperations };
     const retryReleasedOperations = { ...meta.retryReleasedOperations };
@@ -420,6 +531,13 @@ function appendJournal(event, tab = {}) {
       // competing retries must also consult that durable operation claim.
       if(event.kind==='goal.send_intent'&&chatUrl&&retryPreparingByChat[chatUrl])
         throw Object.assign(new Error('В чате уже подготавливается восстановление ошибки; Goal не может параллельно отправлять'),{journalPolicy:true});
+      if(event.kind==='goal.send_intent'&&chatUrl) {
+        const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
+        const fence=goal?.operation?.queuedResumeFence;
+        if((fence||event.queuedResumeFence)&&(!fence||goal.id!==event.goalId||goal.operation.id!==operationId||
+            goal.operation.tabId!==tabId||JSON.stringify(fence)!==JSON.stringify(event.queuedResumeFence)||
+            await hasProvisionalGoalCAS()||!await verifyGoalFence(fence,chatUrl,tabId)))throw goalFenceChanged();
+      }
       if(chatUrl&&event.kind==='handoff.sending') {
         const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
         if(goal?.operation&&['preparing','sending','clicked','blocked','stopped'].includes(goal.phase))
@@ -433,7 +551,8 @@ function appendJournal(event, tab = {}) {
           (entry.chatUrl||retryDraftUrl(meta.tabs?.[owner]?.url))===chatUrl))
         throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
-        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,retryText:event.text,attemptId:event.attemptId||''}:{})};
+        ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,retryText:event.text,attemptId:event.attemptId||''}:{}),
+        ...(event.kind==='goal.send_intent'&&event.queuedResumeFence?{queuedResumeFence:event.queuedResumeFence,anchorTabId:tabId}:{})};
     }
     if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
       const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
@@ -459,6 +578,14 @@ function appendJournal(event, tab = {}) {
     if (event.kind === 'send.authorized') {
       if(meta.retryDraftClaims?.[operationId])throw Object.assign(new Error('Черновик уже передан на восстановление; отправка отменена'),{journalPolicy:true});
       if (!active[tabId] || active[tabId].operationId !== operationId || active[tabId].consumed) throw Object.assign(new Error('Повторная автоматическая отправка запрещена'),{journalPolicy:true});
+      if(active[tabId].kind==='goal.send_intent'&&active[tabId].queuedResumeFence) {
+        const intent=active[tabId],goal=(await chrome.storage.local.get('chatgpt-goal:'+intent.chatUrl))['chatgpt-goal:'+intent.chatUrl];
+        if(retryDraftUrl(sourceUrl)!==intent.chatUrl||goal?.id!==intent.goalId||goal.operation?.id!==operationId||
+            goal.operation?.tabId!==tabId||JSON.stringify(goal.operation?.queuedResumeFence)!==JSON.stringify(intent.queuedResumeFence)||
+            await hasProvisionalGoalCAS()||
+            !await verifyGoalFence(intent.queuedResumeFence,intent.chatUrl,intent.anchorTabId))throw goalFenceChanged();
+        protectedGoalGrant=true;
+      }
       if(active[tabId].kind==='retry.send_intent') {
         const intent=active[tabId];
         if(!intent.sourceUrl||intent.sourceUrl!==retryDraftUrl(sourceUrl)||typeof intent.promptKey!=='string'||!intent.promptKey)throw Object.assign(new Error('Исходный запрос автоповтора не подтверждён'),{journalPolicy:true});
@@ -553,10 +680,32 @@ function appendJournal(event, tab = {}) {
       observedTabUrl: tab.url || '', observedChatId: journalChatId(tab.url) };
     if (event.kind === 'tab.closed') delete tabs[tabId];
     const retryDraftByChat=staleDraftSave?meta.retryDraftByChat:reduceRetryDraft(meta.retryDraftByChat,entry,meta.retryByChat?.[journalChatId(entry.sourceUrl)]?.manualStartedAt);
-    await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
-      [JOURNAL_META]: { ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, handoffNavigationClaims, requests, tabs, lastAt: entry.recordedAt,
+    const protectedUrl=goalCAS?.url||(protectedGoalGrant?active[tabId]?.chatUrl:null);
+    if(protectedUrl&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl))throw goalFenceChanged();
+    const updatedMeta={ ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, handoffNavigationClaims, requests, tabs, lastAt: entry.recordedAt,
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
-        retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims } });
+        retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims };
+    const provisional=goalCAS?{schema:1,url:goalCAS.url,tabId,sequence,kind:event.kind,expected:goalCAS.expected,next:goalCAS.next}:null;
+    await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
+      [JOURNAL_META]: updatedMeta,...(goalCASKey?{[goalCASKey]:goalCAS.next,[GOAL_CAS_RECEIPT]:provisional}:{}) });
+    if(goalCAS&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl)) {
+      // An interrupt/crash before this compensation leaves the provisional
+      // receipt in the same atomic write as next, so startup can restore it.
+      await recoverProvisionalGoalCASLocked();
+      throw goalFenceChanged();
+    }
+    // The synchronous check above is the CAS linearization point. New ingress
+    // afterwards is later than completion and is queued before the next grant.
+    // If cleanup fails or the worker dies before it, startup conservatively
+    // restores expected while the provisional receipt still exists.
+    if(goalCAS) {
+      try { await chrome.storage.local.set({[GOAL_CAS_RECEIPT]:null}); }
+      catch(error) {throw Object.assign(new Error('Не удалось завершить сохранение Goal: '+String(error?.message||error)),
+        {journalPolicy:true,code:'GOAL_CAS_CLEANUP_UNKNOWN'});}
+    }
+    // A grant already recorded while ingress occurred must stay consumed: no
+    // page click has happened, but replaying this authorization is unsafe.
+    if(protectedGoalGrant&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl))throw goalFenceChanged();
     journalFailure = '';
     return { ok: !staleDraftSave, ...(staleDraftSave?{duplicate:true}:{}), ...(superseded?{superseded:true}:{}), sequence, sourceUrl:entry.sourceUrl, operationId:entry.operationId,
       ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)],draft:claimedDraft.draft}}:{}) };

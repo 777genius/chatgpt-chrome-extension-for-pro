@@ -19,8 +19,17 @@ importScripts('goal-policy.js');
 importScripts('goal-lineage.js');
 importScripts('goal-store.js');
 importScripts('goal-request-proof.js');
-const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,appendJournal:async(event,tab)=>{
-  const result=await appendJournal(event,tab);
+let journalStartupRecovery=null,journalStartupRecovered=false;
+function ensureJournalStartupRecovery() {
+  if(journalStartupRecovered)return Promise.resolve();
+  if(!journalStartupRecovery)journalStartupRecovery=recoverProvisionalGoalCAS().then(()=>initializeJournal('worker-start')).then(()=>{
+    journalStartupRecovered=true;
+  }).catch(error=>{journalStartupRecovery=null;throw error;});
+  return journalStartupRecovery;
+}
+const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:chrome.tabs,
+  ready:()=>ensureJournalStartupRecovery().then(()=>recoverProvisionalGoalCAS()),appendJournal:async(event,tab,options)=>{
+  const result=await appendJournal(event,tab,options);
   if(event.kind==='goal.marker_pending'&&Number.isInteger(tab?.id))void chrome.tabs.sendMessage(tab.id,{type:'CHATGPT_GOAL_MARKER_PENDING',url:event.sourceUrl}).catch(()=>{});
   return result;
 },
@@ -33,7 +42,7 @@ const goalController=ChatGPTGoalStore.create({storage:chrome.storage.local,tabs:
       await renameSavedHandoff(tabId,handoff.id,{goalOperationId:goal.operation.id});
   }});
 
-initializeJournal('worker-start').catch(console.error);
+void ensureJournalStartupRecovery().catch(console.error);
 
 const OFFSCREEN_DOCUMENT = 'offscreen.html';
 const RESPONSE_PREVIEW_MAX_CHARS = 260;
@@ -273,6 +282,7 @@ async function seeVisibleResult(url,receipt) {
 }
 
 async function signalConversationRequestEvent(tabId,message) {
+  try { await ensureJournalStartupRecovery(); } catch { return; }
   try {
     await chrome.tabs.sendMessage(tabId, message);
     return;
@@ -305,10 +315,17 @@ async function installErrorWatchers() {
   }));
 }
 const watcherBootstrap=chrome.storage.session?ChatGPTWatcherBootstrap.create({session:chrome.storage.session,version:chrome.runtime.getManifest().version,install:installErrorWatchers}):null;
-function activateErrorWatchers(){return watcherBootstrap?watcherBootstrap.ensure():installErrorWatchers();}
-chrome.runtime.onInstalled.addListener(() => activateErrorWatchers().catch(console.warn));
-chrome.runtime.onStartup.addListener(() => activateErrorWatchers().catch(console.warn));
-if(watcherBootstrap)void activateErrorWatchers().catch(console.warn);
+function activateErrorWatchers(){return ensureJournalStartupRecovery().then(()=>watcherBootstrap?watcherBootstrap.ensure():installErrorWatchers());}
+let watcherRetryTimer=null;
+function scheduleErrorWatchers(){
+  void activateErrorWatchers().then(()=>{if(watcherRetryTimer!==null){clearTimeout(watcherRetryTimer);watcherRetryTimer=null;}}).catch(error=>{
+    console.warn(error);
+    if(watcherRetryTimer===null)watcherRetryTimer=setTimeout(()=>{watcherRetryTimer=null;scheduleErrorWatchers();},5000);
+  });
+}
+chrome.runtime.onInstalled.addListener(scheduleErrorWatchers);
+chrome.runtime.onStartup.addListener(scheduleErrorWatchers);
+if(watcherBootstrap)scheduleErrorWatchers();
 chrome.webRequest.onBeforeRequest.addListener((details) => {
   if (!isAnswerStreamRequest(details)) return;
   const receipt=statusReceipt();

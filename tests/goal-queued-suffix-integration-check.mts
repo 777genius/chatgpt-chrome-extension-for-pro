@@ -13,7 +13,12 @@ const now=Date.now(),sentAt=now+1000;
 let clock=now;
 const storage={async get(k:string){return {[k]:structuredClone(data[k])}},async set(v:any){Object.assign(data,structuredClone(v))}};
 const tabs={async get(id:number){return{id,url}},async sendMessage(id:number,message:any){if(message.type==='CHATGPT_GOAL_READINESS')return{ok:true,idle:!busy};sent.push({id,message});return{ok:true}}};
-const store=create({storage,tabs,appendJournal:async(e:any)=>events.push(structuredClone(e)),now:()=>clock,uuid:()=>`operation-${++sequence}`});
+const store=create({storage,tabs,appendJournal:async(e:any,_tab:any,options:any)=>{
+ if(options?.goalCAS){const cas=options.goalCAS,key='chatgpt-goal:'+cas.url;
+  if(JSON.stringify(data[key])!==JSON.stringify(cas.expected))throw Object.assign(new Error('Goal changed'),{code:'GOAL_FENCE_CHANGED'});
+  data[key]=structuredClone(cas.next);
+ }
+ events.push(structuredClone(e));return {ok:true};},now:()=>clock,uuid:()=>`operation-${++sequence}`});
 await store.start({url,tabId:7,goal:'Complete the isolated task',rules:'',maxContinuations:3,maxMinutes:60});
 let g=data['chatgpt-goal:'+url],op=g.operation;
 await store.intent({url,tabId:7,id:g.id,operationId:op.id,text:op.text,baselineKey:'/c/queued-suffix-test|previous'});

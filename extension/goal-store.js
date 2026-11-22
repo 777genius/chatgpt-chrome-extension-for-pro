@@ -3,12 +3,12 @@
 // Chrome worker owns the only durable Goal coordinator. No page script may
 // authorize itself to click; the journal's consumed send grant is authoritative.
 (function(root) {
-  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),beforeDispatch=async record=>{}}) {
+  function create({storage,tabs,appendJournal,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),ready=async()=>{},beforeDispatch=async record=>{}}) {
     const policy=root.ChatGPTGoalPolicy;
     if(!policy)throw Error('Goal policy is not loaded');
     let writes=Promise.resolve();
     const serialize=fn=>{
-      const task=writes.catch(()=>{}).then(fn);
+      const task=writes.catch(()=>{}).then(async()=>{await ready();return fn();});
       writes=task;
       return task;
     };
@@ -423,10 +423,10 @@
       const {operation, ...safe}=record;
       return {...safe,operation:operation?{id:operation.id,kind:operation.kind,status:operation.status,createdAt:operation.createdAt}:null};
     }
-    async function event(kind,record,tabId,details={}) {
-      await appendJournal({kind:'goal.'+kind,sourceUrl:record.url,operationId:record.operation?.id||record.id,
+    async function event(kind,record,tabId,details={},options) {
+      return appendJournal({kind:'goal.'+kind,sourceUrl:record.url,operationId:record.operation?.id||record.id,
         goalId:record.id,phase:record.phase,continuations:record.continuations,reason:record.reason||'',...details},
-        {id:tabId,url:record.url});
+        {id:tabId,url:record.url},options);
     }
     function operation(record,kind,tabId,time) {
       if(kind==='continuation'&&record.continuations>=record.maxContinuations)
@@ -672,7 +672,7 @@
           operation:{...record.operation,status:'intent',baselineKey:typeof baselineKey==='string'?baselineKey:''}};
         await save(next);
         await appendJournal({kind:'goal.send_intent',sourceUrl:record.url,operationId,
-          goalId:id,text,promptKey:baselineKey||''},{id:tabId,url:record.url});
+          goalId:id,text,promptKey:baselineKey||'',...(record.operation.queuedResumeFence?{queuedResumeFence:record.operation.queuedResumeFence}:{})},{id:tabId,url:record.url});
         return {ok:true};
       });
     }
@@ -831,9 +831,17 @@
           next={...next,phase:'stopped',reason:outcome==='budget'?'Лимит продолжений исчерпан':'Время Goal истекло'};
         else if(record.phase==='paused')next={...next,pendingCompletion:{key:completionKey,promptKey},reason:'Ожидает возобновления'};
         else next={...next,phase:'preparing',operation:operation(record,'continuation',tabId,now()),pendingCompletion:null,reason:''};
-        await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,
-          {completionKey,promptKey,nativeVerified:nativeVerified===true,exactMarker:outcome==='complete',blockedMarker:outcome==='blocked'});
-        await save(next);
+        if(record.queuedResumeFence&&next.operation)next={...next,operation:{...next.operation,queuedResumeFence:record.queuedResumeFence}};
+        const details={completionKey,promptKey,nativeVerified:nativeVerified===true,exactMarker:outcome==='complete',blockedMarker:outcome==='blocked'};
+        if(record.queuedResumeFence) {
+          try {
+            await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,details,
+              {goalCAS:{url:target,expected:record,next,fence:record.queuedResumeFence}});
+          } catch(error) {
+            if(error?.code==='GOAL_FENCE_CHANGED')return {ok:false};
+            throw error;
+          }
+        } else {await event(outcome==='continue'?'answer_continue':'answer_'+outcome,next,tabId,details);await save(next);}
         return {ok:true,record:next,dispatch:next.phase==='preparing'};
       });
       if(result.dispatch)await deliver(result.record);

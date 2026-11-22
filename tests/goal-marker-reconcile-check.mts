@@ -10,7 +10,7 @@ function fixture(){
  const goal:V={schema:1,id:'goal',url,originUrl:url,goal:'Complete synthetic objective',rules:'',phase:'waiting',operation:null,
   expectedPromptKey:promptKey,lastCompletionKey:'',markerPending,continuations:2,maxContinuations:30,maxMinutes:1440,startedAt:500,deadlineAt:100000};
  const data:V={['chatgpt-goal:'+url]:goal},messages:V[]=[],notices:V[]=[],events:V[]=[],journal:V[]=[];
- let live=url,after:(()=>void)|null=null;
+ let live=url,after:(()=>void)|null=null,beforeCAS:(()=>void)|null=null;
  const checkpoint:V={state:'active',url,requestId:'request',startedAt:500,promptKey};
  const request:V={url,requestId:'request',startedAt:500,receipt:{epoch:'e',order:1}};
  const view:V={url,revision:1,status:{kind:'loading',eventAt:500,receipt:{epoch:'e',order:1}}};
@@ -30,12 +30,19 @@ function fixture(){
   broadcastChatStatus:async()=>{},seeVisibleResult:async()=>{},cleanSessionTitle:(s:string)=>s,
   emitBoth:async(n:V)=>notices.push(n),ChatGPTHandoffTitle:{chatUrl:(s:string)=>s}});
  for(const f of ['goal-policy.js','goal-store.js'])runInContext(readFileSync('extension/'+f,'utf8'),ctx);
- ctx.deps={storage,tabs,appendJournal:async(e:V)=>{events.push(e);return {ok:true};},now:()=>1000,uuid:()=> 'continuation'};
+ ctx.deps={storage,tabs,appendJournal:async(e:V,_tab:V,options?:V)=>{
+  if(options?.goalCAS){const cas=options.goalCAS,key='chatgpt-goal:'+cas.url;
+   beforeCAS?.();
+   if(JSON.stringify(data[key])!==JSON.stringify(cas.expected)||journal.some(x=>x.kind==='request.started'&&x.sequence>cas.fence.requestSequence&&(x.tabId===7||x.sourceUrl===url)))
+    throw Object.assign(new Error('fence changed'),{code:'GOAL_FENCE_CHANGED'});
+   data[key]=structuredClone(cas.next);
+  }
+  events.push(e);return {ok:true};},now:()=>1000,uuid:()=> 'continuation'};
  const store=runInContext('ChatGPTGoalStore.create(deps)',ctx);ctx.goalController=store;
  runInContext(source,ctx);
  const waitingSource=worker.slice(worker.indexOf('async function reconcileWaitingGoalAnswer('),worker.indexOf('async function reconcileCompletedSourceHandoff('));
  runInContext(waitingSource,ctx);
- return{data,native,checkpoint,request,view,messages,notices,events,journal,run:()=>runInContext(`reconcileGoalMarker(7,'${url}')`,ctx),after:(fn:()=>void)=>{after=fn;},route:(s:string)=>{live=s;}};
+ return{data,native,checkpoint,request,view,messages,notices,events,journal,run:()=>runInContext(`reconcileGoalMarker(7,'${url}')`,ctx),after:(fn:()=>void)=>{after=fn;},beforeCAS:(fn:()=>void)=>{beforeCAS=fn;},route:(s:string)=>{live=s;}};
 }
 {
  const h=fixture();assert.equal((await h.run()).pending,true);
@@ -75,3 +82,13 @@ console.log('Goal marker reconciliation: settle-before-stop, zero early notices/
  assert.equal(h.messages.length,0);assert.equal(await h.run(),null,'settled marker is never replayed');
 }
 console.log('Queued resume marker: same-request journal fence and actual Goal controller passed.');
+
+{
+ const h=fixture(),fence={requestId:'request',startedAt:500,userId:'native-user',requestSequence:1};
+ h.data['chatgpt-goal:'+url].queuedResumeFence=fence;
+ h.journal.push({sequence:1,kind:'request.started',tabId:7,sourceUrl:url,requestId:'request',eventAt:500});
+ Object.assign(h.native,{goalRawExact:true,goalMarkerPending:false});
+ h.beforeCAS(()=>h.journal.push({sequence:2,kind:'request.started',tabId:8,sourceUrl:url,requestId:'newer',eventAt:700}));
+ assert.equal((await h.run()).pending,true,'a new request between native verification and Goal commit keeps the marker pending');
+ assert.equal(h.data['chatgpt-goal:'+url].phase,'waiting');assert.equal(h.messages.length,0);assert.equal(h.notices.length,0);
+}

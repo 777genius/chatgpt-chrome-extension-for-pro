@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);require('../extension/goal-policy.js');
+const {create}=require('../extension/goal-store.js');
+const url='https://chatgpt.com/c/startup-barrier',record={id:'goal',url,phase:'waiting',deadlineAt:Date.now()+60000,operation:null};
+let reads=0,release:()=>void=()=>{};const gate=new Promise<void>(resolve=>{release=resolve});
+const storage={get:async(k:string)=>{reads++;return {[k]:record}},set:async()=>{}};
+const store=create({storage,tabs:{},appendJournal:async()=>{},ready:()=>gate});
+const pending=store.get(url);await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,0,'Goal access waits for durable recovery');
+release();assert.equal((await pending).id,'goal');assert.equal(reads,1);
+const failed=create({storage,tabs:{},appendJournal:async()=>{},ready:async()=>{throw new Error('journal recovery failed')}});
+await assert.rejects(()=>failed.get(url),/journal recovery failed/);assert.equal(reads,1,'failed recovery prevents reads and dispatch');
+console.log('Goal startup barrier: recovery precedes reads and failed recovery prevents access.');
