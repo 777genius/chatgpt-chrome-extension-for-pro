@@ -112,9 +112,18 @@ assert.equal((await send(10,'wrong-source')).ok,false,'caller cannot move a pers
 
 addPage(11,'https://chatgpt.com/c/write-fixture');
 await intent(11,'retry-write-failure');failWrite=true;
+const clicksBeforeWriteFailure=clicks.length;
 assert.equal((await send(11,'retry-write-failure')).ok,false);
 failWrite=false;
-assert.equal((await send(11,'retry-write-failure')).clicked,true,'failed atomic claim write grants no click and consumes no durable authorization');
+assert.equal((await send(11,'retry-write-failure')).ok,false,
+ 'unresolved failed atomic claim write never authorizes the same automatic send');
+await append(11,'watcher.started','write-gap-reconciled');
+assert.equal((await send(11,'retry-write-failure')).ok,false,
+ 'a durable previousWriteError marker still fences the old retry plan');
+assert.equal(clicks.length,clicksBeforeWriteFailure,'a write gap cannot cause a second click');
+boot();
+assert.equal((await send(11,'retry-write-failure')).ok,false,
+ 'restart cannot turn a refused journal-gap retry into a new send');
 
 addPage(12,'https://chatgpt.com/c/no-click-fixture');
 await intent(12,'retry-no-click');pages.get(12)!.editor.textContent='Owner changed draft';
