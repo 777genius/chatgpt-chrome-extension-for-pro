@@ -541,6 +541,31 @@ for(const url of [root,saved])for(const delay of [9999,10001,60000]) {
  assert.equal(env.messages.length,0,'neither delayed consent nor native adoption sends a message');
  assert.deepEqual(env.data[draftKey],draft,'draft text and attachments are unchanged');
 }
+// A trusted send can precede durable Arm creation, not just its reply.
+{
+ const env=fixture(),actionAt=1000000,eventAt=1000100,requestAt=1000120;
+ env.clock(1000500); // The worker writes Arm after the native request started.
+ const armed=await env.store.composerArm({tabId:7,url:root,armActionAt:actionAt});
+ assert.equal(armed.record.armedAt,1000500);
+ assert.equal(armed.record.armActionAt,actionAt,'original Arm click is preserved with a bounded timestamp');
+ const request={tabId:7,armId:armed.record.id,url:root,requestId:'pre-write-request',startedAt:requestAt,
+   submission:{userId:'native-user-7',userText:objective}};
+ assert.equal((await env.store.composerRequest(request)).ok,true,'early request attaches after its Arm record exists');
+ const consent=await env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,eventAt,
+   text:objective,baselineKey:''});
+ assert.equal(consent.record.request.requestId,request.requestId,'the original event binds its exact request');
+ const bound=await env.store.composerBind({...env.proof(armed.record.id),requestId:request.requestId,startedAt:requestAt});
+ assert.equal(bound.record.phase,'bound');
+ assert.equal(env.data[goalKey(saved)].phase,'waiting','native verification tracks the pre-write first message');
+ assert.equal(env.messages.length,0,'the native first message is never resent');
+}
+{
+ const env=fixture();env.clock(1020000);
+ const armed=await env.store.composerArm({tabId:7,url:root,armActionAt:1000000});
+ assert.equal(armed.record.armActionAt,armed.record.armedAt,'unreasonably old Arm timestamps receive no early-send privilege');
+ await assert.rejects(()=>env.store.composerIntent({tabId:7,url:root,armId:armed.record.id,
+   eventAt:1000100,text:objective,baselineKey:''}),/свежему/);
+}
 // Without prior request evidence, keep the original ten-second receipt gate.
 for(const delay of [9999,10001,60000]) {
  const env=fixture(),armed=await env.store.composerArm({tabId:7,url:root});env.clock(1000000+delay);
