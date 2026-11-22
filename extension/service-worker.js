@@ -329,6 +329,20 @@ function scheduleRequestStartRetry() {
     requestStartRetryTimer=null;requestStartRetries++;void resumePendingRequestStarts();
   },5000);
 }
+async function stoppedGoalBlocksRequest(goal,startedAt) {
+  if(!goal||(goal.phase!=='stopped'&&!goal.stopRequested))return false;
+  if(!Number.isFinite(startedAt))return true;
+  if(Number.isFinite(goal.stoppedAt))return startedAt<=goal.stoppedAt;
+  // Pre-timestamp saved Goals need their exact durable Stop record; only
+  // this legacy fallback reads the full journal.
+  const journal=await readJournal();
+  if(!journal?.ok||journal.storageError||!Array.isArray(journal.events))return true;
+  const stop=journal.events.filter(row=>row.goalId===goal.id&&
+    ['goal.stopped','goal.stop_requested'].includes(row.kind)).at(-1);
+  if(!stop||!Number.isFinite(stop.recordedAt)||
+      journal.events.some(row=>row.sequence>stop.sequence&&row.previousWriteError))return true;
+  return startedAt<=stop.recordedAt;
+}
 async function requestStartIsCurrent(item) {
   const {tabId,sourceUrl,message}=item,root='https://chatgpt.com/';
   if(!Number.isInteger(tabId)||!sourceUrl||sourceUrl!==root&&ChatGPTHandoffTitle.chatUrl(sourceUrl)!==sourceUrl||
@@ -342,7 +356,7 @@ async function requestStartIsCurrent(item) {
   if(request.url&&request.url!==root&&ChatGPTHandoffTitle.chatUrl(request.url)!==(target||sourceUrl))return false;
   if(target) {
     const goalKey='chatgpt-goal:'+target,goal=(await chrome.storage.local.get(goalKey))[goalKey];
-    if(goal&&(goal.stopRequested||goal.phase==='stopped'))return false;
+    if(await stoppedGoalBlocksRequest(goal,message.startedAt))return false;
   }
   if(sourceUrl!==root)return {ok:true,sourceUrl,targetUrl:sourceUrl};
   const requestSnapshot={requestId:request.requestId,startedAt:request.startedAt,url:request.url,tabId:request.tabId,operationId:request.operationId};
@@ -380,7 +394,7 @@ async function requestStartIsCurrent(item) {
       JSON.stringify(finalCheckpoint)!==JSON.stringify(checkpoint)||
       !finalRequest||Object.keys(requestSnapshot).some(key=>finalRequest[key]!==requestSnapshot[key]))return false;
   const goalKey='chatgpt-goal:'+allocatedUrl,finalGoal=(await chrome.storage.local.get(goalKey))[goalKey];
-  if(finalGoal&&(finalGoal.stopRequested||finalGoal.phase==='stopped'))return false;
+  if(await stoppedGoalBlocksRequest(finalGoal,message.startedAt))return false;
   if(ChatGPTHandoffTitle.chatUrl((await chrome.tabs.get(tabId).catch(()=>null))?.url)!==allocatedUrl)return false;
   return {ok:true,sourceUrl,targetUrl:allocatedUrl};
 }
@@ -425,7 +439,13 @@ async function signalConversationRequestEvent(tabId,message) {
       await persistPendingRequestStarts();
     }
     await ensureJournalStartupRecovery();
-    await flushPendingRequestStarts();
+    try {await flushPendingRequestStarts();}
+    catch(error) {
+      // Terminal notices do not live in the start queue. A transient queue
+      // read failure must not swallow this exact completion/failure signal.
+      scheduleRequestStartRetry();
+      if(start)throw error;
+    }
     if(!start)await deliverConversationRequestEvent(tabId,message);
   } catch(error) {scheduleRequestStartRetry();}
 }
