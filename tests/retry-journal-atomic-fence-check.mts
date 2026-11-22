@@ -102,6 +102,33 @@ for(const variant of ['unknown','unrelated']) {
  if(variant==='unknown')await assert.rejects(grant,'unknown durable request blocks old grant after restart');
  else assert.equal((await grant()).ok,true,'known unrelated durable request does not block grant');
 }
+// Network ingress can identify B while the journal's saved tab URL still
+// identifies A. Both observations must be checked before a retry grant commits.
+for(const [observed,conflicts] of [['https://chatgpt.com/c/atomic-retry',true],
+  ['https://chatgpt.com/c/unrelated',false]] as const) {
+ const f=await fixture(),prompt=path+'|retry-user';
+ await f.append({kind:'tab.snapshot'}, {id:8,url:observed});
+ await f.append({kind:'retry.planned',sourceUrl:url,operationId:'dual-route',promptKey:prompt});
+ await f.append({kind:'retry.send_intent',sourceUrl:url,operationId:'dual-route',promptKey:prompt});
+ const held=f.defer((v:any)=>v['chatgpt-journal:meta']?.active?.[7]?.consumed===true);
+ const grant=f.append({kind:'send.authorized',sourceUrl:url,operationId:'dual-route'});
+ await held.observed;
+ const request=f.append({kind:'request.started',sourceUrl:'https://chatgpt.com/c/unrelated',tabId:8,requestId:'dual-route-ingress'}, {});
+ held.release();
+ if(conflicts)await assert.rejects(grant,(e:any)=>e.code==='RETRY_GRANT_RACE','journal-observed chat A must block a B-sourced request');
+ else assert.equal((await grant).ok,true,'both positive B observations permit an unrelated request');
+ await request;
+}
+{
+ const f=await fixture(),prompt=path+'|retry-user';
+ await f.append({kind:'retry.planned',sourceUrl:url,operationId:'gap-grant',promptKey:prompt});
+ await f.append({kind:'retry.send_intent',sourceUrl:url,operationId:'gap-grant',promptKey:prompt});
+ f.failOnce((v:any)=>Object.values(v).some((value:any)=>value?.kind==='watcher.started'));
+ await assert.rejects(()=>f.append({kind:'watcher.started',sourceUrl:url}),/synthetic cleanup failure/);
+ await assert.rejects(()=>f.append({kind:'send.authorized',sourceUrl:url,operationId:'gap-grant'}),
+  (e:any)=>e.code==='RETRY_GRANT_RACE','an unresolved write gap must refuse retry authorization');
+ assert.equal(f.data['chatgpt-journal:meta'].active[7].consumed,false,'refusal does not consume a retry');
+}
 for(const newer of [true,false]) {
  const f=await fixture(),prompt=path+'|legacy-user',op='legacy-plan-'+newer;
  await f.append({kind:'retry.planned',sourceUrl:url,operationId:op,promptKey:prompt});
