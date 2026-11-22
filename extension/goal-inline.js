@@ -457,8 +457,8 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
       }
       const url=route,revision=epoch,serial=++sequence;
       let settleArm,acknowledgedId=null;
-      const arm=action==='arm'?{token:null,promise:new Promise(resolve=>{settleArm=resolve;})}:null;
-      if(arm)arming=arm;
+      const arm=action==='arm'?{token:null,actionAt:Date.now(),promise:new Promise(resolve=>{settleArm=resolve;})}:null;
+      if(arm){arming=arm;input={...input,armActionAt:arm.actionAt};}
       // A trusted native send captured during Arm may follow the same initial
       // allocation while the worker's acknowledgement is still in flight.
       const currentAction=()=>accepts(url,revision,serial)||arm?.token!=null&&contextMatches(arm.token);
