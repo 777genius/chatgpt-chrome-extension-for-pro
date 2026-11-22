@@ -39,9 +39,13 @@ Object.defineProperty(document,'visibilityState',{value:'hidden',writable:true,c
 document.dispatchEvent(new window.Event('visibilitychange'));await flush();
 assert.equal(waits.length,1,'hiding again starts one current poll');
 const failed=waits.shift()!;failed({ok:false});await flush();
-assert.equal(waits.length,0,'failed worker wait does not spin');
+assert.equal(waits.length,1,'a transient worker failure promptly rearms the hidden wait');
+waits.shift()!({ok:false});await flush();
+assert.equal(waits.length,1,'a second transient failure still retries without a hidden timer');
+waits.shift()!({ok:false});await flush();
+assert.equal(waits.length,0,'persistent worker failure has a bounded retry budget');
 for(const interval of intervals)interval();await flush();
-assert.equal(waits.length,1,'fallback interval rearms the hidden worker wait after a transient failure');
+assert.equal(waits.length,1,'fallback interval rearms the bounded hidden worker wait');
 const tick=async()=>{const resolve=waits.shift();assert.ok(resolve);now+=3000;resolve({ok:true});await flush();};
 await tick();assert.equal(messages.length,0,'an incomplete native answer cannot be delivered');
 nativeComplete=true;
