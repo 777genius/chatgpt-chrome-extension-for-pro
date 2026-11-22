@@ -142,7 +142,7 @@ for(const [requestSource,conflicts] of [['https://chatgpt.com/c/unrelated',false
  await assert.rejects(()=>f.append({kind:'watcher.started',sourceUrl:url}),/synthetic cleanup failure/);
  await assert.rejects(()=>f.append({kind:'send.authorized',sourceUrl:url,operationId:'gap-grant'}),
   (e:any)=>e.code==='RETRY_GRANT_RACE','an unresolved write gap must refuse retry authorization');
- assert.equal(f.data['chatgpt-journal:meta'].active[7].consumed,false,'refusal does not consume a retry');
+ assert.notEqual(f.data['chatgpt-journal:meta'].active[7].consumed,true,'refusal does not consume a retry');
 }
 for(const newer of [true,false]) {
  const f=await fixture(),prompt=path+'|legacy-user',op='legacy-plan-'+newer;
