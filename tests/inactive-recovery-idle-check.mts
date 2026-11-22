@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
+const policy=createRequire(import.meta.url)('../extension/goal-policy.js');
 const source=readFileSync('extension/service-worker.js','utf8');
 const code=source.slice(source.indexOf('async function proveInactiveRecoveryIdle('),source.indexOf('const goalAckProofs=new Map();'));
 const url='https://chatgpt.com/c/idle-recovery-fixture';
@@ -11,9 +13,9 @@ async function fixture(extra:any={}){
  const journal:any={ok:true,meta:{sequence:103},events:[{sequence:101,kind:'request.started',tabId:7,sourceUrl:url,requestId:'request',eventAt:1000000,operationId:null},{sequence:102,kind:'request.failed',tabId:7,sourceUrl:url,requestId:'request',eventAt:1000100,operationId:null},{sequence:103,kind:'retry.planned',tabId:7,sourceUrl:url,operationId:'recovery'}],...extra.journal};
  let goal:any=extra.goal||null;extra.mutate?.({journal,receipt,cp,native});
  function controlChatComposer(){}function inspectChatError(){}
- const chrome={tabs:{get:async()=>({url:extra.url||url})},scripting:{executeScript:async(o:any)=>{probes++;extra.onProbe?.({journal,receipt,cp,native,setGoal:(v:any)=>{goal=v;}});return [{result:o.func===controlChatComposer?{ok:extra.editor!==false}:{needsIdleProof:extra.fresh!==false,editorSubmitIdle:extra.freshSubmitIdle===true}}];}}};
- const fn=new Function('completionCheckpointRead','inspectBoundNativeTurn','chrome','controlChatComposer','inspectChatError','latestRequestReceipt','readJournal','goalController','readRequestReceipt',code+';return proveInactiveRecoveryIdle;')(
-  async()=>++reads>1&&extra.race?{...cp,requestId:'new'}:cp,async()=>{nativeReads++;return structuredClone(extra.nativeRace&&nativeReads>1?{...native,userId:'other'}:native);},chrome,controlChatComposer,inspectChatError,async()=>extra.requestRace?{}:receipt,async()=>structuredClone(journal),{get:async()=>structuredClone(goal)},async(_tabId:number,query:any)=>{if(extra.savedReceipt)assert.equal(query.requestId,'old-request');return structuredClone(extra.savedReceipt||null);});
+ const chrome={tabs:{get:async()=>({url:extra.url||url})},scripting:{executeScript:async(o:any)=>{probes++;extra.onProbe?.({journal,receipt,cp,native,setGoal:(v:any)=>{goal=v;}});return [{result:o.func===controlChatComposer?{ok:extra.editor!==false}:(extra.freshSurface||{needsIdleProof:extra.fresh!==false,editorSubmitIdle:extra.freshSubmitIdle===true})}];}}};
+ const fn=new Function('completionCheckpointRead','inspectBoundNativeTurn','chrome','controlChatComposer','inspectChatError','latestRequestReceipt','readJournal','goalController','readRequestReceipt','ChatGPTGoalPolicy',code+';return proveInactiveRecoveryIdle;')(
+  async()=>++reads>1&&extra.race?{...cp,requestId:'new'}:cp,async()=>{nativeReads++;return structuredClone(extra.nativeRace&&nativeReads>1?{...native,userId:'other'}:native);},chrome,controlChatComposer,inspectChatError,async()=>extra.requestRace?{}:receipt,async()=>structuredClone(journal),{get:async()=>structuredClone(goal)},async(_tabId:number,query:any)=>{if(extra.savedReceipt)assert.equal(query.requestId,'old-request');return structuredClone(extra.savedReceipt||null);},policy);
  return {result:await fn(7,url,{...message,...extra.message},receipt,extra.surfaceProof||{}),probes};
 }
 assert.equal((await fixture()).result.proof,'native-inactive-error-editor','a plain draft does not require the voice button');
@@ -123,4 +125,32 @@ for(const scenario of ['same-user-alias','missing-receipt','wrong-operation','wr
 {
  const options=completedProof();options.onProbe=()=>{options.savedReceipt.submittedUserId='user';};
  assert.equal((await fixture(options)).result,null,'historical receipt identity is rechecked after native probes');
+}
+
+{
+ const recoveryBinding={kind:'user',url,entryId:'native-entry',userId:'user'};
+ const voice={ok:true,idle:true,stopped:false,proof:'native-voice-idle',recoveryBinding};
+ const options={...unbound,message:{recoveryBinding},surfaceProof:voice,freshSurface:voice};
+ assert.equal((await fixture(options)).result?.idle,true,'matching positive native Voice idle needs no extra needsIdleProof flag');
+ for(const patch of [{recoveryBinding:{...recoveryBinding,userId:'other'}},{recoveryBinding:{...recoveryBinding,entryId:'other'}},
+  {ok:false},{idle:false},{stopped:true},{proof:'other'}])
+  assert.equal((await fixture({...options,freshSurface:{...voice,...patch}})).result,null,'only exact positive native Voice idle is accepted');
+}
+{
+ let appended=false;const options={...unbound,onProbe:({journal}:any)=>{if(!appended){appended=true;journal.events.push({sequence:104,kind:'draft.saved',tabId:8,sourceUrl:'https://chatgpt.com/c/another-fixture',operationId:'unrelated'});journal.meta.sequence=104;}}};
+ const result=(await fixture(options)).result;assert.equal(result?.idle,true,'unrelated durable appends do not change the failed request proof');
+ assert.equal(result.requestProof.expectedSequence,104,'the returned commit fence uses the fully revalidated final journal head');
+}
+
+{
+ const options=completedProof();let appended=false;
+ options.onProbe=({journal}:any)=>{if(!appended){appended=true;journal.events.push({sequence:104,kind:'request.started',tabId:8,sourceUrl:'https://chatgpt.com/c/another-fixture',requestId:'unrelated',eventAt:1000200});journal.meta.sequence=104;}};
+ const result=(await fixture(options)).result;assert.equal(result?.idle,true,'unrelated append also preserves the completed-user identity proof');
+ assert.equal(result.requestProof.expectedSequence,104);
+}
+
+for(const urls of [{sourceUrl:'https://chatgpt.com/',observedTabUrl:'https://chatgpt.com/'},{sourceUrl:'',observedTabUrl:''},{sourceUrl:url+'?model=pro',observedTabUrl:'https://chatgpt.com/c/another-fixture'}]) {
+ let appended=false;
+ assert.equal((await fixture({...unbound,onProbe:({journal}:any)=>{if(!appended){appended=true;journal.events.push({sequence:104,kind:'request.started',tabId:8,requestId:'unknown',...urls});journal.meta.sequence=104;}}})).result,null,
+  'unknown-source cross-tab request may belong to the current chat and is never unrelated growth');
 }

@@ -93,6 +93,7 @@ assert.equal(meta().active[17].consumed,true);
 await store.recoverAcknowledgement({url:reopened,tabId:18,expectedRecord:structuredClone(goal),operationId:goal.operation.id,
  promptKey:'/c/reopened-fence|accepted',userId:'accepted-native',nativeVerified:true});
 assert.equal(meta().active[17],undefined,'native recovery retires only the accepted old grant');
+await log('retry.planned','next-recovery',18,reopened,{promptKey:'/c/reopened-fence|accepted'});
 assert.equal((await log('retry.send_intent','next-recovery',18,reopened,{promptKey:'/c/reopened-fence|accepted'})).ok,true);
 
 // A later accepted manual successor can retire an uncertain handoff only with

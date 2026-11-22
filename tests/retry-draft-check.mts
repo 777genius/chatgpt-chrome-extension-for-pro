@@ -30,6 +30,7 @@ await event('retry.send_intent');
 await assert.rejects(event('send.authorized'),/восстановление/,'claim fences a late sender even when its intent arrives later');
 await event('retry.cancelled');
 await event('draft.saved',{operationId:'op-b',draft:'new draft'});
+await event('retry.planned',{operationId:'op-b'});
 await event('retry.send_intent',{operationId:'op-b'});
 await event('send.authorized',{operationId:'op-b'});
 saved=await read();assert.equal(saved.phase,'unknown');

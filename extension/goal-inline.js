@@ -258,7 +258,7 @@ html.dark .cggi-panel,[data-theme=dark] .cggi-panel{background:#242424;color:#ec
         if(record&&policy.canonical(record.url)!==next)record=null;
         return true;
       }
-      stopBinding();record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';failedBinding=null;
+      stopBinding();arming=null;record=null;composer=null;loaded=false;loading=false;busy=false;pendingRefresh=false;error='';failedBinding=null;
       open=false;panel.hidden=true;resetFields();render();
       return true;
     }

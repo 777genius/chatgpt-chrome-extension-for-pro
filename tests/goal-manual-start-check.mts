@@ -586,11 +586,12 @@ console.log('Pre-intent request observation: durable exact candidate, intent/nat
 {
  const worker=readFileSync('extension/service-worker.js','utf8');
  const from=worker.indexOf('chrome.tabs.onRemoved.addListener('),to=worker.indexOf('\n\nasync function restoreStatusAnimation()',from);
- assert.ok(from>0&&to>from);let listener:any,called:any;
+ assert.ok(from>0&&to>from);let listener:any,called:any,forgottenStartTab:number|null=null;
  const world=createContext({chrome:{tabs:{onRemoved:{addListener:(fn:any)=>{listener=fn}}}},
   goalController:{composerDisarm:async(value:any)=>{called=value}},journalInBackground:()=>{},
   lastNotificationFingerprintByTab:new Map(),legacyHandoffStatusFences:new Map(),manualRequestReceiptsByTab:new Map(),
-  forgetRequestReceipts:async()=>{},statusAnimation:{remove(){}}});
+  forgetRequestReceipts:async()=>{},forgetPendingRequestStarts:async(tabId:number)=>{forgottenStartTab=tabId;},statusAnimation:{remove(){}}});
  runInContext(worker.slice(from,to),world);listener(7);await new Promise<void>(resolve=>setImmediate(resolve));
  assert.deepEqual(structuredClone(called),{tabId:7,preserveBoundGoal:true});
+ assert.equal(forgottenStartTab,7,'closing the tab retires only its pending request-start observations');
 }

@@ -330,7 +330,7 @@ async function workerCheck() {
     runtime: { id:'test-extension',onMessage: event('message'), onInstalled: event('installed'), onStartup: event('startup'),
       getManifest: () => ({version:'1.2.0'}), getURL: (url: string) => `chrome-extension://test-extension/${url}`, getContexts: async () => [{}], sendMessage: async () => { if (++soundCalls === 1) throw new Error('Could not establish connection. Receiving end does not exist.'); } },
     webRequest: { onBeforeRequest: event('before'), onCompleted: event('complete'), onErrorOccurred:event('requestError') },
-    tabs: { query: async () => [activeTab], get:async()=>activeTab,onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher){missingWatcher=false;throw new Error('Receiving end does not exist');}if(message.type==='CHATGPT_GOAL_DISPATCH')return {ok:true};} },
+    tabs: { query: async () => [activeTab], get:async(id:number)=>({...activeTab,id}),onRemoved: event('removed'), sendMessage: async (tabId:number,message:any) => {requestSignals.push({tabId,...message});if(missingWatcher&&tabId===8&&message.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'){missingWatcher=false;throw new Error('Receiving end does not exist');}if(message.type==='CHATGPT_GOAL_DISPATCH')return {ok:true};} },
     scripting: { executeScript: async (args: any) => { injections.push(args); return [{result:args.func?.name==='inspectHandoffAcceptance'?handoffProof:args.func?.name==='inspectCompletedTurn'&&nativeGoalProof?nativeGoalProof:{ok:true,clicked:true}}]; } },
     notifications: { create: async (id: string, options: any) => { notifications.push(options); return id; }, onClicked: event('clicked') }
   };
@@ -395,9 +395,13 @@ async function workerCheck() {
   assert.equal(injections.length,beforeSteer+1,'preparation must not count as a submitted message');
   assert.ok(requestSignals.some(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===123999));
   const beforeMissing=injections.length;missingWatcher=true;
-  callbacks.before({tabId:8,method:'POST',timeStamp:125000,url:'https://chatgpt.com/backend-api/f/conversation'});await pause();
+  callbacks.before({tabId:8,method:'POST',timeStamp:125000,requestId:'fallback-test',documentUrl:'https://chatgpt.com/c/example',url:'https://chatgpt.com/backend-api/f/conversation'});await pause();
   assert.equal(injections.length,beforeMissing+2,'a missing receiver still gets timing plus one fallback installation');
   assert.ok(injections.at(-1).files.includes('status-indicator.js'));
+  const fallbackSignals=requestSignals.filter(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===125000);
+  assert.ok(fallbackSignals.every(m=>m.tabId===8&&m.requestId==='fallback-test'&&
+    m.replayBinding.sourceUrl==='https://chatgpt.com/c/example'&&m.replayBinding.targetUrl==='https://chatgpt.com/c/example'&&
+    m.replayBinding.requestId==='fallback-test'&&m.replayBinding.startedAt===125000),'fallback replay retains exact source/request binding');
   assert.equal(requestSignals.filter(m=>m.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&m.startedAt===125000).length,2,'start is redelivered only after the missing receiver is installed');
   assert.ok(notifications.every(n => !/click to return/i.test(n.contextMessage)));
   const record={reasoningEffort:'max',reasoningModel:'gpt-6-thinking',id:'handoff-test',sourceUrl:'https://chatgpt.com/c/source',sourceTitle:'Original name',text:'complete history'};
@@ -422,6 +426,8 @@ async function workerCheck() {
   assert.equal((await sendGuard({action:'send',text:'User draft',url:sender.tab.url})).ok,false);
   assert.equal(injections.length,injectBefore,'unlogged draft must not reach the page');
   storage['chatgpt-retry-message']='Finish the remaining checks.';
+  activeTab={id:7,url:sender.tab.url};
+  await runInContext("appendJournal({kind:'retry.planned',operationId:'only-once',promptKey:'/c/example|user-turn'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
   await runInContext("appendJournal({kind:'retry.send_intent',operationId:'only-once',text:'Finish the remaining checks.',promptKey:'/c/example|user-turn'}, {id:7,url:'https://chatgpt.com/c/example'})",workerContext);
   assert.equal((await sendGuard({action:'send',text:'User draft',operationId:'only-once',url:sender.tab.url})).ok,false);
   assert.equal(injections.length,injectBefore,'even a logged operation cannot substitute a user draft');

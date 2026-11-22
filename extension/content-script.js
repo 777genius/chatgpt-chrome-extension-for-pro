@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const SCRIPT_VERSION = '1.8.158';
+  const SCRIPT_VERSION = '1.8.159';
   if (globalThis.__chatgptNotifierVersion === SCRIPT_VERSION && globalThis.__chatgptNotifierAlive?.()) return;
   document.dispatchEvent(new document.defaultView.Event('chatgpt-notifier-retire-invalidated'));
   globalThis.__chatgptNotifierDispose?.();
@@ -154,7 +154,7 @@
       ? Date.now() - startedAt : null;
   }
 
-  let activeStatusRequest=null;
+  let activeStatusRequest=null,manuallyStoppedRequest=null;
   statusIndicator=globalThis.ChatGPTStatusIndicator?.create({document,getUrl:()=>location.href,composerActivity,
     hasActiveRequest:(url,startedAt)=>activeStatusRequest?.path===new URL(url).pathname&&activeStatusRequest.startedAt===startedAt,
     load:url=>runtimeMessage({type:'CHATGPT_STATUS_GET',url,generating:composerActivity()==='generating',startedAt:Number(globalThis.__chatgptNotifierAttemptId)||null,requestId:globalThis.__chatgptNotifierRequestId||null}),alive:runtimeAvailable})||null;
@@ -1912,7 +1912,12 @@
 
       // Interval fallback: background tabs freeze requestAnimationFrame, so the
       // observer chain alone can stall until the tab regains focus.
-      pollId = setInterval(check, STREAM_POLL_MS);
+      pollId = setInterval(() => {
+        check();
+        // A failed worker wait stops its chain without spinning. The existing
+        // interval is the bounded retry point if messaging becomes available.
+        scheduleHiddenPoll();
+      }, STREAM_POLL_MS);
 
       // Only counted once generation has ended, so a long reasoning phase is
       // not mistaken for the 30s "no answer text appeared" fallback.
@@ -2102,6 +2107,12 @@
     if (!isStopButton(event.target)) return;
     if (stoppingRecovery && !event.isTrusted) return;
     if(event.isTrusted){
+      const stoppedUrl=ChatGPTHandoffTitle.chatUrl(location.href)||
+        (location.origin==='https://chatgpt.com'&&location.pathname==='/'?'https://chatgpt.com/':''),
+        stoppedAt=globalThis.__chatgptNotifierRequestStartedAt,
+        stoppedId=globalThis.__chatgptNotifierRequestId;
+      if(stoppedUrl&&Number.isFinite(stoppedAt)&&typeof stoppedId==='string'&&stoppedId)
+        manuallyStoppedRequest={url:stoppedUrl,startedAt:stoppedAt,requestId:stoppedId};
       void runtimeMessage({type:'CHATGPT_GOAL_MANUAL',url:location.href});
       const generation=statusIndicator?.loadingGeneration?.(),captured=globalThis.__chatgptNotifierRequestReceipt;
       const exact=!generation||generation.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&generation.startReceipt?.epoch===captured?.epoch&&generation.startReceipt?.order===captured?.order;
@@ -2159,6 +2170,18 @@
     }
     if(message?.type==='CHATGPT_STATUS_TICK'){sendResponse?.({ok:statusIndicator?.tick(message)||false});return;}
     if(message?.type==='CHATGPT_STATUS_CHANGED') {if(statusIndicator?.accept(message))returnedPageUrl='';}
+    if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED'&&message.replayBinding) {
+      const binding=message.replayBinding;
+      if(!binding.targetUrl||ChatGPTHandoffTitle.chatUrl(location.href)!==binding.targetUrl||
+          binding.startedAt!==message.startedAt||binding.requestId!==message.requestId||
+          globalThis.__chatgptNotifierRequestStartedAt!==binding.startedAt||
+          globalThis.__chatgptNotifierRequestId!==binding.requestId||
+          manuallyStoppedRequest&&(manuallyStoppedRequest.url===binding.targetUrl||manuallyStoppedRequest.url===binding.sourceUrl)&&
+            manuallyStoppedRequest.startedAt===binding.startedAt&&
+            manuallyStoppedRequest.requestId===binding.requestId) {
+        sendResponse?.({ok:false,reason:'stale-replay-binding'});return;
+      }
+    }
     if(message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')confirmManualStatusIntent(message.startedAt,message.requestId);
     const currentRequest=message?.startedAt===globalThis.__chatgptNotifierRequestStartedAt&&(!globalThis.__chatgptNotifierRequestId||message.requestId===globalThis.__chatgptNotifierRequestId);
     if(currentRequest&&message?.type==='CHATGPT_CONVERSATION_REQUEST_STARTED')

@@ -7,12 +7,12 @@ const {document,window}=parseHTML('<html><head></head><body><main><article data-
 Object.defineProperty(window.HTMLElement.prototype,'getClientRects',{value(){return [{width:240,height:32}];}});
 Object.defineProperty(document,'visibilityState',{value:'hidden',writable:true,configurable:true});
 let now=1000000,listener:Function=()=>{},nativeComplete=false;
-const waits:Function[]=[],messages:any[]=[];
+const waits:Function[]=[],messages:any[]=[],intervals:Function[]=[];
 const context=createContext({document,window,Node:window.Node,Element:window.Element,HTMLTextAreaElement:window.HTMLTextAreaElement,
  URL,AbortController,crypto:globalThis.crypto,Event:window.Event,MutationObserver:window.MutationObserver,
  location:{origin:'https://chatgpt.com',href:'https://chatgpt.com/c/exact',pathname:'/c/exact'},
  Date:class extends Date{static now(){return now;}},performance:{now:()=>now},
- setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>1,clearInterval:()=>{},
+ setTimeout:()=>1,clearTimeout:()=>{},setInterval:(fn:Function)=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},
  chrome:{runtime:{id:'test',onMessage:{addListener:(fn:Function)=>{listener=fn;},removeListener(){}},sendMessage:(m:any)=>{
   if(m.type==='CHATGPT_WAIT'&&m.delayMs===3000)return new Promise(resolve=>waits.push(resolve));
   if(m.type==='CHATGPT_COMPLETION_CHECKPOINT')return Promise.resolve({ok:false});
@@ -38,6 +38,10 @@ assert.equal(waits.length,0,'an old hidden wait cannot schedule another poll aft
 Object.defineProperty(document,'visibilityState',{value:'hidden',writable:true,configurable:true});
 document.dispatchEvent(new window.Event('visibilitychange'));await flush();
 assert.equal(waits.length,1,'hiding again starts one current poll');
+const failed=waits.shift()!;failed({ok:false});await flush();
+assert.equal(waits.length,0,'failed worker wait does not spin');
+for(const interval of intervals)interval();await flush();
+assert.equal(waits.length,1,'fallback interval rearms the hidden worker wait after a transient failure');
 const tick=async()=>{const resolve=waits.shift();assert.ok(resolve);now+=3000;resolve({ok:true});await flush();};
 await tick();assert.equal(messages.length,0,'an incomplete native answer cannot be delivered');
 nativeComplete=true;

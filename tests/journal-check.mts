@@ -59,6 +59,23 @@ console.log('PASS: concurrent durable audit, exact payload export, worker restar
  state=await runInContext('readRetryState(url)',ctx);assert.equal(state.blocked,true,'a stale proof cannot release the blocked state');
 }
 
+for(const variant of ['unknown','unrelated','write-failure']) {
+ const tab={id:90,url:'https://chatgpt.com/c/legacy-delta-'+variant,title:'Fixture'},path='/c/legacy-delta-'+variant,attemptId=String(Date.now());
+ await append({kind:'error.detected',action:'retry',sourceUrl:tab.url,promptKey:path,attemptId,error:'Interrupted'},tab);
+ await append({kind:'retry.failed',sourceUrl:tab.url,promptKey:path,attemptId,reason:'Stopped before send',clicked:false},tab);
+ const proof={expectedSequence:storage['chatgpt-journal:meta'].sequence,oldPromptKey:path,newPromptKey:path+'|server:user'};
+ if(variant==='write-failure'){
+  fail=true;await assert.rejects(()=>append({kind:'request.started',sourceUrl:tab.url,requestId:'lost'},tab),/Disk full/);fail=false;
+  await append({kind:'watcher.started',sourceUrl:'https://chatgpt.com/c/other'},{id:89,url:'https://chatgpt.com/c/other',title:'Other'});
+ } else {
+  const url=variant==='unknown'?'https://chatgpt.com/':'https://chatgpt.com/c/other';
+  await append({kind:'request.started',sourceUrl:url,requestId:'concurrent'}, {id:89,url,title:'Other'});
+ }
+ const recover=()=>append({kind:'retry.preparation_recovered',sourceUrl:tab.url,operationId:'recover-'+variant,promptKey:path,attemptId,legacyNoClick:proof},tab);
+ if(variant==='unrelated')assert.equal((await recover()).ok,true,'known unrelated request does not block legacy recovery');
+ else await assert.rejects(recover,/изменился/,'unknown or missing request invalidates legacy recovery');
+}
+
 // Consecutive same-error count survives worker restart and duplicate DOM scans.
 const repeatTab={id:91,url:'https://chatgpt.com/c/repeated-error',title:'Test'};
 for(let i=0;i<3;i++)await append({kind:'error.detected',action:'retry',sourceUrl:repeatTab.url,
@@ -180,6 +197,40 @@ async function routeProofFixture(name:string,fallback=false) {
  await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
  await append({kind:'request.started',sourceUrl:f.tab.url,requestId:'other',eventAt:f.at+10},{...f.tab,id:98});
  await assert.rejects(()=>append(f.event,f.tab),/Автоповтор этого запроса уже запускался/,'a later request in another tab wins');
+}
+{
+ const f=await routeProofFixture('route-write-failure');
+ fail=true;await assert.rejects(()=>append({kind:'request.started',sourceUrl:f.tab.url,requestId:'lost',eventAt:f.at+1},f.tab),/Disk full/);fail=false;
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ await assert.rejects(()=>append(f.event,f.tab),/Автоповтор этого запроса уже запускался/,'a recorded prior journal write failure makes manual turn proof ambiguous');
+}
+{
+ const f=await routeProofFixture('route-grant-write-failure');
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ await append(f.event,f.tab);await append({...f.event,kind:'retry.send_intent'},f.tab);
+ fail=true;await assert.rejects(()=>append({kind:'request.started',sourceUrl:f.tab.url,requestId:'lost',eventAt:f.at+1},f.tab),/Disk full/);fail=false;
+ await append({kind:'watcher.started',sourceUrl:f.tab.url},f.tab);
+ await assert.rejects(()=>append({kind:'send.authorized',sourceUrl:f.tab.url,operationId:f.event.operationId},f.tab),/Автоповтор этого запроса уже запускался/,'a lost request after intent cannot authorize a grant');
+ await append({kind:'send.not_clicked',sourceUrl:f.tab.url,operationId:f.event.operationId,promptKey:f.event.promptKey},f.tab);
+ await append({kind:'retry.failed',sourceUrl:f.tab.url,operationId:f.event.operationId,clicked:false},f.tab);
+ await append({kind:'retry.finished',sourceUrl:f.tab.url,operationId:f.event.operationId,clicked:false},f.tab);
+}
+for(const stage of ['reservation','grant'])for(const witness of ['observed','unknown','unrelated']) {
+ const f=await routeProofFixture('route-'+stage+'-'+witness);
+ await append({kind:'retry.preparation_superseded',sourceUrl:f.tab.url,requestId:f.event.requestId,startedAt:f.at},f.tab);
+ if(stage==='grant'){await append(f.event,f.tab);await append({...f.event,kind:'retry.send_intent'},f.tab);}
+ const other={id:98,title:'Fixture',url:witness==='observed'?f.tab.url:witness==='unknown'?'https://chatgpt.com/':'https://chatgpt.com/c/unrelated'};
+ const sourceUrl=witness==='unknown'?'https://chatgpt.com/':'https://chatgpt.com/c/unrelated';
+ await append({kind:'request.started',sourceUrl,requestId:'intervening',eventAt:f.at+1},other);
+ const proceed=()=>stage==='grant'?append({kind:'send.authorized',sourceUrl:f.tab.url,operationId:f.event.operationId},f.tab):append(f.event,f.tab);
+ if(witness==='unrelated')assert.equal((await proceed()).ok,true,'a fully identified unrelated request remains permitted');
+ else await assert.rejects(proceed,/Автоповтор этого запроса уже запускался/,witness+' must invalidate '+stage);
+ if(stage==='reservation'&&witness==='unrelated')await append({...f.event,kind:'retry.send_intent'},f.tab);
+ if(stage==='grant'||witness==='unrelated'){
+  await append({kind:'send.not_clicked',sourceUrl:f.tab.url,operationId:f.event.operationId,promptKey:f.event.promptKey},f.tab);
+  await append({kind:'retry.failed',sourceUrl:f.tab.url,operationId:f.event.operationId,clicked:false},f.tab);
+  await append({kind:'retry.finished',sourceUrl:f.tab.url,operationId:f.event.operationId,clicked:false},f.tab);
+ }
 }
 {
  const f=await routeProofFixture('route-grant-race');

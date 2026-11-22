@@ -5,6 +5,7 @@
 const JOURNAL_PREFIX = 'chatgpt-journal:event:';
 const JOURNAL_META = 'chatgpt-journal:meta';
 const GOAL_CAS_RECEIPT = 'chatgpt-goal-cas:provisional';
+const RETRY_CAS_RECEIPT = 'chatgpt-retry-cas:provisional';
 let journalQueue = Promise.resolve();
 let journalFailure = '';
 // Observe ingress synchronously, scoped both to the exact tab and canonical
@@ -19,7 +20,7 @@ function recordJournalIngress(event,tab) {
   else journalUnknownIngress++;
 }
 function journalIngressSnapshot(tabId,url) {
-  return {tabId,url,tab:journalIngressByTab.get(tabId)||0,chat:journalIngressByChat.get(url)||0,unknown:journalUnknownIngress};
+  return {tabId,url,tab:journalIngressByTab.get(tabId)||0,chat:journalIngressByChat.get(url)||0,unknown:journalUnknownIngress,tabs:new Map(journalIngressByTab)};
 }
 function journalIngressChanged(snapshot,tabId,url) {
   return !snapshot||snapshot.tabId!==tabId||snapshot.url!==url||snapshot.tab!==(journalIngressByTab.get(tabId)||0)||
@@ -92,6 +93,8 @@ async function indexedRetryDraft(meta,url) {
 function reduceRetrySummary(retryByChat, event) {
   const chatId = journalChatId(event.sourceUrl || event.observedTabUrl || event.url);
   if (!chatId) return retryByChat;
+  if(event.kind==='retry.preparation_rollback'&&event.restoredState?.blocked===true)
+    return {...retryByChat,[chatId]:event.restoredState};
   if(event.kind==='retry.preparation_superseded') {
     const previous=retryByChat[chatId]||{};
     const manualStartedAt=Math.max(previous.manualStartedAt||0,event.startedAt);
@@ -282,8 +285,40 @@ async function recoverProvisionalGoalCASLocked() {
     [JOURNAL_META]:{...meta,sequence,lastAt:rollback.recordedAt},[GOAL_CAS_RECEIPT]:null});
   return {ok:true,recovered:true};
 }
+async function recoverProvisionalRetryCASLocked() {
+  const receipt=(await chrome.storage.local.get(RETRY_CAS_RECEIPT))[RETRY_CAS_RECEIPT];
+  if(receipt===null||receipt===undefined)return {ok:true,recovered:false};
+  const failure=()=>Object.assign(new Error('Невозможно безопасно восстановить незавершённое состояние автоповтора'),
+    {journalPolicy:true,code:'RETRY_CAS_RECOVERY_UNCERTAIN'});
+  const url=retryDraftUrl(receipt.url),chatId=journalChatId(url);
+  if(typeof receipt!=='object'||Array.isArray(receipt)||receipt.schema!==1||url!==receipt.url||!chatId||
+      !Number.isInteger(receipt.tabId)||!Number.isSafeInteger(receipt.sequence)||receipt.sequence<1||
+      !receipt.expected||!receipt.next||!receipt.expected.blocked||receipt.next.blocked)throw failure();
+  const key=`${JOURNAL_PREFIX}${String(receipt.sequence).padStart(12,'0')}`;
+  const saved=await chrome.storage.local.get([JOURNAL_META,key]),meta=saved[JOURNAL_META],row=saved[key];
+  if(!Number.isSafeInteger(meta?.sequence)||meta.sequence<receipt.sequence||
+      JSON.stringify(meta.retryByChat?.[chatId])!==JSON.stringify(receipt.next)||
+      row?.sequence!==receipt.sequence||row.kind!=='retry.preparation_recovered'||row.tabId!==receipt.tabId||
+      retryDraftUrl(row.sourceUrl)!==url||row.operationId!==receipt.operationId)throw failure();
+  for(let first=receipt.sequence+1;first<=meta.sequence;first+=RETRY_MIGRATION_BATCH_SIZE) {
+    const keys=Array.from({length:Math.min(RETRY_MIGRATION_BATCH_SIZE,meta.sequence-first+1)},(_,i)=>
+      `${JOURNAL_PREFIX}${String(first+i).padStart(12,'0')}`);
+    const rows=await chrome.storage.local.get(keys);
+    if(keys.some((key,i)=>!rows[key]||rows[key].sequence!==first+i))throw failure();
+  }
+  const fresh=await chrome.storage.local.get([JOURNAL_META,RETRY_CAS_RECEIPT]);
+  if(JSON.stringify(fresh[JOURNAL_META])!==JSON.stringify(meta)||JSON.stringify(fresh[RETRY_CAS_RECEIPT])!==JSON.stringify(receipt))throw failure();
+  const sequence=meta.sequence+1,rollback={kind:'retry.preparation_rollback',schema:1,sequence,recordedAt:Date.now(),
+    sourceUrl:url,sourceChatId:chatId,tabId:receipt.tabId,operationId:receipt.operationId,
+    previousSequence:receipt.sequence,restoredState:receipt.expected,version:chrome.runtime.getManifest().version};
+  await chrome.storage.local.set({[`${JOURNAL_PREFIX}${String(sequence).padStart(12,'0')}`]:rollback,
+    [JOURNAL_META]:{...meta,sequence,lastAt:rollback.recordedAt,retryByChat:{...meta.retryByChat,[chatId]:receipt.expected}},
+    [RETRY_CAS_RECEIPT]:null});
+  return {ok:true,recovered:true};
+}
 function recoverProvisionalGoalCAS() {
-  const recovery=journalQueue.catch(()=>{}).then(recoverProvisionalGoalCASLocked);
+  const recovery=journalQueue.catch(()=>{}).then(async()=>{const goal=await recoverProvisionalGoalCASLocked();
+    const retry=await recoverProvisionalRetryCASLocked();return {ok:true,recovered:goal.recovered||retry.recovered};});
   journalQueue=recovery;
   return recovery.catch(error=>{if(!error.journalPolicy){journalFailure=String(error?.message||error);console.error('Goal CAS recovery failed',journalFailure);}throw error;});
 }
@@ -293,7 +328,19 @@ function appendJournal(event, tab = {}, options = {}) {
   const enqueueUrl=retryDraftUrl(options?.goalCAS?.url||event.sourceUrl||tab.url||event.url||'');
   const ingressAtEnqueue=journalIngressSnapshot(enqueueTabId,enqueueUrl);
   const write = journalQueue.catch(() => {}).then(async () => {
-    const savedMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+    let savedMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+    const pendingRetry=(await chrome.storage.local.get(RETRY_CAS_RECEIPT))[RETRY_CAS_RECEIPT];
+    if(pendingRetry!==null&&pendingRetry!==undefined) {
+      const pendingUrl=retryDraftUrl(pendingRetry?.url),owner=tab.id??event.tabId;
+      const source=retryDraftUrl(event.sourceUrl||tab.url||event.url||savedMeta?.tabs?.[owner]?.url||'');
+      const observed=retryDraftUrl(tab.url||savedMeta?.tabs?.[owner]?.url||'');
+      // Resolve before any same-chat journal event can mutate retryByChat.
+      // Unknown sources fail closed; a proven different chat continues.
+      if(!pendingUrl||source===pendingUrl||observed===pendingUrl||!source&&!observed) {
+        await recoverProvisionalRetryCASLocked();
+        savedMeta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+      }
+    }
     const goalCAS=options?.goalCAS;
     const existingGoalCAS=goalCAS?(await chrome.storage.local.get(GOAL_CAS_RECEIPT))[GOAL_CAS_RECEIPT]:null;
     const goalFenceChanged=()=>Object.assign(new Error('Goal или журнал изменились до подтверждения ответа'),{journalPolicy:true,code:'GOAL_FENCE_CHANGED'});
@@ -328,11 +375,19 @@ function appendJournal(event, tab = {}, options = {}) {
           if(number===fence.requestSequence) {
             if(entry.kind!=='request.started'||entry.tabId!==anchorTabId||retryDraftUrl(entry.sourceUrl)!==canonical||
                 entry.requestId!==fence.requestId||entry.eventAt!==fence.startedAt)return false;
-          } else if(entry.kind==='request.started'&&(entry.tabId===anchorTabId||retryDraftUrl(entry.sourceUrl)===canonical||
-              retryDraftUrl(entry.observedTabUrl)===canonical))return false;
+          } else if(entry.kind==='request.started') {
+            const source=retryDraftUrl(entry.sourceUrl),observed=retryDraftUrl(entry.observedTabUrl);
+            if(entry.tabId===anchorTabId||source===canonical||observed===canonical||!source&&!observed)return false;
+          }
         }
       }
       return true;
+    }
+    async function fenceAnchorTab(fence) {
+      if(!Number.isSafeInteger(fence?.requestSequence)||fence.requestSequence<1)return null;
+      const key=`${JOURNAL_PREFIX}${String(fence.requestSequence).padStart(12,'0')}`;
+      const row=(await chrome.storage.local.get(key))[key];
+      return row?.kind==='request.started'&&Number.isInteger(row.tabId)&&row.tabId>=0?row.tabId:null;
     }
     let goalCASKey=null;
     if(goalCAS) {
@@ -347,7 +402,7 @@ function appendJournal(event, tab = {}, options = {}) {
     }
     const targetUrl = event.targetUrl || '';
     const active = { ...meta.active };
-    let protectedGoalGrant=false;
+    let protectedGoalGrant=false,protectedRetryGrant=false,protectedAnchorTab=null;
     const retrySendClaims = { ...meta.retrySendClaims };
     const retryConsumedOperations = { ...meta.retryConsumedOperations };
     const retryReleasedOperations = { ...meta.retryReleasedOperations };
@@ -375,11 +430,14 @@ function appendJournal(event, tab = {}, options = {}) {
         const batch=await chrome.storage.local.get(keys);
         for(let i=0;i<keys.length;i++) {
           const entry=batch[keys[i]],seq=first+i;
-          if(!entry||entry.sequence!==seq)return false;
+          if(!entry||entry.sequence!==seq||seq>proof.requestSequence&&entry.previousWriteError)return false;
           if(seq===proof.requestSequence) {
             if(entry.kind!=='request.started'||entry.tabId!==tabId||retryDraftUrl(entry.sourceUrl)!==retrySource||
                 entry.requestId!==proof.requestId||entry.eventAt!==proof.startedAt||entry.operationId||entry.automatic===true)return false;
-          } else if(entry.kind==='request.started'&&(entry.tabId===tabId||retryDraftUrl(entry.sourceUrl)===retrySource))return false;
+          } else if(entry.kind==='request.started') {
+            const source=retryDraftUrl(entry.sourceUrl),observed=retryDraftUrl(entry.observedTabUrl);
+            if(entry.tabId===tabId||source===retrySource||observed===retrySource||!source&&!observed)return false;
+          }
           if(entry.kind==='retry.preparation_superseded'&&entry.tabId===tabId&&retryDraftUrl(entry.sourceUrl)===retrySource&&
               entry.requestId===proof.requestId&&entry.startedAt===proof.startedAt)seenSuperseded++;
         }
@@ -399,6 +457,10 @@ function appendJournal(event, tab = {}, options = {}) {
       if(Object.hasOwn(retryConsumedOperations,operationId)||Object.hasOwn(retryReleasedOperations,operationId))throw duplicate();
       if(meta.retryDraftClaims?.[operationId])return;
       const preparing=retryPreparingByChat[retrySource];
+      // An old reservation without an observed plan sequence cannot acquire
+      // a new anchor from a later intent: that could hide an intervening POST.
+      if(preparing&&(!Number.isSafeInteger(preparing.plannedSequence)||preparing.plannedSequence<1||preparing.plannedSequence>meta.sequence)||
+          !preparing&&event.kind!=='retry.planned')throw duplicate();
       const key=owns(preparing)?preparing.claimKey:
         JSON.stringify([retrySource,event.retryUserId?'native-user:'+event.retryUserId:event.promptKey]);
       const retryUserId=event.retryUserId||preparing?.retryUserId||null;
@@ -422,7 +484,7 @@ function appendJournal(event, tab = {}, options = {}) {
       const claim=retrySendClaims[key];
       if(claim&&(!owns(claim)||claim.phase!=='reserved')||preparing&&!owns(preparing))throw duplicate();
       retrySendClaims[key]={operationId,tabId,sourceUrl:retrySource,promptKey:event.promptKey,retryUserId,at:claim?.at||Date.now(),phase:'reserved'};
-      retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key,attemptId:event.attemptId||preparing?.attemptId||'',
+      retryPreparingByChat[retrySource]={operationId,tabId,claimKey:key,plannedSequence:preparing?.plannedSequence||sequence,attemptId:event.attemptId||preparing?.attemptId||'',
         retryUserId:event.retryUserId||preparing?.retryUserId||null,
         legacyRetryProof:event.legacyRetryProof||preparing?.legacyRetryProof||null};
       if(retryPreparingByChat[retrySource].retryUserId)event={...event,retryUserId:retryPreparingByChat[retrySource].retryUserId};
@@ -450,8 +512,12 @@ function appendJournal(event, tab = {}, options = {}) {
         else {
           const keys=Array.from({length:count},(_,i)=>`${JOURNAL_PREFIX}${String(proof.expectedSequence+i+1).padStart(12,'0')}`);
           const delta=await chrome.storage.local.get(keys);
-          changed=keys.some((key,i)=>{const entry=delta[key];return !entry||entry.sequence!==proof.expectedSequence+i+1||
-            entry.tabId===tabId||retryDraftUrl(entry.sourceUrl)===retrySource||retryDraftUrl(entry.observedTabUrl)===retrySource;});
+          changed=keys.some((key,i)=>{const entry=delta[key];
+            if(!entry||entry.sequence!==proof.expectedSequence+i+1||entry.previousWriteError)return true;
+            const source=retryDraftUrl(entry.sourceUrl),observed=retryDraftUrl(entry.observedTabUrl);
+            return entry.tabId===tabId||source===retrySource||observed===retrySource||
+              entry.kind==='request.started'&&!source&&!observed;
+          });
         }
       }
       if(!retrySource||changed||
@@ -534,9 +600,10 @@ function appendJournal(event, tab = {}, options = {}) {
       if(event.kind==='goal.send_intent'&&chatUrl) {
         const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
         const fence=goal?.operation?.queuedResumeFence;
+        const anchorTabId=fence?await fenceAnchorTab(fence):null;
         if((fence||event.queuedResumeFence)&&(!fence||goal.id!==event.goalId||goal.operation.id!==operationId||
             goal.operation.tabId!==tabId||JSON.stringify(fence)!==JSON.stringify(event.queuedResumeFence)||
-            await hasProvisionalGoalCAS()||!await verifyGoalFence(fence,chatUrl,tabId)))throw goalFenceChanged();
+            await hasProvisionalGoalCAS()||!await verifyGoalFence(fence,chatUrl,anchorTabId)))throw goalFenceChanged();
       }
       if(chatUrl&&event.kind==='handoff.sending') {
         const goal=(await chrome.storage.local.get('chatgpt-goal:'+chatUrl))['chatgpt-goal:'+chatUrl];
@@ -552,7 +619,7 @@ function appendJournal(event, tab = {}, options = {}) {
         throw Object.assign(new Error('В чате уже имеется незавершённая автоматическая отправка'),{journalPolicy:true});
       active[tabId]={operationId,kind:event.kind,goalId:event.goalId||null,chatUrl,at:Date.now(),
         ...(event.kind==='retry.send_intent'?{sourceUrl:retryDraftUrl(sourceUrl),promptKey:event.promptKey,retryText:event.text,attemptId:event.attemptId||''}:{}),
-        ...(event.kind==='goal.send_intent'&&event.queuedResumeFence?{queuedResumeFence:event.queuedResumeFence,anchorTabId:tabId}:{})};
+        ...(event.kind==='goal.send_intent'&&event.queuedResumeFence?{queuedResumeFence:event.queuedResumeFence,anchorTabId:await fenceAnchorTab(event.queuedResumeFence)}:{})};
     }
     if(['handoff.navigating','handoff.imported','handoff.pre_navigation_cancelled'].includes(event.kind)) {
       const source=retryDraftUrl(sourceUrl),claim=handoffSourceClaims[source];
@@ -584,14 +651,27 @@ function appendJournal(event, tab = {}, options = {}) {
             goal.operation?.tabId!==tabId||JSON.stringify(goal.operation?.queuedResumeFence)!==JSON.stringify(intent.queuedResumeFence)||
             await hasProvisionalGoalCAS()||
             !await verifyGoalFence(intent.queuedResumeFence,intent.chatUrl,intent.anchorTabId))throw goalFenceChanged();
-        protectedGoalGrant=true;
+        protectedGoalGrant=true;protectedAnchorTab=intent.anchorTabId;
       }
       if(active[tabId].kind==='retry.send_intent') {
         const intent=active[tabId];
+        protectedRetryGrant=true;
         if(!intent.sourceUrl||intent.sourceUrl!==retryDraftUrl(sourceUrl)||typeof intent.promptKey!=='string'||!intent.promptKey)throw Object.assign(new Error('Исходный запрос автоповтора не подтверждён'),{journalPolicy:true});
         const claim=retryPreparingByChat[intent.sourceUrl]?.claimKey||JSON.stringify([intent.sourceUrl,intent.promptKey]);
         if(!owns(retrySendClaims[claim])||retrySendClaims[claim].phase!=='reserved'||!owns(retryPreparingByChat[intent.sourceUrl]))throw duplicate();
         const prepared=retryPreparingByChat[intent.sourceUrl];
+        if(!Number.isSafeInteger(prepared.plannedSequence)||prepared.plannedSequence<1||prepared.plannedSequence>meta.sequence)throw duplicate();
+        for(let first=prepared.plannedSequence+1;first<=meta.sequence;first+=RETRY_MIGRATION_BATCH_SIZE) {
+          const keys=Array.from({length:Math.min(RETRY_MIGRATION_BATCH_SIZE,meta.sequence-first+1)},(_,i)=>
+            `${JOURNAL_PREFIX}${String(first+i).padStart(12,'0')}`);
+          const rows=await chrome.storage.local.get(keys);
+          if(keys.some((key,i)=>{const row=rows[key];
+            if(!row||row.sequence!==first+i||row.previousWriteError)return true;
+            if(row.kind!=='request.started')return false;
+            const source=retryDraftUrl(row.sourceUrl),observed=retryDraftUrl(row.observedTabUrl);
+            return row.tabId===tabId||source===intent.sourceUrl||observed===intent.sourceUrl||!source&&!observed;
+          }))throw duplicate();
+        }
         if(prepared.legacyRetryProof) {
           const bound={requestId:prepared.legacyRetryProof.requestId,attemptId:prepared.attemptId};
           for(const prior of Object.values(retrySendClaims)) {
@@ -680,14 +760,36 @@ function appendJournal(event, tab = {}, options = {}) {
       observedTabUrl: tab.url || '', observedChatId: journalChatId(tab.url) };
     if (event.kind === 'tab.closed') delete tabs[tabId];
     const retryDraftByChat=staleDraftSave?meta.retryDraftByChat:reduceRetryDraft(meta.retryDraftByChat,entry,meta.retryByChat?.[journalChatId(entry.sourceUrl)]?.manualStartedAt);
-    const protectedUrl=goalCAS?.url||(protectedGoalGrant?active[tabId]?.chatUrl:null);
-    if(protectedUrl&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl))throw goalFenceChanged();
-    const updatedMeta={ ...meta, sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, handoffNavigationClaims, requests, tabs, lastAt: entry.recordedAt,
+    const retryCAS=event.kind==='retry.preparation_recovered'&&event.legacyNoClick?{url:retrySource,tabId,sequence,operationId,
+      expected:meta.retryByChat?.[journalChatId(retrySource)]}:null;
+    const protectedUrl=goalCAS?.url||(protectedGoalGrant?active[tabId]?.chatUrl:null)||
+      (protectedRetryGrant?active[tabId]?.sourceUrl:null)||retryCAS?.url;
+    const protectedIngressChanged=()=>journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl)||
+      protectedGoalGrant&&(ingressAtEnqueue.tabs.get(protectedAnchorTab)||0)!==(journalIngressByTab.get(protectedAnchorTab)||0);
+    const grantRace=()=>Object.assign(new Error('Запрос изменился до разрешения автоповтора'),{journalPolicy:true,code:'RETRY_GRANT_RACE'});
+    if(protectedUrl&&protectedIngressChanged())throw protectedRetryGrant?grantRace():goalFenceChanged();
+    const updatedMeta={ ...meta, ...(event.kind==='journal.started'?{handoffImportPending:true}:{}),
+        ...(event.kind==='extension.started'&&event.handoffImportComplete===true?{handoffImportComplete:true,handoffImportPending:false}:{}), sequence, active, retrySendClaims, retryConsumedOperations, retryReleasedOperations, retryPreparingByChat, handoffSourceClaims, handoffNavigationClaims, requests, tabs, lastAt: entry.recordedAt,
         retryByChat: reduceRetrySummary(meta.retryByChat || {}, entry),retryDraftByChat,
         retryDraftClaims:event.kind==='draft.restore_intent'?{...meta.retryDraftClaims,[operationId]:sequence}:meta.retryDraftClaims };
+    if(retryCAS) {
+      retryCAS.next=updatedMeta.retryByChat[journalChatId(retrySource)];
+      if(!retryCAS.expected?.blocked||retryCAS.next?.blocked!==false)throw Object.assign(
+        new Error('Автоповтор изменился до восстановления'),{journalPolicy:true,code:'RETRY_LEGACY_RACE'});
+    }
     const provisional=goalCAS?{schema:1,url:goalCAS.url,tabId,sequence,kind:event.kind,expected:goalCAS.expected,next:goalCAS.next}:null;
     await chrome.storage.local.set({ [`${JOURNAL_PREFIX}${String(sequence).padStart(12, '0')}`]: entry,
-      [JOURNAL_META]: updatedMeta,...(goalCASKey?{[goalCASKey]:goalCAS.next,[GOAL_CAS_RECEIPT]:provisional}:{}) });
+      [JOURNAL_META]: updatedMeta,...(goalCASKey?{[goalCASKey]:goalCAS.next,[GOAL_CAS_RECEIPT]:provisional}:{}),
+      ...(retryCAS?{[RETRY_CAS_RECEIPT]:{schema:1,...retryCAS}}:{}) });
+    if(retryCAS&&protectedIngressChanged()) {
+      await recoverProvisionalRetryCASLocked();
+      throw Object.assign(new Error('Запрос изменился до восстановления автоповтора'),{journalPolicy:true,code:'RETRY_LEGACY_RACE'});
+    }
+    if(retryCAS) {
+      try {await chrome.storage.local.set({[RETRY_CAS_RECEIPT]:null});}
+      catch(error) {throw Object.assign(new Error('Не удалось завершить восстановление автоповтора: '+String(error?.message||error)),
+        {journalPolicy:true,code:'RETRY_CAS_CLEANUP_UNKNOWN'});}
+    }
     if(goalCAS&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl)) {
       // An interrupt/crash before this compensation leaves the provisional
       // receipt in the same atomic write as next, so startup can restore it.
@@ -705,7 +807,7 @@ function appendJournal(event, tab = {}, options = {}) {
     }
     // A grant already recorded while ingress occurred must stay consumed: no
     // page click has happened, but replaying this authorization is unsafe.
-    if(protectedGoalGrant&&journalIngressChanged(ingressAtEnqueue,tabId,protectedUrl))throw goalFenceChanged();
+    if((protectedGoalGrant||protectedRetryGrant)&&protectedIngressChanged())throw protectedRetryGrant?grantRace():goalFenceChanged();
     journalFailure = '';
     return { ok: !staleDraftSave, ...(staleDraftSave?{duplicate:true}:{}), ...(superseded?{superseded:true}:{}), sequence, sourceUrl:entry.sourceUrl, operationId:entry.operationId,
       ...(event.kind==='draft.restore_intent'?{record:{...retryDraftByChat[retryDraftUrl(entry.sourceUrl)],draft:claimedDraft.draft}}:{}) };
@@ -764,19 +866,50 @@ async function readJournal() {
     storageError: journalFailure, storage: globalThis.ChatGPTStorage?.status() || null,
     events: Object.entries(values).filter(([key]) => key.startsWith(JOURNAL_PREFIX)).map(([, value]) => value).sort((a,b) => a.sequence - b.sequence) };
 }
-async function initializeJournal(reason) {
-  const meta = (await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
-  if (!meta) {
-    await appendJournal({ kind: 'journal.started', reason, note: 'С этого момента ведётся журнал. Прошлые автоповторы восстановить нельзя.' });
-    const saved = await chrome.storage.local.get(null);
-    for (const [key, record] of Object.entries(saved)) {
-      if (/^chatgpt-handoff:\d+$/.test(key) && record?.id) {
-        await appendJournal({ kind: 'handoff.imported', operationId: record.id, sourceUrl: record.sourceUrl,
-          targetUrl: record.targetUrl, stage: record.stage, originalCreatedAt: record.createdAt,
-          text: record.text, prompt: record.prompt, asFile: record.asFile, reason: record.reason,
-          provenance: 'Сохранённое состояние до начала журнала; это не запись наблюдения отправки' }, { id: Number(key.split(':')[1]) });
+let journalInitialization=null;
+function initializeJournal(reason) {
+  if(journalInitialization)return journalInitialization;
+  const start=(async()=>{
+    let meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+    if(!meta) {
+      await appendJournal({kind:'journal.started',reason,note:'С этого момента ведётся журнал. Прошлые автоповторы восстановить нельзя.'});
+      meta=(await chrome.storage.local.get(JOURNAL_META))[JOURNAL_META];
+    }
+    let importPending=meta?.handoffImportPending===true;
+    if(meta?.handoffImportComplete!==true&&meta?.handoffImportPending===undefined&&meta?.sequence>0) {
+      // Pre-marker installations may be either a running legacy journal or
+      // the previous version interrupted during its first handoff import.
+      // Inspect only bounded journal batches: an already started journal never
+      // needs a full storage scan or renewed import of terminal handoffs.
+      const firstKey=`${JOURNAL_PREFIX}${String(1).padStart(12,'0')}`;
+      const first=(await chrome.storage.local.get(firstKey))[firstKey];
+      if(first?.kind==='journal.started') {
+        importPending=true;
+        for(let start=2;start<=meta.sequence&&importPending;start+=RETRY_MIGRATION_BATCH_SIZE) {
+          const keys=Array.from({length:Math.min(RETRY_MIGRATION_BATCH_SIZE,meta.sequence-start+1)},(_,i)=>
+            `${JOURNAL_PREFIX}${String(start+i).padStart(12,'0')}`);
+          const rows=await chrome.storage.local.get(keys);
+          if(keys.some(key=>rows[key]?.kind==='extension.started'))importPending=false;
+        }
       }
     }
-  }
-  await appendJournal({ kind: 'extension.started', reason });
+    if(meta?.handoffImportComplete!==true&&importPending) {
+      const saved=await chrome.storage.local.get(null);
+      const imported=Object.entries(saved).filter(([key,value])=>key.startsWith(JOURNAL_PREFIX)&&
+        ['handoff.imported','handoff.navigating'].includes(value?.kind))
+        .map(([,value])=>value);
+      for(const [key,record] of Object.entries(saved)) {
+        if(!/^chatgpt-handoff:\d+$/.test(key)||!record?.id)continue;
+        const tabId=Number(key.split(':')[1]);
+        if(imported.some(e=>e.operationId===record.id&&e.tabId===tabId&&e.sourceUrl===record.sourceUrl))continue;
+        await appendJournal({kind:'handoff.imported',operationId:record.id,sourceUrl:record.sourceUrl,
+          targetUrl:record.targetUrl,stage:record.stage,originalCreatedAt:record.createdAt,
+          text:record.text,prompt:record.prompt,asFile:record.asFile,reason:record.reason,
+          provenance:'Сохранённое состояние до начала журнала; это не запись наблюдения отправки'}, {id:tabId});
+      }
+    }
+    await appendJournal({kind:'extension.started',reason,handoffImportComplete:true});
+  })();
+  journalInitialization=start.finally(()=>{journalInitialization=null;});
+  return journalInitialization;
 }

@@ -50,6 +50,11 @@ async function fixture() {
  await assert.rejects(()=>f.cas(),(e:any)=>e.code==='GOAL_FENCE_CHANGED');assert.deepEqual(f.data,before,'newer cross-tab request refuses CAS without mutation');
 }
 {
+ const f=await fixture();await f.append({kind:'request.started',sourceUrl:'https://chatgpt.com/',requestId:'unknown',eventAt:123456790},{id:8,url:'https://chatgpt.com/'});
+ f.reboot();const before=structuredClone(f.data);await assert.rejects(()=>f.cas(),(e:any)=>e.code==='GOAL_FENCE_CHANGED');
+ assert.deepEqual(f.data,before,'an unidentified request before enqueue remains a possible conflict after restart');
+}
+{
  const f=await fixture(),key='chatgpt-journal:event:'+String(f.fence.requestSequence).padStart(12,'0');delete f.data[key];const before=structuredClone(f.data);
  await assert.rejects(()=>f.cas(),(e:any)=>e.code==='GOAL_FENCE_CHANGED');assert.deepEqual(f.data,before,'a missing anchor cannot commit');
 }
@@ -97,6 +102,22 @@ async function fixture() {
  const grant=f.append({kind:'send.authorized',sourceUrl:url,operationId:'op'});await deferred.observed;
  const unknown=f.append({kind:'request.started',sourceUrl:'https://chatgpt.com/',requestId:'unknown',eventAt:123456790},{id:8,url:'https://chatgpt.com/'});
  deferred.release();await assert.rejects(grant,(e:any)=>e.code==='GOAL_FENCE_CHANGED');await unknown;
+}
+{
+ const f=await fixture(),next={...f.expected,queuedResumeFence:null,phase:'preparing',operation:{id:'op',tabId:7,status:'reserved',queuedResumeFence:f.fence}};
+ await f.cas(next);f.data[goalKey]={...next,phase:'sending',operation:{...next.operation,tabId:8,status:'intent'}};
+ const moved={id:8,url};await f.append({kind:'goal.send_intent',sourceUrl:url,goalId:'goal',operationId:'op',queuedResumeFence:f.fence},moved);
+ assert.equal(f.data['chatgpt-journal:meta'].active[8].anchorTabId,7,'the request anchor remains on the original tab');
+ assert.equal((await f.append({kind:'send.authorized',sourceUrl:url,operationId:'op'},moved)).ok,true,'a moved reservation may grant when no newer request exists');
+}
+{
+ const f=await fixture(),next={...f.expected,queuedResumeFence:null,phase:'preparing',operation:{id:'op',tabId:7,status:'reserved',queuedResumeFence:f.fence}};
+ await f.cas(next);f.data[goalKey]={...next,phase:'sending',operation:{...next.operation,tabId:8,status:'intent'}};
+ const moved={id:8,url};await f.append({kind:'goal.send_intent',sourceUrl:url,goalId:'goal',operationId:'op',queuedResumeFence:f.fence},moved);
+ const deferred=f.defer(x=>x['chatgpt-journal:meta']?.active?.[8]?.consumed===true);
+ const grant=f.append({kind:'send.authorized',sourceUrl:url,operationId:'op'},moved);await deferred.observed;
+ const newer=f.append({kind:'request.started',sourceUrl:'https://chatgpt.com/c/other',requestId:'old-tab-new',eventAt:123456790},{id:7,url:'https://chatgpt.com/c/other'});
+ deferred.release();await assert.rejects(grant,(e:any)=>e.code==='GOAL_FENCE_CHANGED');await newer;
 }
 {
  const f=await fixture(),deferred=f.defer(x=>x[goalKey]?.phase==='completed',true);

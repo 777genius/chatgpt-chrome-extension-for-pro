@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createContext,runInContext} from 'node:vm';
+import {createRequire} from 'node:module';
+const policy=createRequire(import.meta.url)('../extension/goal-policy.js');
 const source=readFileSync('extension/service-worker.js','utf8');
 const code=source.slice(source.indexOf('const retryReadinessRecoveries=new Map();'),source.indexOf('const goalAckProofs=new Map();'));
 const url='https://chatgpt.com/c/retry-readiness-fixture',promptKey='/c/retry-readiness-fixture|user-1',attemptId='1000000';
@@ -31,11 +33,12 @@ async function fixture(extra:any={}) {
  const chrome={storage:{local:{get:async()=>({handoff:extra.rebound?{...handoff,...extra.handoff}:undefined})}},tabs:{get:async()=>({url:extra.url||url,status:extra.status||'complete'})},scripting:{executeScript:async(o:any)=>{
   calls++;
   if(o.func?.name==='restoreNoClickAttemptBinding')return [{result:extra.bindingRace!==true}];
-  if(o.func===inspectCompletedTurn)return [{result:native}];
+  if(o.func===inspectCompletedTurn)return [{result:structuredClone(native)}];
   if(extra.unbound&&o.func===inspectChatError&&o.args[2]==='inspect-recovery')assert.deepEqual(o.args[5],{kind:'user',url,entryId:'native-turn',userId:'user'},'recovery reuses the exact persisted native error binding');
   if(o.func===inspectChatError)return [{result:{action:extra.action||'retry',deliveryUserSentAtMs:extra.deliveryTime,...(extra.unbound?{needsIdleProof:true,editorSubmitIdle:true}:{})}}];
   if(extra.unbound&&o.func===controlChatComposer)assert.equal(o.args[0].action,'inspect-plain-retry-draft','unbound recovery never edits or submits the owner draft');
   if(o.func===controlChatComposer){
+   if(extra.unrelatedDuringProbe&&!lateGrantAdded){lateGrantAdded=true;events.push({kind:'watcher.started',operationId:'unrelated',tabId:8,sourceUrl:'https://chatgpt.com/c/unrelated-fixture',sequence:events.length+1});}
    if(extra.lateGrantDuringProbe&&!lateGrantAdded){lateGrantAdded=true;events.push({kind:'send.authorized',operationId:'op',tabId:7,sourceUrl:url,sequence:events.length+1});}
    if(extra.nativeNoLongerInactive&&!nativeChanged){nativeChanged=true;native.nativeConversationInactive=false;}
    return [{result:{ok:extra.empty!==false}}];
@@ -49,7 +52,7 @@ async function fixture(extra:any={}) {
  const fn=new Function('readRetryState','readRetryDraft','readJournal','chrome','goalController','inspectCompletedTurn','inspectChatError','controlChatComposer','appendJournal','completionCheckpointRead','inspectBoundNativeTurn','handoffKey','proveHandoffRetryIdentity','proveLegacyNoClickRoute','latestRequestReceipt','ChatGPTGoalPolicy','readRequestReceipt',
   code+';return recoverNoClickRetry;')(
   async()=>structuredClone(state),async()=>extra.draftRecord|| (extra.draft?{draft:'owner'}:null),async()=>({ok:true,storageError:'',meta:{sequence:events.length},events}),chrome,
-  {get:async()=>extra.goal||null,retry:async(e:any)=>{goalCalls++;goalPrompt=e.promptKey;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url:extra.rebound?'https://chatgpt.com/':url,promptKey:extra.rebound||extra.unbound?'':promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false,...extra.checkpoint}),async()=>native,()=> 'handoff',prove,proveLegacy,async()=>receipt,{canonical:(u:string)=>u},async(_tabId:number,query:any)=>{assert.equal(query.requestId,'old-request');return extra.missingReceipt?null:{requestId:'old-request',startedAt:500000,operationId:'old-operation',url:'',submittedUserId:extra.sameCompletedUser?'user':'old-native-user',tabId:7};});
+  {get:async()=>extra.goal||null,retry:async(e:any)=>{goalCalls++;goalPrompt=e.promptKey;}},inspectCompletedTurn,inspectChatError,controlChatComposer,appendJournal,async()=>({state:'active',url:extra.rebound?'https://chatgpt.com/':url,promptKey:extra.rebound||extra.unbound?'':promptKey,startedAt:1000000,requestId:'request',requestFailedAt:extra.noTransportFailure?undefined:1000050,httpCompleted:extra.httpCompleted!==false,...extra.checkpoint}),async()=>structuredClone(native),()=> 'handoff',prove,proveLegacy,async()=>receipt,policy,async(_tabId:number,query:any)=>{assert.equal(query.requestId,'old-request');return extra.missingReceipt?null:{requestId:'old-request',startedAt:500000,operationId:'old-operation',url:'',submittedUserId:extra.sameCompletedUser?'user':'old-native-user',tabId:7};});
  const result=await fn(7,url);return {result,get writes(){return writes;},calls,goalCalls,goalPrompt,fn,events};
 }
 const safe=await fixture();assert.equal(safe.writes,1);assert.equal(safe.result.blocked,false);
@@ -174,3 +177,9 @@ for(const extra of [{lateGrantDuringProbe:true},{nativeNoLongerInactive:true}])
   'bound completed retry rechecks grant order and inactivity after page probes: '+JSON.stringify(extra));
 assert.equal((await fixture({completedProof:true,noTransportFailure:true,native:{generating:false,nativeConversationInactive:true}})).writes,1,
  'an exact HTTP-completed checkpoint plus native inactivity remains a valid bound terminal proof');
+
+{
+ const result=await fixture({unbound:true,draftRecord:carry,unrelatedDuringProbe:true});
+ assert.equal(result.writes,1,'unrelated journal growth preserves the exact no-click request proof');
+ assert.equal(result.events.at(-1).legacyNoClick.expectedSequence,result.events.length-1,'atomic consumer receives the last verified head');
+}

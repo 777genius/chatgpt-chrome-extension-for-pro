@@ -15,7 +15,7 @@ document.addEventListener=((type:string,fn:(event:IntentEvent)=>void,...options:
 }) as typeof document.addEventListener;
 const durable:Record<string,any>={};
 let now=1000000;let revision=1;const sent:Message[]=[],listeners:Array<(message:Message)=>void>=[];
-const location={href:'https://chatgpt.com/c/example',pathname:'/c/example'};
+const location={href:'https://chatgpt.com/c/example',pathname:'/c/example',origin:'https://chatgpt.com'};
 const world=createContext({document,window,location,URL,AbortController,crypto:globalThis.crypto,
  Event:window.Event,Node:window.Node,Element:window.Element,MutationObserver:window.MutationObserver,performance,
  Date:class extends Date{static now(){return now;}},
@@ -69,12 +69,36 @@ assert.equal(resets().length,4,'an overlapping newer POST does not discard the o
 assert.equal(resets()[3].requestId,delayed.requestId,'delayed ACK carries its captured request ID rather than the current global ID');
 await flush();
 for(const fn of listeners)fn({type:'CHATGPT_STATUS_CHANGED',url:location.href,revision:++revision,status:{kind:'loading',eventAt:now,receipt:world.__chatgptNotifierRequestReceipt}});
+fire('click',{isTrusted:true,target:button as unknown as Element});
+const replay=start(++now,false),beforeReplay=resets().length;
+for(const fn of listeners)fn({...replay,replayBinding:{targetUrl:'https://chatgpt.com/c/different',startedAt:replay.startedAt,requestId:replay.requestId}});
+assert.equal(resets().length,beforeReplay,'a queued START cannot acknowledge a manual send after an unrelated route change');
+for(const fn of listeners)fn({...replay,replayBinding:{targetUrl:location.href,startedAt:replay.startedAt,requestId:'different-request'}});
+assert.equal(resets().length,beforeReplay,'a queued START cannot acknowledge another request');
+for(const fn of listeners)fn({...replay,replayBinding:{targetUrl:location.href,startedAt:replay.startedAt,requestId:replay.requestId}});
+assert.equal(resets().length,beforeReplay+1,'a matching queued START can acknowledge the exact manual request');
+await flush();
 const stop=document.createElement('button');stop.setAttribute('data-testid','stop-button');document.body.append(stop);
 fire('click',{isTrusted:false,target:stop as unknown as Element});
 assert.equal(sent.filter(m=>m.type==='CHATGPT_GENERATION_STOPPED').length,0,'an automatic recovery stop must not cancel the loading indicator');
 fire('click',{isTrusted:true,target:stop as unknown as Element});
 assert.equal(sent.filter(m=>m.type==='CHATGPT_GENERATION_STOPPED').length,1,'manual stop requests cancellation of this exact loading request');
 assert.equal(sent.find(m=>m.type==='CHATGPT_GENERATION_STOPPED')!.requestId,world.__chatgptNotifierRequestId,'STOP captures the exact current request ID');
+fire('click',{isTrusted:true,target:button as unknown as Element});
+const stoppedReplay=start(++now,false);fire('click',{isTrusted:true,target:stop as unknown as Element});
+const beforeStoppedReplay=resets().length;
+for(const fn of listeners)fn({...stoppedReplay,replayBinding:{targetUrl:location.href,startedAt:stoppedReplay.startedAt,requestId:stoppedReplay.requestId}});
+assert.equal(resets().length,beforeStoppedReplay,'a queued START cannot acknowledge the same request after trusted Stop');
+fire('click',{isTrusted:true,target:button as unknown as Element});
+const newerReplay=start(++now,false);
+for(const fn of listeners)fn({...newerReplay,replayBinding:{targetUrl:location.href,startedAt:newerReplay.startedAt,requestId:newerReplay.requestId}});
+assert.equal(resets().length,beforeStoppedReplay+1,'a newer request is not hidden by the stopped-request fence');
+location.href='https://chatgpt.com/';location.pathname='/';
+const rootReplay=start(++now,false);fire('click',{isTrusted:true,target:stop as unknown as Element});
+location.href='https://chatgpt.com/c/allocated';location.pathname='/c/allocated';
+const rootResponses:Message[]=[];
+for(const fn of listeners)(fn as any)({...rootReplay,replayBinding:{sourceUrl:'https://chatgpt.com/',targetUrl:location.href,startedAt:rootReplay.startedAt,requestId:rootReplay.requestId}},{},(response:Message)=>rootResponses.push(response));
+assert.ok(rootResponses.some(response=>response.ok===false),'a trusted Stop on root fences the same request after chat allocation');
 assert.equal(editor.textContent,'Private draft');
 (world.__chatgptNotifierDispose as ()=>void)();document.addEventListener=original;
 console.log('Manual status reset: trusted send plus actual request, synthetic/disabled/newline/stale/route guards passed.');

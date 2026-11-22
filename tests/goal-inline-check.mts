@@ -336,6 +336,26 @@ for(const cancellation of ['disarm','stop']) {
   f.instance.dispose();
 }
 
+// Leaving an Arm's chat retires its pending UI authority. A trusted send
+// during Stop in another chat must never borrow that earlier Arm or hide Stop.
+for(const order of ['old-arm-first','stop-first']) {
+  const f=fixture();await tick();const armAck=deferred<Result>();f.respond(()=>armAck.promise);f.click(f.toggle());
+  const oldArm:Composer={id:'old-chat-arm',url:chat,phase:'armed',config:{rules:'',maxContinuations:30,maxMinutes:1440}};
+  f.setUrl(other);f.setComposer(null);f.setRecord(goal(other));f.respond(null);await f.instance.refresh();
+  const stopAck=deferred<Result>();
+  f.respond(value=>value.action==='stop'?stopAck.promise:value.action==='intent'?{ok:false,error:'Synthetic wrong-chat intent'}:{ok:true,url:other,record:goal(other)});
+  f.click(f.toggle());assert.equal(f.calls.at(-1)!.action,'stop');f.nativeSend();
+  const draft=f.draft();
+  const finishArm=async()=>{armAck.resolve({ok:true,url:chat,composer:oldArm});await tick();};
+  const finishStop=async()=>{stopAck.resolve({ok:true,url:other,composer:null,record:goal(other,'stopped')});await tick();};
+  if(order==='old-arm-first'){await finishArm();await finishStop();}else{await finishStop();await finishArm();}
+  assert.equal(f.calls.filter(value=>value.action==='intent').length,0,'a stale Arm cannot capture the new chat send: '+order);
+  assert.equal(f.toggle().getAttribute('aria-checked'),'false','the new chat Stop acknowledgement remains effective: '+order);
+  assert.equal(f.toggle().disabled,false,'the old Arm cannot leave the new chat busy');
+  f.details().click();assert.match(f.panel().textContent!,/Stopped/);
+  assert.equal(f.draft(),draft);assert.equal(f.state.nativeSends,0);f.instance.dispose();
+}
+
 // Allocation can occur while the intent acknowledgement is in flight. A real
 // cross-chat navigation invalidates callbacks and cancels pending confirmation.
 {

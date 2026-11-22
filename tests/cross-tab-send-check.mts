@@ -55,7 +55,12 @@ function message(tabId:number,value:Value) {
 function send(tabId:number,operationId:string,extra:Value={}) {
   return message(tabId,{type:'CHATGPT_COMPOSER_CONTROL',options:{action:'send',url:pages.get(tabId)!.url,text:'доделай е2е',operationId,...extra}});
 }
-const intent=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>append(tabId,'retry.send_intent',id,{promptKey,retryUserId:'fixture-user:'+promptKey});
+const intent=async(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>{
+ const source=pages.get(tabId)!.url.replace(/\/?(?:\?.*)?$/,'');
+ if(storage['chatgpt-journal:meta']?.retryPreparingByChat?.[source]?.operationId!==id)
+  await append(tabId,'retry.planned',id,{promptKey,retryUserId:'fixture-user:'+promptKey});
+ return append(tabId,'retry.send_intent',id,{promptKey,retryUserId:'fixture-user:'+promptKey});
+};
 const plan=(tabId:number,id:string,promptKey='/c/shared-source|user-turn-0')=>message(tabId,{type:'CHATGPT_LOG_EVENT',event:{kind:'retry.planned',operationId:id,sourceUrl:pages.get(tabId)!.url,promptKey}});
 
 addPage(7);addPage(8,sourceUrl+'/?model=fixture');boot();
